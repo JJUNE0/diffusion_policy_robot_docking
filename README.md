@@ -135,8 +135,8 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 
 ```bash
 # Create and activate conda environment
-conda create -n cleandiffuser python=3.11 -y
-conda activate cleandiffuser
+conda create -n diffusion_policy python=3.11 -y
+conda activate diffusion_policy
 
 # Install PyTorch with CUDA support
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121

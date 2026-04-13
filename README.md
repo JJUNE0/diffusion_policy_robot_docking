@@ -255,5 +255,5 @@ Both scripts output trajectory comparison plots and stream predictions via ZMQ f
 This project builds on the following excellent work:
 
 - **[CleanDiffuser](https://github.com/CleanDiffuserTeam/CleanDiffuser)** -- A clean and modular diffusion model library for decision-making
-- **[DINOv2](https://github.com/facebookresearch/dinov2)** -- Self-supervised vision transformer for feature extraction
+- **[DINOv2](https://github.com/facebookresearch/dinov3)** -- Self-supervised vision transformer for feature extraction
 - **[Diffusion Policy](https://diffusion-policy.cs.columbia.edu/)** -- Visuomotor policy learning with diffusion models

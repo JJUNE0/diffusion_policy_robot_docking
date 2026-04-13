@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Data & Checkpoints
+*.h5
+*.pt
+*.pth
+!dino/master_vector.pt
+
+# Hydra outputs
+outputs/
+multirun/
+
+# Training results
+results/
+
+# IDE & System
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# OMC
+.omc/
+
+# Claude
+.claude/

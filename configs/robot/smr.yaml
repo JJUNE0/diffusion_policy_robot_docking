@@ -1,0 +1,77 @@
+# ==========================================
+# 1. Project & System Setup
+# ==========================================
+experiment_name: velocity_vision_velocity
+seed: 0
+device: cuda:0
+
+# ==========================================
+# 2. Dataset & DataLoader
+# ==========================================
+train_data_path : ${hydra:runtime.cwd}/dataset/validation_dataset1.h5
+horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
+vision_stride: 6
+obs_horizon: 30
+batch_size: 16
+num_workers: 4
+
+# state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
+state_dim: 2            # encoder(2)
+velocity_dim: 2
+image_width: 320
+image_height: 240
+
+# ==========================================
+# 3. Network Architecture (DiT & Condition)
+# ==========================================
+d_model: 384           # DiT와 Condition 네트워크의 통일된 은닉 차원
+n_heads: 6             # Attention 헤드 수 (384 // 64 = 6)
+depth: 12              # DiT 블록의 깊이
+dropout: 0.1           # Classifier-Free Guidance(CFG)를 위한 조건 마스킹 확률
+
+# ==========================================
+# 4. Diffusion Process
+# ==========================================
+ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
+
+# ==========================================
+# 5. Training
+# ==========================================
+diffusion_gradient_steps: 400001
+log_interval: 1
+save_interval: 10000
+resume_path: null
+
+learning_rate: 1e-4
+weight_decay: 1e-5
+
+# ==========================================
+# 6. Inference
+# ==========================================
+diffusion_ckpt: latest
+use_ema: True
+solver : ode_dpmsolver++_2M
+w_cfg : 1                      # guidance weight
+inference_sampling_steps: 100  # DPM-Solver++ 2M을 사용하기 위한 최적의 스텝 수 (10~20)
+num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여러개 궤적 비교
+
+checkpoint_dir  : ${hydra:runtime.cwd}/results/encoder_vision/2026-03-03_17-44-33
+checkpoint_step : 160000
+eval_data_path  : ${hydra:runtime.cwd}/dataset/validation_dataset1.h5
+
+# ==========================================
+# 7. Hydra Setup
+# ==========================================
+hydra:
+  job:
+    chdir: true  # false에서 true로 변경 추천: 실행 시 작업 디렉토리를 자동 생성된 폴더로 옮겨줍니다.
+
+  # 단일 실행 시 저장 경로 (python inference.py 실행 시)
+  run:
+    dir: outputs/
+
+  # Multi-run 실행 시 저장 경로 (python inference.py -m 실행 시)
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}-3
+    # 각 데이터셋 결과가 들어갈 하위 폴더 이름 규칙
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}

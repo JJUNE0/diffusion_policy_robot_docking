@@ -38,7 +38,7 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
                                      │              │              │
                               ┌──────▼──────┐┌──────▼──────┐┌─────▼──────┐
                               │  Frozen     ││  Frozen     ││   MLP +    │
-                              │  DINOv2     ││  DINOv2     ││  Pos.Enc.  │
+                              │  DINO-v3    ││  DINO-v3    ││  Pos.Enc.  │
                               │  ViT-B/16   ││  ViT-B/16   ││            │
                               └──────┬──────┘└──────┬──────┘└─────┬──────┘
                               [5, 196, 768]  [5, 196, 768]    [30, 384]
@@ -46,7 +46,7 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
                               ┌──────▼──────┐┌──────▼──────┐       │
                               │  Perceiver  ││  Perceiver  │       │
                               │  Resampler  ││  Resampler  │       │
-                              │  (16 latents)│  (16 latents)│      │
+                              │ (16 latents)│| (16 latents)│       │
                               └──────┬──────┘└──────┬──────┘       │
                                 [5, 16, 384]  [5, 16, 384]         │
                                      │              │              │
@@ -63,7 +63,7 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
                               │           DiT1d Denoiser                  │
                               │    (12 blocks, d=384, 6 heads)            │
                               │                                           │
-                              │   x_T ──► Denoise ──► ... ──► x_0        │
+                              │   x_T ──► Denoise ──► ... ──► x_0         │
                               │   (noise)              (trajectory)       │
                               └─────────────────────┬─────────────────────┘
                                                     │

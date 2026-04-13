@@ -17,7 +17,7 @@ from cleandiffuser.diffusion import ContinuousDiffusionSDE
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from cleandiffuser.nn_diffusion import DiT1d
 
-from scripts.dataset.docking_dataset import DockingDataset
+from dataset.docking_dataset import DockingDataset
 from dino.dino_detector import DinoBatchDetector
 
 

@@ -8,7 +8,7 @@ device: cuda:0
 # ==========================================
 # 2. Dataset & DataLoader
 # ==========================================
-train_data_path : ${hydra:runtime.cwd}/dataset/validation_dataset1.h5
+train_data_path : ${hydra:runtime.cwd}/../dataset/validation_dataset1.h5
 horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
@@ -57,7 +57,7 @@ num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여�
 
 checkpoint_dir  : ${hydra:runtime.cwd}/results/encoder_vision/2026-03-03_17-44-33
 checkpoint_step : 160000
-eval_data_path  : ${hydra:runtime.cwd}/dataset/validation_dataset1.h5
+eval_data_path  : ${hydra:runtime.cwd}/../dataset/validation_dataset1.h5
 
 # ==========================================
 # 7. Hydra Setup

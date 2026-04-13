@@ -43,12 +43,12 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
                               └──────┬──────┘└──────┬──────┘└─────┬──────┘
                               [5, 196, 768]  [5, 196, 768]    [30, 384]
                                      │              │              │
-                              ┌──────▼──────┐┌──────▼──────┐      │
-                              │  Perceiver  ││  Perceiver  │      │
-                              │  Resampler  ││  Resampler  │      │
+                              ┌──────▼──────┐┌──────▼──────┐       │
+                              │  Perceiver  ││  Perceiver  │       │
+                              │  Resampler  ││  Resampler  │       │
                               │  (16 latents)│  (16 latents)│      │
-                              └──────┬──────┘└──────┬──────┘      │
-                                [5, 16, 384]  [5, 16, 384]        │
+                              └──────┬──────┘└──────┬──────┘       │
+                                [5, 16, 384]  [5, 16, 384]         │
                                      │              │              │
                                      └──────┬───────┘              │
                                             │                      │

@@ -42,11 +42,11 @@ class StrictSyncRoboticsDataset:
         """
         candidate_parents = [
             # os.path.join(self.root_dir, "episode"),
-            # os.path.join(self.root_dir, "episode_postech"),
+            os.path.join(self.root_dir, "dock"),
             # os.path.join(self.root_dir, "valid"),
             # os.path.join(self.root_dir, "valid2"),
             # os.path.join(self.root_dir, "valid3"),
-            os.path.join(self.root_dir, "validation"),
+            # os.path.join(self.root_dir, "validation"),
         ]
 
         collected = []

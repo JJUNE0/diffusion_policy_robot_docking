@@ -30,4 +30,5 @@ results/
 # Claude
 .claude/
 
-# data
+# report
+*.pdf

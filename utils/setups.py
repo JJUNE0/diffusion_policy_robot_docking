@@ -83,6 +83,7 @@ def model_setups(args):
         num_image_latents=args.get("num_image_latents", 16),
         velocity_dim=args.get("velocity_dim", 2),
         velocity_dropout_prob=args.get("velocity_dropout_prob", 0.0),
+        vision_backend=args.get("vision_backend", "raw_cnn"),
     ).to(args.device)
 
     nn_diffusion_model = DiT1d(

@@ -18,7 +18,6 @@ from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionCondi
 from cleandiffuser.nn_diffusion import DiT1d
 
 from dataset.docking_dataset import DockingDataset
-from dino.dino_detector import DinoBatchDetector
 
 
 def denormalize(norm_action, act_scale, act_min):
@@ -83,6 +82,7 @@ def main(args):
     vision_h = len(range(0, obs_h, vision_stride))
     dt = float(args.get("dt", 0.0333))
 
+    vision_backend = args.get("vision_backend", "raw_cnn")
     nn_condition = SensorFusionConditionNetwork(
         state_dim=args.state_dim,
         obs_horizon=obs_h,
@@ -94,6 +94,7 @@ def main(args):
         num_image_latents=args.get("num_image_latents", 16),
         velocity_dim=args.get("velocity_dim", 2),
         velocity_dropout_prob=args.get("velocity_dropout_prob", 0.0),
+        vision_backend=vision_backend,
     ).to(device)
 
     nn_diffusion_model = DiT1d(
@@ -110,7 +111,11 @@ def main(args):
         device=device,
     )
 
-    detector = DinoBatchDetector(device=device)
+    detector = None
+    if vision_backend == "dino":
+        from dino.dino_detector import DinoBatchDetector
+
+        detector = DinoBatchDetector(device=device)
 
     checkpoint_path = os.path.join(original_cwd, f"checkpoint_step_{args.checkpoint_step}.pt")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -164,27 +169,38 @@ def main(args):
         all_gt_w.append(float(gt_first[0, 1]))
 
         B, T_vis, C, H, W = image_room1.shape
-        image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
-        image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
 
-        with torch.no_grad():
-            dino_feat1, sim_map1, _ = detector.get_heatmap(image_room1_flat)
-            dino_feat2, sim_map2, _ = detector.get_heatmap(image_room2_flat)
+        if vision_backend == "dino":
+            image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
+            image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
+            with torch.no_grad():
+                dino_feat1, sim_map1, _ = detector.get_heatmap(image_room1_flat)
+                dino_feat2, sim_map2, _ = detector.get_heatmap(image_room2_flat)
+            dino_feat1 = dino_feat1.view(B, T_vis, 196, 768)
+            dino_feat2 = dino_feat2.view(B, T_vis, 196, 768)
+            context = {
+                "dino_feat1": dino_feat1.repeat(n_samples, 1, 1, 1),
+                "dino_feat2": dino_feat2.repeat(n_samples, 1, 1, 1),
+                "velocity": velocity.repeat(n_samples, 1, 1),
+            }
+        else:
+            # raw_cnn: condition network encodes RGB inside forward()
+            sim_map1 = sim_map2 = None
+            context = {
+                "raw_image1": image_room1.repeat(n_samples, 1, 1, 1, 1),
+                "raw_image2": image_room2.repeat(n_samples, 1, 1, 1, 1),
+                "velocity": velocity.repeat(n_samples, 1, 1),
+            }
 
-        dino_feat1 = dino_feat1.view(B, T_vis, 196, 768)
-        dino_feat2 = dino_feat2.view(B, T_vis, 196, 768)
-
+        h, w_ = int(args.image_height), int(args.image_width)
+        if sim_map1 is not None and sim_map2 is not None:
+            sm1, sm2 = sim_map1[0].cpu().numpy(), sim_map2[0].cpu().numpy()
+        else:
+            sm1, sm2 = np.zeros((h, w_), dtype=np.float32), np.zeros((h, w_), dtype=np.float32)
         socket_viz.send_pyobj((
             image_room1[0, -1].cpu().numpy(),
             image_room2[0, -1].cpu().numpy(),
-            sim_map1[0].cpu().numpy(),
-            sim_map2[0].cpu().numpy()))
-
-        context = {
-            "dino_feat1": dino_feat1.repeat(n_samples, 1, 1, 1),
-            "dino_feat2": dino_feat2.repeat(n_samples, 1, 1, 1),
-            "velocity": velocity.repeat(n_samples, 1, 1),
-        }
+            sm1, sm2))
 
         with torch.no_grad():
             prior = torch.randn(n_samples, horizon, 2, device=device)

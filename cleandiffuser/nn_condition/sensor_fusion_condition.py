@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from cleandiffuser.nn_condition import BaseNNCondition
 from cleandiffuser.utils import SinusoidalEmbedding, Transformer
+from vision.raw_patch_encoder import RawPatchEncoder
 
 
 class PerceiverResampler(nn.Module):
@@ -50,10 +51,15 @@ class SensorFusionConditionNetwork(BaseNNCondition):
     """
     Two-camera vision + velocity condition encoder.
 
-    Expected condition dict:
+    vision_backend = "dino" — condition dict:
         - dino_feat1: [B, Tv, 196, 768]
         - dino_feat2: [B, Tv, 196, 768]
         - velocity:   [B, Tm, 2]   = normalized [v, w]
+
+    vision_backend = "raw_cnn" — condition dict (RGB 0~1, same as dataset):
+        - raw_image1: [B, Tv, 3, H, W]
+        - raw_image2: [B, Tv, 3, H, W]
+        - velocity:   [B, Tm, 2]
 
     where
         - Tv = vision_horizon (default: 5)
@@ -75,6 +81,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         num_image_latents: int = 16,
         velocity_dim: int = 2,
         velocity_dropout_prob: float = 0.2,
+        vision_backend: str = "raw_cnn",
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -85,6 +92,15 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.num_image_latents = num_image_latents
         self.velocity_dim = velocity_dim
         self.velocity_dropout_prob = velocity_dropout_prob
+        if vision_backend not in ("dino", "raw_cnn"):
+            raise ValueError(f"vision_backend must be 'dino' or 'raw_cnn', got {vision_backend!r}")
+        self.vision_backend = vision_backend
+
+        if self.vision_backend == "raw_cnn":
+            # Shared encoder for both camera streams.
+            self.raw_patch_encoder = RawPatchEncoder(in_ch=3, out_dim=768, spatial=14)
+        else:
+            self.raw_patch_encoder = None
 
         # Vision branches: one branch per room.
         self.vision_proj = nn.Linear(768, d_model)
@@ -133,7 +149,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
     ) -> torch.Tensor:
         """
         Args:
-            dino_feat: [B, Tv, 196, 768]
+            patch_feat: [B, Tv, 196, 768]
 
         Returns:
             [B, Tv * num_image_latents, d_model]
@@ -141,12 +157,12 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         b, t_seq, n_patch, feat_dim = dino_feat.shape
         if t_seq != self.vision_horizon:
             raise ValueError(
-                f"Expected vision_horizon={self.vision_horizon}, but got dino_feat with T={t_seq}."
+                f"Expected vision_horizon={self.vision_horizon}, but got patch features with T={t_seq}."
             )
         if n_patch != 196:
-            raise ValueError(f"Expected 196 DINO patches, but got {n_patch}.")
+            raise ValueError(f"Expected 196 spatial patches, but got {n_patch}.")
         if feat_dim != 768:
-            raise ValueError(f"Expected DINO feature dim=768, but got {feat_dim}.")
+            raise ValueError(f"Expected vision feature dim=768, but got {feat_dim}.")
 
         feat_flat = dino_feat.reshape(b * t_seq, n_patch, feat_dim).float()
         patch_tokens = self.vision_proj(feat_flat)
@@ -186,15 +202,33 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         vel_tokens = self._apply_branch_dropout(vel_tokens, self.velocity_dropout_prob)
         return vel_tokens
 
+    def _encode_raw_to_patches(
+        self, raw: torch.Tensor, encoder: RawPatchEncoder
+    ) -> torch.Tensor:
+        """raw: [B, Tv, 3, H, W] -> [B, Tv, 196, 768]"""
+        b, t, c, h, w = raw.shape
+        flat = raw.reshape(b * t, c, h, w)
+        patches = encoder(flat)
+        return patches.view(b, t, 196, 768)
+
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        required_keys = ("dino_feat1", "dino_feat2", "velocity")
+        if self.vision_backend == "raw_cnn":
+            required_keys = ("raw_image1", "raw_image2", "velocity")
+        else:
+            required_keys = ("dino_feat1", "dino_feat2", "velocity")
         missing_keys = [k for k in required_keys if k not in condition]
         if missing_keys:
             raise KeyError(f"Missing condition keys: {missing_keys}")
 
-        dino_feat1 = condition["dino_feat1"]
-        dino_feat2 = condition["dino_feat2"]
         velocity = condition["velocity"]
+
+        if self.vision_backend == "raw_cnn":
+            assert self.raw_patch_encoder is not None
+            dino_feat1 = self._encode_raw_to_patches(condition["raw_image1"], self.raw_patch_encoder)
+            dino_feat2 = self._encode_raw_to_patches(condition["raw_image2"], self.raw_patch_encoder)
+        else:
+            dino_feat1 = condition["dino_feat1"]
+            dino_feat2 = condition["dino_feat2"]
 
         b = dino_feat1.shape[0]
         device = dino_feat1.device

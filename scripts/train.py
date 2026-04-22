@@ -12,8 +12,19 @@ import hydra
 import torch
 
 from utils.setups import logger_setups, model_setups
-from dino.dino_detector import DinoBatchDetector
 from cleandiffuser.utils import loop_dataloader, set_seed
+
+# Lazy singleton for DINO when vision_backend=dino
+_dino_detector_cache = None
+
+
+def _get_dino_detector(device: torch.device):
+    global _dino_detector_cache
+    if _dino_detector_cache is None:
+        from dino.dino_detector import DinoBatchDetector
+
+        _dino_detector_cache = DinoBatchDetector(device=device)
+    return _dino_detector_cache
 
 
 def _resolve_resume_checkpoint(resume_path: str | None) -> str | None:
@@ -115,11 +126,9 @@ def main(args):
 
     nn_diffusion.train()
 
-    # Frozen DINO feature extractor used only to build condition inputs.
-    dino_detector = DinoBatchDetector(device=device)
-
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)
+    vision_backend = args.get("vision_backend", "raw_cnn")
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= args.diffusion_gradient_steps:
@@ -140,18 +149,26 @@ def main(args):
         velocity = obs_dict["velocity"].to(device, non_blocking=True)
 
         B, T_vis, C, H, W = image_room1.shape
-        image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
-        image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
 
-        with torch.no_grad():
-            dino_feat1, _, _ = dino_detector.get_heatmap(image_room1_flat)
-            dino_feat2, _, _ = dino_detector.get_heatmap(image_room2_flat)
-
-        context = {
-            "dino_feat1": dino_feat1.view(B, T_vis, 196, 768),
-            "dino_feat2": dino_feat2.view(B, T_vis, 196, 768),
-            "velocity": velocity,
-        }
+        if vision_backend == "dino":
+            dino_detector = _get_dino_detector(device)
+            image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
+            image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
+            with torch.no_grad():
+                dino_feat1, _, _ = dino_detector.get_heatmap(image_room1_flat)
+                dino_feat2, _, _ = dino_detector.get_heatmap(image_room2_flat)
+            context = {
+                "dino_feat1": dino_feat1.view(B, T_vis, 196, 768),
+                "dino_feat2": dino_feat2.view(B, T_vis, 196, 768),
+                "velocity": velocity,
+            }
+        else:
+            # raw_cnn: pass RGB (0~1) into condition net; learned encoder lives in SensorFusionConditionNetwork
+            context = {
+                "raw_image1": image_room1,
+                "raw_image2": image_room2,
+                "velocity": velocity,
+            }
 
         diff_log = nn_diffusion.update(x0=action, condition=context)
         lr_schedulers.step()
@@ -160,8 +177,12 @@ def main(args):
             print(f"Action target shape: {action.shape}")
             print(f"Room1 image sparse history shape: {image_room1.shape}")
             print(f"Room2 image sparse history shape: {image_room2.shape}")
-            print(f"DINO room1 feature shape: {dino_feat1.shape}")
-            print(f"DINO room2 feature shape: {dino_feat2.shape}")
+            print(f"vision_backend: {vision_backend}")
+            if vision_backend == "dino":
+                print(f"DINO room1 feature shape: {context['dino_feat1'].shape}")
+                print(f"DINO room2 feature shape: {context['dino_feat2'].shape}")
+            else:
+                print("Using raw CNN patch encoder inside condition network (no DINO forward in train step).")
             print(f"Velocity history shape: {velocity.shape}")
 
         if n_gradient_step % args.get("log_interval", 100) == 0:

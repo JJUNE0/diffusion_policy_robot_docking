@@ -35,7 +35,11 @@ def calc_sync_stats(img_ts_norm, enc_ts_norm):
     delays_ms = np.array(delays) * 1000
     return hz, jitter_ms, np.mean(delays_ms), np.max(np.abs(delays_ms)), np.std(delays_ms)
 
-def generate_ultimate_report(base_dir="."):
+def generate_ultimate_report(
+    base_dir=".",
+    output_pdf="total_timeline_report.pdf",
+    bad_txt_path="bad_episodes_list.txt",
+):
     print("==================================================")
     print(" 🕵️‍♂️ Ultimate Time Sync Checker & Bad Data Finder")
     print("==================================================\n")
@@ -48,7 +52,6 @@ def generate_ultimate_report(base_dir="."):
         print(f"❌ '{search_path}' 경로에서 에피소드를 찾을 수 없습니다.")
         return
 
-    output_pdf = "total_timeline_report.pdf"
     bad_episodes = [] # 불량 폴더 경로를 저장할 리스트
     
     print(f"총 {len(episode_dirs)}개의 에피소드 분석을 시작합니다...\n")
@@ -173,7 +176,6 @@ def generate_ultimate_report(base_dir="."):
     print(f" 🎉 모든 폴더 탐색 완료! 종합 PDF 확인: {output_pdf}")
     print("==================================================")
     
-    bad_txt_path = "bad_episodes_list.txt"
     with open(bad_txt_path, "w") as f:
         if bad_episodes:
             print(f"🚨 총 {len(bad_episodes)}개의 불량 에피소드(사용 불가 데이터)가 발견되었습니다!")
@@ -188,6 +190,9 @@ def generate_ultimate_report(base_dir="."):
             f.write("불량 에피소드 없음.\n")
 
 if __name__ == "__main__":
-    # 데이터가 모여있는 최상위 루트 폴더 경로를 지정하세요.
-    ROOT_DATA_DIR = "." 
-    generate_ultimate_report(ROOT_DATA_DIR)
+    import sys
+
+    ROOT_DATA_DIR = sys.argv[1] if len(sys.argv) > 1 else "."
+    out_pdf = sys.argv[2] if len(sys.argv) > 2 else "total_timeline_report.pdf"
+    out_bad = sys.argv[3] if len(sys.argv) > 3 else "bad_episodes_list.txt"
+    generate_ultimate_report(ROOT_DATA_DIR, output_pdf=out_pdf, bad_txt_path=out_bad)

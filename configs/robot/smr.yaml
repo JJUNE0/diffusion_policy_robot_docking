@@ -26,6 +26,12 @@ image_height: 240
 # Vision: "raw_cnn" = trainable CNN on RGB (no DINO / HuggingFace). "dino" = pre-extracted 768-dim patch tokens.
 vision_backend: raw_cnn
 
+# Lidar BEV occupancy map (HDF5 must be built with `preprocessing.py --use_lidar`).
+use_lidar: true
+lidar_channels: 2          # 1: occupancy only, 2: [occupancy, log-density]
+num_lidar_latents: 16      # PerceiverResampler latent count for the lidar branch
+lidar_dropout_prob: 0.0    # branch-level dropout during training (CFG-style)
+
 # ==========================================
 # 3. Network Architecture (DiT & Condition)
 # ==========================================

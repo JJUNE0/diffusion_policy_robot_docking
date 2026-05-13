@@ -72,6 +72,19 @@ def model_setups(args):
         drop_last=True,
     )
 
+    use_lidar = bool(args.get("use_lidar", False))
+    if use_lidar and dataset.z_lidar is None:
+        raise ValueError(
+            "use_lidar=True 인데 HDF5에 'lidar_map'이 없습니다. "
+            "preprocessing.py를 --use_lidar 옵션으로 다시 실행하세요."
+        )
+
+    lidar_in_ch = (
+        int(dataset.lidar_meta["channels"])
+        if (use_lidar and dataset.lidar_meta is not None)
+        else int(args.get("lidar_channels", 2))
+    )
+
     nn_condition = SensorFusionConditionNetwork(
         state_dim=args.state_dim,
         obs_horizon=obs_horizon,
@@ -84,6 +97,10 @@ def model_setups(args):
         velocity_dim=args.get("velocity_dim", 2),
         velocity_dropout_prob=args.get("velocity_dropout_prob", 0.0),
         vision_backend=args.get("vision_backend", "raw_cnn"),
+        use_lidar=use_lidar,
+        lidar_in_ch=lidar_in_ch,
+        num_lidar_latents=args.get("num_lidar_latents", 16),
+        lidar_dropout_prob=args.get("lidar_dropout_prob", 0.0),
     ).to(args.device)
 
     nn_diffusion_model = DiT1d(

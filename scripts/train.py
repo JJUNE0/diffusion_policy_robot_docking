@@ -129,6 +129,7 @@ def main(args):
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)
     vision_backend = args.get("vision_backend", "raw_cnn")
+    use_lidar = bool(args.get("use_lidar", False))
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= args.diffusion_gradient_steps:
@@ -170,6 +171,15 @@ def main(args):
                 "velocity": velocity,
             }
 
+        if use_lidar:
+            if "lidar_map" not in obs_dict:
+                raise KeyError(
+                    "use_lidar=True 인데 batch에 'lidar_map'이 없습니다. "
+                    "preprocessing.py를 --use_lidar 옵션으로 실행했는지 확인하세요."
+                )
+            lidar_map = obs_dict["lidar_map"][:, ::vision_stride].to(device, non_blocking=True)
+            context["lidar_map"] = lidar_map
+
         diff_log = nn_diffusion.update(x0=action, condition=context)
         lr_schedulers.step()
 
@@ -184,6 +194,8 @@ def main(args):
             else:
                 print("Using raw CNN patch encoder inside condition network (no DINO forward in train step).")
             print(f"Velocity history shape: {velocity.shape}")
+            if use_lidar:
+                print(f"Lidar map sparse history shape: {context['lidar_map'].shape}")
 
         if n_gradient_step % args.get("log_interval", 100) == 0:
             logger.log(

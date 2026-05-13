@@ -6,6 +6,7 @@ import torch.nn as nn
 from cleandiffuser.nn_condition import BaseNNCondition
 from cleandiffuser.utils import SinusoidalEmbedding, Transformer
 from vision.raw_patch_encoder import RawPatchEncoder
+from vision.lidar_map_encoder import LidarMapEncoder
 
 
 class PerceiverResampler(nn.Module):
@@ -61,6 +62,9 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         - raw_image2: [B, Tv, 3, H, W]
         - velocity:   [B, Tm, 2]
 
+    Optional lidar branch (use_lidar=True):
+        - lidar_map: [B, Tv, C, S, S]   BEV occupancy map in [0, 1] (same Tv as vision)
+
     where
         - Tv = vision_horizon (default: 5)
         - Tm = obs_horizon    (default: 30)
@@ -82,6 +86,10 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         velocity_dim: int = 2,
         velocity_dropout_prob: float = 0.2,
         vision_backend: str = "raw_cnn",
+        use_lidar: bool = False,
+        lidar_in_ch: int = 2,
+        num_lidar_latents: int = 16,
+        lidar_dropout_prob: float = 0.0,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -95,6 +103,10 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         if vision_backend not in ("dino", "raw_cnn"):
             raise ValueError(f"vision_backend must be 'dino' or 'raw_cnn', got {vision_backend!r}")
         self.vision_backend = vision_backend
+        self.use_lidar = use_lidar
+        self.lidar_in_ch = lidar_in_ch
+        self.num_lidar_latents = num_lidar_latents
+        self.lidar_dropout_prob = lidar_dropout_prob
 
         if self.vision_backend == "raw_cnn":
             # Shared encoder for both camera streams.
@@ -106,6 +118,22 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.vision_proj = nn.Linear(768, d_model)
         self.room1_resampler = PerceiverResampler(d_model, num_latents=num_image_latents, nhead=nhead)
         self.room2_resampler = PerceiverResampler(d_model, num_latents=num_image_latents, nhead=nhead)
+
+        # Lidar branch (BEV occupancy map -> patch tokens -> resampler).
+        if self.use_lidar:
+            self.lidar_patch_encoder = LidarMapEncoder(in_ch=lidar_in_ch, out_dim=768, spatial=14)
+            self.lidar_proj = nn.Linear(768, d_model)
+            self.lidar_resampler = PerceiverResampler(
+                d_model, num_latents=num_lidar_latents, nhead=nhead
+            )
+            self.lidar_time_emb = nn.Parameter(torch.randn(vision_horizon, d_model) * 0.02)
+            self.lidar_slot_emb = nn.Parameter(torch.randn(num_lidar_latents, d_model) * 0.02)
+        else:
+            self.lidar_patch_encoder = None
+            self.lidar_proj = None
+            self.lidar_resampler = None
+            self.lidar_time_emb = None
+            self.lidar_slot_emb = None
 
         # Motion branch.
         self.velocity_proj = nn.Sequential(
@@ -119,8 +147,9 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.motion_time_emb = nn.Parameter(torch.randn(obs_horizon, d_model) * 0.02)
         self.image_slot_emb = nn.Parameter(torch.randn(num_image_latents, d_model) * 0.02)
 
-        # modality indices: 0=image1, 1=image2, 2=velocity, 3=readout
-        self.modality_emb = nn.Parameter(torch.randn(4, d_model) * 0.02)
+        # modality indices: 0=image1, 1=image2, 2=velocity, 3=readout, 4=lidar (only if use_lidar)
+        n_modalities = 5 if self.use_lidar else 4
+        self.modality_emb = nn.Parameter(torch.randn(n_modalities, d_model) * 0.02)
 
         self.readout_emb = nn.Parameter(torch.zeros(1, 1, d_model))
         self.token_pos_emb = SinusoidalEmbedding(d_model)
@@ -211,11 +240,56 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         patches = encoder(flat)
         return patches.view(b, t, 196, 768)
 
+    def _encode_lidar_to_patches(
+        self, lidar: torch.Tensor
+    ) -> torch.Tensor:
+        """lidar: [B, Tv, C, S, S] -> [B, Tv, 196, 768]"""
+        b, t, c, h, w = lidar.shape
+        flat = lidar.reshape(b * t, c, h, w)
+        patches = self.lidar_patch_encoder(flat)
+        return patches.view(b, t, 196, 768)
+
+    def _build_lidar_tokens(self, lidar_feat: torch.Tensor, modality_idx: int) -> torch.Tensor:
+        """
+        Args:
+            lidar_feat: [B, Tv, 196, 768]
+
+        Returns:
+            [B, Tv * num_lidar_latents, d_model]
+        """
+        b, t_seq, n_patch, feat_dim = lidar_feat.shape
+        if t_seq != self.vision_horizon:
+            raise ValueError(
+                f"Expected vision_horizon={self.vision_horizon}, but got lidar features with T={t_seq}."
+            )
+        if n_patch != 196 or feat_dim != 768:
+            raise ValueError(
+                f"Expected lidar patch shape (*, 196, 768), got (*, {n_patch}, {feat_dim})."
+            )
+
+        feat_flat = lidar_feat.reshape(b * t_seq, n_patch, feat_dim).float()
+        patch_tokens = self.lidar_proj(feat_flat)
+        latent_tokens = self.lidar_resampler(patch_tokens, cond=None)
+        latent_tokens = latent_tokens.view(b, t_seq, self.num_lidar_latents, self.d_model)
+
+        latent_tokens = (
+            latent_tokens
+            + self.lidar_time_emb.view(1, t_seq, 1, self.d_model)
+            + self.lidar_slot_emb.view(1, 1, self.num_lidar_latents, self.d_model)
+            + self.modality_emb[modality_idx].view(1, 1, 1, self.d_model)
+        )
+        tokens = latent_tokens.reshape(b, t_seq * self.num_lidar_latents, self.d_model)
+        tokens = self._apply_branch_dropout(tokens, self.lidar_dropout_prob)
+        return tokens
+
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.vision_backend == "raw_cnn":
             required_keys = ("raw_image1", "raw_image2", "velocity")
         else:
             required_keys = ("dino_feat1", "dino_feat2", "velocity")
+        if self.use_lidar:
+            required_keys = required_keys + ("lidar_map",)
+
         missing_keys = [k for k in required_keys if k not in condition]
         if missing_keys:
             raise KeyError(f"Missing condition keys: {missing_keys}")
@@ -244,7 +318,16 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
         readout = self.readout_emb.repeat(b, 1, 1) + self.modality_emb[3].view(1, 1, self.d_model)
 
-        all_tokens = torch.cat([image1_tokens, image2_tokens, velocity_tokens, readout], dim=1)
+        token_groups = [image1_tokens, image2_tokens, velocity_tokens]
+
+        if self.use_lidar:
+            lidar_feat = self._encode_lidar_to_patches(condition["lidar_map"])
+            lidar_tokens = self._build_lidar_tokens(lidar_feat, modality_idx=4)
+            token_groups.append(lidar_tokens)
+
+        token_groups.append(readout)
+
+        all_tokens = torch.cat(token_groups, dim=1)
         token_idx = torch.arange(all_tokens.shape[1], device=device)
         all_tokens = all_tokens + self.token_pos_emb(token_idx).unsqueeze(0)
 

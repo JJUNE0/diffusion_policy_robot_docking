@@ -48,6 +48,20 @@ class DockingDataset(Dataset):
         self.z_img2 = self.root["image_bottom"]
         self.episode_ends = self.root["episode_ends"][:]
 
+        # Optional BEV lidar occupancy maps (created by preprocessing.py --use_lidar).
+        if "lidar_map" in self.root:
+            self.z_lidar = self.root["lidar_map"]
+            attrs = self.z_lidar.attrs
+            self.lidar_meta = {
+                "range_m": float(attrs.get("range_m", 6.0)),
+                "resolution": float(attrs.get("resolution", 0.05)),
+                "channels": int(attrs.get("channels", self.z_lidar.shape[1])),
+                "size": int(attrs.get("size", self.z_lidar.shape[-1])),
+            }
+        else:
+            self.z_lidar = None
+            self.lidar_meta = None
+
         self.index_map = []
         self.ep_start_map = []
 
@@ -105,13 +119,19 @@ class DockingDataset(Dataset):
         act_traj = self.z_encoder[t: t + self.horizon].astype(np.float32)                      # [H, 2]
         act_traj_norm = self.normalize_action(act_traj).astype(np.float32)
 
+        obs = {
+            "encoder": torch.from_numpy(encoder_seq_raw).float(),
+            "velocity": torch.from_numpy(velocity_seq_norm).float(),
+            "image_room1": torch.from_numpy(image_room1).float(),
+            "image_room2": torch.from_numpy(image_room2).float(),
+        }
+
+        if self.z_lidar is not None:
+            lidar_seq = self._get_history(self.z_lidar, t, ep_start).astype(np.float32) / 255.0  # [T, C, S, S]
+            obs["lidar_map"] = torch.from_numpy(lidar_seq).float()
+
         return {
-            "obs": {
-                "encoder": torch.from_numpy(encoder_seq_raw).float(),
-                "velocity": torch.from_numpy(velocity_seq_norm).float(),
-                "image_room1": torch.from_numpy(image_room1).float(),
-                "image_room2": torch.from_numpy(image_room2).float(),
-            },
+            "obs": obs,
             "act": torch.from_numpy(act_traj_norm).float(),
         }
 

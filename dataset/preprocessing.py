@@ -1,25 +1,163 @@
 import os
+import json
 import cv2
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
 import logging
 from tqdm import tqdm
-import h5py  # HDF5 포맷 저장을 위해 필요
+import h5py
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# Lidar BEV occupancy-map utilities
+# ============================================================
+def points_to_occupancy_map(
+    points_xy: np.ndarray,
+    range_m: float = 6.0,
+    resolution: float = 0.05,
+    n_channels: int = 2,
+    density_clip: float = 20.0,
+) -> np.ndarray:
+    """
+    Rasterize a 2D lidar scan (in robot frame) into a BEV occupancy map.
+
+    Convention
+    ----------
+    * Robot is at the center pixel.
+    * +x (forward) -> image up   (decreasing row).
+    * +y (left)    -> image left (decreasing col).
+    * Output is uint8 with shape (C, H, W); H = W = round(range_m / resolution).
+
+    Channels (when n_channels == 2)
+    -------------------------------
+    * 0 : binary occupancy mask, 0 or 255.
+    * 1 : log-density of hits per cell, scaled to 0..255 via log1p / log1p(density_clip).
+
+    Notes
+    -----
+    * `range_m` is the full span in meters along one axis (e.g. 6.0 -> robot sees +/- 3.0 m).
+    * Out-of-range points are silently dropped.
+    * Returning uint8 keeps storage cheap and matches the image branch.
+    """
+    if n_channels not in (1, 2):
+        raise ValueError(f"n_channels must be 1 or 2, got {n_channels}")
+
+    size = int(round(range_m / resolution))
+    if size <= 0:
+        raise ValueError(f"Invalid range/resolution -> size={size}")
+
+    cy = size // 2
+    cx = size // 2
+
+    occ = np.zeros((size, size), dtype=np.float32)
+
+    if points_xy is not None and len(points_xy) > 0:
+        x = points_xy[:, 0]
+        y = points_xy[:, 1]
+
+        rows = (cy - np.round(x / resolution)).astype(np.int32)
+        cols = (cx - np.round(y / resolution)).astype(np.int32)
+
+        valid = (rows >= 0) & (rows < size) & (cols >= 0) & (cols < size)
+        rows = rows[valid]
+        cols = cols[valid]
+
+        if len(rows) > 0:
+            np.add.at(occ, (rows, cols), 1.0)
+
+    occupied_u8 = (occ > 0).astype(np.uint8) * 255
+
+    if n_channels == 1:
+        return occupied_u8[None]
+
+    log_dens = np.log1p(occ) / np.log1p(density_clip)
+    log_dens_u8 = np.clip(log_dens * 255.0, 0, 255).astype(np.uint8)
+
+    return np.stack([occupied_u8, log_dens_u8], axis=0)
+
+
+def _load_lidar_jsonl(lidar_path: str):
+    """
+    Returns
+    -------
+    timestamps : np.ndarray of shape (N,) or empty
+    scans      : list[np.ndarray]  each (M_i, 2) in float32
+    """
+    if not os.path.exists(lidar_path):
+        return np.array([], dtype=np.float64), []
+
+    timestamps = []
+    scans = []
+    with open(lidar_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            ts = d.get("ts", None)
+            pts = d.get("points", [])
+            if ts is None:
+                continue
+
+            if len(pts) > 0:
+                arr = np.asarray(
+                    [(p["x"], p["y"]) for p in pts],
+                    dtype=np.float32,
+                )
+            else:
+                arr = np.zeros((0, 2), dtype=np.float32)
+
+            timestamps.append(float(ts))
+            scans.append(arr)
+
+    timestamps = np.asarray(timestamps, dtype=np.float64)
+
+    order = np.argsort(timestamps)
+    timestamps = timestamps[order]
+    scans = [scans[i] for i in order]
+    return timestamps, scans
+
+
+# ============================================================
+# Episode -> synced metadata
+# ============================================================
 class StrictSyncRoboticsDataset:
-    def __init__(self, root_dir, target_hz=30.0, max_time_diff=0.05):
+    def __init__(
+        self,
+        root_dir,
+        target_hz=30.0,
+        max_time_diff=0.05,
+        use_lidar: bool = False,
+        lidar_max_time_diff: float = 0.10,
+        lidar_range_m: float = 6.0,
+        lidar_resolution: float = 0.05,
+        lidar_channels: int = 2,
+    ):
         self.root_dir = root_dir
         self.target_interval = 1.0 / target_hz
         self.max_time_diff = max_time_diff
+        self.use_lidar = use_lidar
+        self.lidar_max_time_diff = lidar_max_time_diff
+        self.lidar_range_m = lidar_range_m
+        self.lidar_resolution = lidar_resolution
+        self.lidar_channels = lidar_channels
+        self.lidar_size = int(round(lidar_range_m / lidar_resolution))
+
         self.samples = []
         self.episode_ends = []
 
-        # 이번에는 root_dir/episode, root_dir/episode_postech 둘 다 순회
+        # Cache lidar per episode so get_full_sample() can rasterize on-demand.
+        # key = ep_path, value = (timestamps[N], scans[list[(M,2)]])
+        self._lidar_cache: dict[str, tuple] = {}
+
         episode_folders = self._collect_episode_folders()
 
         current_idx = 0
@@ -30,15 +168,15 @@ class StrictSyncRoboticsDataset:
                 current_idx += kept_frames
                 self.episode_ends.append(current_idx)
 
-        logger.info(f"메타데이터 구축 완료! 총 {len(self.samples)}개의 동기화된 프레임이 식별되었습니다.")
+        logger.info(
+            f"메타데이터 구축 완료! 총 {len(self.samples)}개의 동기화된 프레임이 식별되었습니다."
+            + (f" (use_lidar=True, map={self.lidar_channels}x{self.lidar_size}x{self.lidar_size})"
+               if self.use_lidar else "")
+        )
 
     def _collect_episode_folders(self):
         """
-        root_dir 아래의
-          - episode/
-          - episode_postech/
-        두 폴더를 모두 확인하고,
-        그 안의 실제 episode 폴더 경로를 모아 반환
+        root_dir 아래의 후보 상위 폴더들을 순회하여 실제 episode 경로 목록 반환.
         """
         candidate_parents = [
             # os.path.join(self.root_dir, "episode"),
@@ -63,7 +201,6 @@ class StrictSyncRoboticsDataset:
 
             for d in subdirs:
                 ep_path = os.path.join(parent, d)
-                # 이름 충돌 방지를 위해 상위 폴더명까지 포함
                 ep_name = f"{os.path.basename(parent)}/{d}"
                 collected.append((ep_path, ep_name))
 
@@ -88,10 +225,11 @@ class StrictSyncRoboticsDataset:
         return np.array(timestamps), valid_files
 
     def _process_episode_metadata(self, ep_path, ep_name):
-        """실제 이미지를 로드하지 않고 경로와 센서 데이터만 매칭하여 리스트에 저장"""
+        """실제 이미지/라이다는 로드하지 않고 경로/타임스탬프만 매칭하여 self.samples에 추가."""
         enc_path = os.path.join(ep_path, 'encoder.csv')
         img_dir_top = os.path.join(ep_path, 'image', 'room1')
         img_dir_bottom = os.path.join(ep_path, 'image', 'room2')
+        lidar_path = os.path.join(ep_path, 'lidar.jsonl')
 
         if not os.path.exists(enc_path):
             logger.warning(f"❌ [{ep_name}] 스킵: encoder.csv 파일이 없습니다. (경로: {enc_path})")
@@ -102,10 +240,12 @@ class StrictSyncRoboticsDataset:
         if not os.path.exists(img_dir_bottom):
             logger.warning(f"❌ [{ep_name}] 스킵: image/room2 폴더가 없습니다.")
             return 0
+        if self.use_lidar and not os.path.exists(lidar_path):
+            logger.warning(f"❌ [{ep_name}] 스킵: lidar.jsonl 파일이 없습니다.")
+            return 0
 
         df_enc = pd.read_csv(enc_path)
 
-        # 필수 컬럼 체크
         required_cols = ['ts', 'vx', 'wz']
         for col in required_cols:
             if col not in df_enc.columns:
@@ -119,8 +259,23 @@ class StrictSyncRoboticsDataset:
             logger.warning(f"❌ [{ep_name}] 스킵: room1 또는 room2 이미지가 비어 있습니다.")
             return 0
 
-        min_t = max(df_enc['ts'].min(), ts_top.min(), ts_bot.min())
-        max_t = min(df_enc['ts'].max(), ts_top.max(), ts_bot.max())
+        if self.use_lidar:
+            ts_lidar, scans_lidar = _load_lidar_jsonl(lidar_path)
+            if len(ts_lidar) == 0:
+                logger.warning(f"❌ [{ep_name}] 스킵: lidar.jsonl이 비어 있거나 파싱 실패.")
+                return 0
+            self._lidar_cache[ep_path] = (ts_lidar, scans_lidar)
+        else:
+            ts_lidar = np.array([], dtype=np.float64)
+
+        common_max = [df_enc['ts'].max(), ts_top.max(), ts_bot.max()]
+        common_min = [df_enc['ts'].min(), ts_top.min(), ts_bot.min()]
+        if self.use_lidar:
+            common_max.append(ts_lidar.max())
+            common_min.append(ts_lidar.min())
+
+        min_t = max(common_min)
+        max_t = min(common_max)
 
         if min_t >= max_t:
             logger.warning(f"❌ [{ep_name}] 스킵: 유효한 공통 시간 구간이 없습니다.")
@@ -148,11 +303,20 @@ class StrictSyncRoboticsDataset:
             if abs(ts_bot[idx_bot] - t) > self.max_time_diff:
                 continue
 
-            self.samples.append({
+            sample = {
                 'encoder': synced_enc[i].astype(np.float32),
                 'img_top_path': files_top[idx_top],
-                'img_bottom_path': files_bot[idx_bot]
-            })
+                'img_bottom_path': files_bot[idx_bot],
+            }
+
+            if self.use_lidar:
+                idx_lid = int(np.abs(ts_lidar - t).argmin())
+                if abs(ts_lidar[idx_lid] - t) > self.lidar_max_time_diff:
+                    continue
+                sample['lidar_ep_path'] = ep_path
+                sample['lidar_idx'] = idx_lid
+
+            self.samples.append(sample)
             count += 1
 
         logger.info(f"[{ep_name}] 동기화 완료: {count} 프레임")
@@ -169,14 +333,29 @@ class StrictSyncRoboticsDataset:
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return img_rgb.transpose(2, 0, 1)
 
+    def _make_lidar_map(self, ep_path: str, scan_idx: int) -> np.ndarray:
+        ts_lidar, scans_lidar = self._lidar_cache[ep_path]
+        pts = scans_lidar[scan_idx]
+        return points_to_occupancy_map(
+            pts,
+            range_m=self.lidar_range_m,
+            resolution=self.lidar_resolution,
+            n_channels=self.lidar_channels,
+        )
+
     def __len__(self):
         return len(self.samples)
 
     def get_full_sample(self, idx):
-        """파일 저장을 위해 한 프레임의 모든 데이터를 로드"""
+        """저장 시 한 프레임의 모든 데이터를 로드/생성."""
         s = self.samples[idx]
         img_top = self._load_image(s['img_top_path'])
         img_bot = self._load_image(s['img_bottom_path'])
+
+        if self.use_lidar:
+            lidar_map = self._make_lidar_map(s['lidar_ep_path'], s['lidar_idx'])
+            return s['encoder'], img_top, img_bot, lidar_map
+
         return s['encoder'], img_top, img_bot
 
 
@@ -185,16 +364,43 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Preprocess raw episode data into HDF5 format")
     parser.add_argument("--data_root", type=str, required=True,
-                        help="Root directory containing validation/ folder with episode data")
+                        help="Root directory containing dock/ folder with episode data")
     parser.add_argument("--save_path", type=str, required=True,
-                        help="Output HDF5 file path (e.g. ./validation_dataset.h5)")
+                        help="Output HDF5 file path (e.g. ./dataset.h5)")
+    parser.add_argument("--target_hz", type=float, default=30.0)
+    parser.add_argument("--max_time_diff", type=float, default=0.05,
+                        help="Max time mismatch (s) between target and image timestamp.")
+
+    parser.add_argument("--use_lidar", action="store_true",
+                        help="Also rasterize lidar.jsonl into BEV occupancy maps and store under 'lidar_map'.")
+    parser.add_argument("--lidar_max_time_diff", type=float, default=0.10,
+                        help="Max time mismatch (s) between target and lidar scan timestamp (lidar ~15Hz).")
+    parser.add_argument("--lidar_range_m", type=float, default=6.0,
+                        help="Full span in meters of the BEV map along one axis (robot at center).")
+    parser.add_argument("--lidar_resolution", type=float, default=0.05,
+                        help="Meters per pixel for the BEV map.")
+    parser.add_argument("--lidar_channels", type=int, default=2, choices=(1, 2),
+                        help="1 = occupancy only, 2 = [occupancy, log-density].")
+
     cli_args = parser.parse_args()
 
     DATA_ROOT_DIR = cli_args.data_root
     SAVE_PATH = cli_args.save_path
 
-    dataset = StrictSyncRoboticsDataset(root_dir=DATA_ROOT_DIR)
+    dataset = StrictSyncRoboticsDataset(
+        root_dir=DATA_ROOT_DIR,
+        target_hz=cli_args.target_hz,
+        max_time_diff=cli_args.max_time_diff,
+        use_lidar=cli_args.use_lidar,
+        lidar_max_time_diff=cli_args.lidar_max_time_diff,
+        lidar_range_m=cli_args.lidar_range_m,
+        lidar_resolution=cli_args.lidar_resolution,
+        lidar_channels=cli_args.lidar_channels,
+    )
     total_samples = len(dataset)
+
+    if total_samples == 0:
+        raise RuntimeError("동기화된 프레임이 0개입니다. 입력 경로/옵션을 확인하세요.")
 
     print(f"\n데이터 저장을 시작합니다: {SAVE_PATH}")
     with h5py.File(SAVE_PATH, 'w') as f:
@@ -215,8 +421,32 @@ if __name__ == "__main__":
         )
         f.create_dataset("episode_ends", data=np.array(dataset.episode_ends, dtype='i8'))
 
+        if cli_args.use_lidar:
+            C = cli_args.lidar_channels
+            S = dataset.lidar_size
+            dset_lidar = f.create_dataset(
+                "lidar_map",
+                (total_samples, C, S, S),
+                dtype='u1',
+                compression="gzip",
+                chunks=(1, C, S, S),
+            )
+            dset_lidar.attrs["range_m"] = cli_args.lidar_range_m
+            dset_lidar.attrs["resolution"] = cli_args.lidar_resolution
+            dset_lidar.attrs["channels"] = C
+            dset_lidar.attrs["size"] = S
+            dset_lidar.attrs["channel_order"] = (
+                "occupied" if C == 1 else "occupied,log_density"
+            )
+
         for i in tqdm(range(total_samples), desc="Disk Writing"):
-            enc, top, bot = dataset.get_full_sample(i)
+            sample = dataset.get_full_sample(i)
+            if cli_args.use_lidar:
+                enc, top, bot, lmap = sample
+                dset_lidar[i] = lmap
+            else:
+                enc, top, bot = sample
+
             dset_enc[i] = enc
             dset_img_top[i] = top
             dset_img_bot[i] = bot

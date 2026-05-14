@@ -1,7 +1,7 @@
 import os
-from datetime import datetime
 from pathlib import Path
 
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
@@ -14,6 +14,15 @@ from .utils import Logger
 
 
 def logger_setups(args):
+    """
+    Resolve the run directory used for checkpoints / metrics / plots.
+
+    Layout (controlled by configs/robot/smr.yaml hydra.run.dir):
+        outputs/<run_kind>/<experiment_name>/<timestamp>/
+
+    On resume:
+        save_path = args.resume_path (the existing run folder)
+    """
     if args.resume_path:
         save_path = args.resume_path
         timestamp = Path(save_path.rstrip("/")).name
@@ -26,9 +35,8 @@ def logger_setups(args):
         else:
             print(f"Warning: Configuration file not found at {config_load_path}. Using current settings.")
     else:
-        current_time = datetime.now()
-        timestamp = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-        save_path = f"results/{args.experiment_name}/{timestamp}/"
+        save_path = HydraConfig.get().runtime.output_dir
+        timestamp = Path(save_path.rstrip("/")).name
         os.makedirs(save_path, exist_ok=True)
         config_save_path = os.path.join(save_path, "config.yaml")
         OmegaConf.save(config=args, f=config_save_path)

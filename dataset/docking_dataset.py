@@ -1,5 +1,7 @@
 from typing import Dict
 
+from pathlib import Path
+
 import h5py
 import numpy as np
 import torch
@@ -38,6 +40,18 @@ class DockingDataset(Dataset):
         self.obs_horizon = obs_horizon
         # Kept for interface compatibility with existing setup / inference code.
         self.dt = dt
+
+        for label, path in (("eval_data", self.h5_path), ("train_norm", self.train_h5_path)):
+            p = Path(path).expanduser()
+            if not p.is_file():
+                if p.is_dir():
+                    raise ValueError(
+                        f"DockingDataset: {label} must be an HDF5 file path (.h5), not a directory. "
+                        f"Got: {path}\n"
+                        f"  - eval_data  -> eval_data_path (the episode data to load)\n"
+                        f"  - train_norm -> train_data_path (HDF5 used when training, for action normalization)"
+                    )
+                raise FileNotFoundError(f"DockingDataset: {label} file not found: {path}")
 
         self.root = h5py.File(self.h5_path, "r")
         self.train_root = h5py.File(self.train_h5_path, "r")

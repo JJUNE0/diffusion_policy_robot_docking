@@ -6,6 +6,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+
+def _ensure_hydra_override(key: str, value: str) -> None:
+    already_set = any(
+        a.split("=", 1)[0].lstrip("+") == key for a in sys.argv[1:] if "=" in a
+    )
+    if not already_set:
+        sys.argv.append(f"{key}={value}")
+
+
+_ensure_hydra_override("run_kind", "inference")
+
 import zmq
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,6 +30,7 @@ from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionCondi
 from cleandiffuser.nn_diffusion import DiT1d
 
 from dataset.docking_dataset import DockingDataset
+from utils.inference_ckpt import resolve_inference_checkpoint_path
 
 
 def denormalize(norm_action, act_scale, act_min):
@@ -130,6 +142,27 @@ def main(args):
     dt = float(args.get("dt", 0.0333))
 
     vision_backend = args.get("vision_backend", "raw_cnn")
+
+    test_dataset = DockingDataset(
+        npz_path=args.eval_data_path,
+        train_npz_path=args.train_data_path,
+        horizon=args.horizon,
+        obs_horizon=obs_h,
+        dt=dt,
+    )
+
+    use_lidar_inf = bool(args.get("use_lidar", False))
+    lidar_in_ch = int(args.get("lidar_channels", 2))
+    if use_lidar_inf and test_dataset.z_lidar is not None and test_dataset.lidar_meta:
+        lidar_in_ch = int(test_dataset.lidar_meta["channels"])
+    if use_lidar_inf and test_dataset.z_lidar is None:
+        raise ValueError(
+            "use_lidar=True but eval HDF5 has no lidar_map. "
+            "Build data with preprocessing.py --use_lidar or set use_lidar=false."
+        )
+    if vision_backend == "dino" and use_lidar_inf:
+        raise NotImplementedError("use_lidar with vision_backend=dino is not wired in inference_rtc.")
+
     nn_condition = SensorFusionConditionNetwork(
         state_dim=args.state_dim,
         obs_horizon=obs_h,
@@ -142,6 +175,10 @@ def main(args):
         velocity_dim=args.get("velocity_dim", 2),
         velocity_dropout_prob=args.get("velocity_dropout_prob", 0.0),
         vision_backend=vision_backend,
+        use_lidar=use_lidar_inf,
+        lidar_in_ch=lidar_in_ch,
+        num_lidar_latents=args.get("num_lidar_latents", 16),
+        lidar_dropout_prob=0.0,
     ).to(device)
 
     nn_diffusion_model = DiT1d(
@@ -164,7 +201,10 @@ def main(args):
 
         detector = DinoBatchDetector(device=device)
 
-    checkpoint_path = os.path.join(original_cwd, f"checkpoint_step_{args.checkpoint_step}.pt")
+    checkpoint_path = resolve_inference_checkpoint_path(args, original_cwd)
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    print(f"Loading checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     nn_diffusion.model.load_state_dict(ckpt["model_state_dict"])
     nn_diffusion.model_ema.load_state_dict(ckpt["ema_state_dict"])
@@ -172,14 +212,6 @@ def main(args):
 
     act_min = ckpt["action_min"]
     act_scale = ckpt["action_scale"]
-
-    test_dataset = DockingDataset(
-        npz_path=args.eval_data_path,
-        train_npz_path=args.train_data_path,
-        horizon=args.horizon,
-        obs_horizon=obs_h,
-        dt=dt,
-    )
 
     ep_end_idx = test_dataset.episode_ends[0]
     ep_steps = ep_end_idx - args.horizon + 1
@@ -235,6 +267,10 @@ def main(args):
                 "raw_image2": image_room2.repeat(n_samples, 1, 1, 1, 1),
                 "velocity": velocity.repeat(n_samples, 1, 1),
             }
+
+        if use_lidar_inf:
+            lidar_map = batch["obs"]["lidar_map"].unsqueeze(0)[:, ::vision_stride].to(device).float()
+            context["lidar_map"] = lidar_map.repeat(n_samples, 1, 1, 1, 1)
 
         h, w_ = int(args.image_height), int(args.image_width)
         if sim_map1 is not None and sim_map2 is not None:

@@ -126,7 +126,10 @@ def main(args):
 
     nn_diffusion.train()
 
-    # Vision uses sparse temporal sampling from 30-step history.
+    # The DockingDataset already returns sparse uint8 image / lidar histories
+    # (subsampled by vision_stride) so we only need to move them to GPU and
+    # convert to float here. This dramatically reduces CPU resident memory
+    # and DataLoader queue size.
     vision_stride = args.get("vision_stride", 6)
     vision_backend = args.get("vision_backend", "raw_cnn")
     use_lidar = bool(args.get("use_lidar", False))
@@ -141,12 +144,12 @@ def main(args):
 
         # ------------------------------------------------------------------
         # Multimodal condition inputs:
-        #   - image_room1: full 30-step history -> sparse history via ::vision_stride
-        #   - image_room2: full 30-step history -> sparse history via ::vision_stride
-        #   - velocity:    full 30-step normalized encoder history
+        #   - image_room1: sparse history (T_vis frames) uint8 -> float on GPU
+        #   - image_room2: sparse history (T_vis frames) uint8 -> float on GPU
+        #   - velocity:    full obs_horizon normalized encoder history
         # ------------------------------------------------------------------
-        image_room1 = obs_dict["image_room1"][:, ::vision_stride].to(device, non_blocking=True)
-        image_room2 = obs_dict["image_room2"][:, ::vision_stride].to(device, non_blocking=True)
+        image_room1 = obs_dict["image_room1"].to(device, non_blocking=True).float().div_(255.0)
+        image_room2 = obs_dict["image_room2"].to(device, non_blocking=True).float().div_(255.0)
         velocity = obs_dict["velocity"].to(device, non_blocking=True)
 
         B, T_vis, C, H, W = image_room1.shape
@@ -177,7 +180,7 @@ def main(args):
                     "use_lidar=True 인데 batch에 'lidar_map'이 없습니다. "
                     "preprocessing.py를 --use_lidar 옵션으로 실행했는지 확인하세요."
                 )
-            lidar_map = obs_dict["lidar_map"][:, ::vision_stride].to(device, non_blocking=True)
+            lidar_map = obs_dict["lidar_map"].to(device, non_blocking=True).float().div_(255.0)
             context["lidar_map"] = lidar_map
 
         diff_log = nn_diffusion.update(x0=action, condition=context)

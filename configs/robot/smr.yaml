@@ -16,7 +16,7 @@ horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
 batch_size: 32
-num_workers: 2
+num_workers: 4
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
 state_dim: 2            # encoder(2)
@@ -49,9 +49,9 @@ ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
 # ==========================================
 # 5. Training
 # ==========================================
-diffusion_gradient_steps: 10001
-log_interval: 10
-save_interval: 1000
+diffusion_gradient_steps: 150001
+log_interval: 100
+save_interval: 10000
 resume_path: null
 
 learning_rate: 1e-4
@@ -70,7 +70,7 @@ num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여�
 # Load weights: checkpoint_path (full path to .pt) OR checkpoint_dir + checkpoint_step below.
 checkpoint_path: null
 checkpoint_dir : ${hydra:runtime.cwd}/results/encoder_vision/2026-03-03_17-44-33
-checkpoint_step : 160000
+checkpoint_step : 100000
 eval_data_path  : ${hydra:runtime.cwd}/../dataset/validation_dataset1.h5
 
 # ==========================================

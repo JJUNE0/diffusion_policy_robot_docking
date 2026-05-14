@@ -66,19 +66,29 @@ def model_setups(args):
         train_npz_path=args.train_data_path,
         horizon=args.horizon,
         obs_horizon=obs_horizon,
+        vision_stride=vision_stride,
         dt=args.get("dt", 0.0333),
     )
 
-    num_workers = args.get("num_workers", 4)
-    dataloader = DataLoader(
-        dataset,
+    # NOTE: keep DataLoader memory pressure low.
+    #   * num_workers small (1) -> at most 1 prefetch_factor batches buffered
+    #   * pin_memory=False      -> avoid extra page-locked CPU copies
+    #   * persistent_workers=False -> release worker memory between epochs
+    #   * prefetch_factor=1     -> at most 1 batch waiting per worker
+    # Combined with the uint8 + sparse history changes in DockingDataset, this
+    # cuts CPU resident memory per buffered batch by ~24x (4x dtype, 6x stride).
+    num_workers = int(args.get("num_workers", 1))
+    dl_kwargs = dict(
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=num_workers,
-        persistent_workers=(num_workers > 0),
-        pin_memory=True,
+        pin_memory=False,
         drop_last=True,
+        persistent_workers=False,
     )
+    if num_workers > 0:
+        dl_kwargs["prefetch_factor"] = 1
+    dataloader = DataLoader(dataset, **dl_kwargs)
 
     use_lidar = bool(args.get("use_lidar", False))
     if use_lidar and dataset.z_lidar is None:

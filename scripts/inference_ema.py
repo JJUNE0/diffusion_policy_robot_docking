@@ -101,6 +101,7 @@ def main(args):
         train_npz_path=args.train_data_path,
         horizon=args.horizon,
         obs_horizon=obs_h,
+        vision_stride=vision_stride,
         dt=dt,
     )
 
@@ -191,8 +192,9 @@ def main(args):
     for step in range(ep_steps):
         batch = test_dataset[step]
 
-        image_room1 = batch["obs"]["image_room1"].unsqueeze(0)[:, ::vision_stride].to(device).float()
-        image_room2 = batch["obs"]["image_room2"].unsqueeze(0)[:, ::vision_stride].to(device).float()
+        # DockingDataset already returns sparse uint8 image / lidar histories.
+        image_room1 = batch["obs"]["image_room1"].unsqueeze(0).to(device).float().div_(255.0)
+        image_room2 = batch["obs"]["image_room2"].unsqueeze(0).to(device).float().div_(255.0)
         velocity = batch["obs"]["velocity"].unsqueeze(0).to(device).float()
 
         # GT first-step velocity for this open-loop step
@@ -225,7 +227,7 @@ def main(args):
             }
 
         if use_lidar_inf:
-            lidar_map = batch["obs"]["lidar_map"].unsqueeze(0)[:, ::vision_stride].to(device).float()
+            lidar_map = batch["obs"]["lidar_map"].unsqueeze(0).to(device).float().div_(255.0)
             context["lidar_map"] = lidar_map.repeat(n_samples, 1, 1, 1, 1)
 
         h, w_ = int(args.image_height), int(args.image_width)

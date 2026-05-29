@@ -86,7 +86,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         velocity_dim: int = 2,
         velocity_dropout_prob: float = 0.2,
         vision_backend: str = "raw_cnn",
-        use_lidar: bool = False,
+        use_lidar: bool = True,
         lidar_in_ch: int = 2,
         num_lidar_latents: int = 16,
         lidar_dropout_prob: float = 0.0,

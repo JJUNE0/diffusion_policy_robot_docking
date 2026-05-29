@@ -1,9 +1,14 @@
 import os
 import glob
+import json
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+
+LIDAR_DELAY_MS = 100  # preprocessing lidar_max_time_diff=0.10 와 동일
+LIDAR_MIN_HZ = 10
+LIDAR_JITTER_MS = 30
 
 def extract_image_timestamps(img_dir):
     """하위 폴더 포함 모든 jpg, png 파일에서 타임스탬프 추출"""
@@ -17,6 +22,37 @@ def extract_image_timestamps(img_dir):
             ts_list.append(float(ts_str))
         except: pass
     return np.array(sorted(ts_list))
+
+def load_lidar_data(lidar_path):
+    """lidar.jsonl에서 타임스탬프와 scan point 개수 추출."""
+    if not os.path.exists(lidar_path):
+        return np.array([]), []
+
+    timestamps = []
+    point_counts = []
+    with open(lidar_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                ts = d.get("ts")
+                if ts is None:
+                    continue
+                pts = d.get("points", [])
+                timestamps.append(float(ts))
+                point_counts.append(len(pts))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+
+    if not timestamps:
+        return np.array([]), []
+
+    order = np.argsort(timestamps)
+    timestamps = np.array(timestamps, dtype=np.float64)[order]
+    point_counts = [point_counts[i] for i in order]
+    return timestamps, point_counts
 
 def calc_sync_stats(img_ts_norm, enc_ts_norm):
     if len(img_ts_norm) < 2 or len(enc_ts_norm) < 2:
@@ -34,6 +70,15 @@ def calc_sync_stats(img_ts_norm, enc_ts_norm):
         delays.append(i_ts - nearest_ts)
     delays_ms = np.array(delays) * 1000
     return hz, jitter_ms, np.mean(delays_ms), np.max(np.abs(delays_ms)), np.std(delays_ms)
+
+def _nearest_encoder_ts(enc_ts_norm, query_ts):
+    idx = np.searchsorted(enc_ts_norm, query_ts, side="left")
+    if idx == 0:
+        return enc_ts_norm[0]
+    if idx == len(enc_ts_norm):
+        return enc_ts_norm[-1]
+    left, right = enc_ts_norm[idx - 1], enc_ts_norm[idx]
+    return left if (query_ts - left) < (right - query_ts) else right
 
 def generate_ultimate_report(
     base_dir=".",
@@ -67,6 +112,7 @@ def generate_ultimate_report(
             enc_csv = os.path.join(ep_dir, "encoder.csv")
             room1_dir = os.path.join(ep_dir, "image", "room1")
             room2_dir = os.path.join(ep_dir, "image", "room2")
+            lidar_path = os.path.join(ep_dir, "lidar.jsonl")
 
             try:
                 df_enc = pd.read_csv(enc_csv, names=['ts', 'vx', 'wz'], header=None)
@@ -79,38 +125,73 @@ def generate_ultimate_report(
 
             img1_ts = extract_image_timestamps(room1_dir)
             img2_ts = extract_image_timestamps(room2_dir)
+            lidar_ts, lidar_point_counts = load_lidar_data(lidar_path)
 
             if len(enc_ts) < 2 or (len(img1_ts) == 0 and len(img2_ts) == 0):
                 print("⚠️ 이미지 데이터 부족 (스킵)")
                 bad_episodes.append(f"[이미지 누락] {ep_full_path}")
                 continue
 
+            has_lidar = len(lidar_ts) > 0
+            if not has_lidar:
+                bad_episodes.append(f"[lidar 누락] {ep_full_path}")
+
             # 0초 정규화
             all_starts = [enc_ts[0]]
             if len(img1_ts) > 0: all_starts.append(img1_ts[0])
             if len(img2_ts) > 0: all_starts.append(img2_ts[0])
+            if has_lidar: all_starts.append(lidar_ts[0])
             global_start = min(all_starts)
 
             enc_norm = enc_ts - global_start
             img1_norm = img1_ts - global_start if len(img1_ts) > 0 else np.array([])
             img2_norm = img2_ts - global_start if len(img2_ts) > 0 else np.array([])
+            lidar_norm = lidar_ts - global_start if has_lidar else np.array([])
 
             enc_hz = 1.0 / np.mean(np.diff(enc_norm)) if len(enc_norm) > 1 else 0
             hz1, jit1, mean1, max1, _ = calc_sync_stats(img1_norm, enc_norm)
             hz2, jit2, mean2, max2, _ = calc_sync_stats(img2_norm, enc_norm)
+            hz_lid, jit_lid, mean_lid, max_lid, _ = calc_sync_stats(lidar_norm, enc_norm)
 
-            # 🚨 불량 데이터 판별 로직 (Delay 50ms 초과, Jitter 20ms 초과, 또는 FPS가 10 미만인 경우)
-            is_danger = abs(mean1)>50 or abs(mean2)>50 or jit1>20 or jit2>20 or hz1<10 or hz2<10
+            if has_lidar and lidar_point_counts:
+                pts_mean = np.mean(lidar_point_counts)
+                pts_min = np.min(lidar_point_counts)
+                pts_max = np.max(lidar_point_counts)
+            else:
+                pts_mean = pts_min = pts_max = 0
+
+            # 🚨 불량 데이터 판별 로직
+            is_danger = (
+                abs(mean1) > 50 or abs(mean2) > 50 or
+                jit1 > 20 or jit2 > 20 or
+                hz1 < 10 or hz2 < 10
+            )
+            if has_lidar:
+                is_danger = is_danger or (
+                    abs(mean_lid) > LIDAR_DELAY_MS or
+                    jit_lid > LIDAR_JITTER_MS or
+                    hz_lid < LIDAR_MIN_HZ or
+                    pts_min == 0
+                )
             if is_danger:
                 bad_episodes.append(f"[싱크/지연 불량] {ep_full_path}")
 
             # ================= 시각화 =================
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12))
-            
-            # 💡 [핵심] 제목 아래에 절대 경로(Absolute Path) 추가
-            title_str = f"[{parent_name}/{ep_name}] Dual Camera Sync Report\n"
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 14))
+
+            title_str = f"[{parent_name}/{ep_name}] Camera + Lidar Sync Report\n"
             title_str += f"Path: {ep_full_path}"
             fig.suptitle(title_str, fontsize=15, fontweight='bold', color='darkred' if is_danger else 'black')
+
+            if has_lidar:
+                lidar_stats = (
+                    f"[Lidar]\n"
+                    f"Hz: {hz_lid:.1f} | Jitter: {jit_lid:.1f} ms\n"
+                    f"Delay -> Mean: {mean_lid:+.1f} ms | Max: {max_lid:.1f} ms\n"
+                    f"Points/scan: mean={pts_mean:.0f} min={pts_min:.0f} max={pts_max:.0f}"
+                )
+            else:
+                lidar_stats = "[Lidar]\n⚠️ lidar.jsonl 없음"
 
             stats_text = (
                 f"📊 [System Statistics]\n"
@@ -122,25 +203,38 @@ def generate_ultimate_report(
                 f"----------------------------------------\n"
                 f"[Room 2 (Bottom)]\n"
                 f"FPS: {hz2:.1f} Hz | Jitter: {jit2:.1f} ms\n"
-                f"Delay -> Mean: {mean2:+.1f} ms | Max: {max2:.1f} ms"
+                f"Delay -> Mean: {mean2:+.1f} ms | Max: {max2:.1f} ms\n"
+                f"----------------------------------------\n"
+                f"{lidar_stats}"
             )
-            
+
             box_color = 'lightcoral' if is_danger else 'lightgreen'
-            fig.text(0.77, 0.82, stats_text, fontsize=10, family='monospace',
+            fig.text(0.77, 0.80, stats_text, fontsize=10, family='monospace',
                      bbox=dict(facecolor=box_color, alpha=0.6, edgecolor='black', boxstyle='round,pad=0.5'))
 
-            y_ticks = [0.4, 1.4, 2.4]
-            y_labels = ['Encoder\n(Velocity)', 'Room 2\n(Bottom Cam)', 'Room 1\n(Top Cam)']
+            y_ticks = [0.4, 1.4, 2.4, 3.4]
+            y_labels = [
+                'Encoder\n(Velocity)',
+                'Room 2\n(Bottom Cam)',
+                'Room 1\n(Top Cam)',
+                'Lidar\n(Scan)',
+            ]
 
             # [Plot 1] Macro View
             ax1.vlines(enc_norm, 0.0, 0.8, color='dodgerblue', alpha=0.5, linewidth=1)
             if len(img2_norm) > 0: ax1.vlines(img2_norm, 1.0, 1.8, color='mediumseagreen', alpha=0.8, linewidth=1.5)
             if len(img1_norm) > 0: ax1.vlines(img1_norm, 2.0, 2.8, color='darkorange', alpha=0.8, linewidth=1.5)
+            if has_lidar: ax1.vlines(lidar_norm, 3.0, 3.8, color='mediumpurple', alpha=0.8, linewidth=1.5)
             ax1.set_yticks(y_ticks); ax1.set_yticklabels(y_labels, fontsize=11, fontweight='bold')
             ax1.set_title("Macro View: Full Episode Timeline")
             ax1.grid(axis='x', linestyle='--', alpha=0.7)
 
-            total_duration = max([enc_norm[-1] if len(enc_norm) else 0, img1_norm[-1] if len(img1_norm) else 0, img2_norm[-1] if len(img2_norm) else 0])
+            total_duration = max(
+                enc_norm[-1] if len(enc_norm) else 0,
+                img1_norm[-1] if len(img1_norm) else 0,
+                img2_norm[-1] if len(img2_norm) else 0,
+                lidar_norm[-1] if len(lidar_norm) else 0,
+            )
             zoom_duration = 2.0
             zoom_start = max(0, (total_duration / 2.0) - (zoom_duration / 2.0))
             ax1.axvspan(zoom_start, zoom_start + zoom_duration, color='gray', alpha=0.2)
@@ -149,16 +243,17 @@ def generate_ultimate_report(
             ax2.vlines(enc_norm, 0.0, 0.8, color='dodgerblue', alpha=0.7, linewidth=2)
             if len(img2_norm) > 0: ax2.vlines(img2_norm, 1.0, 1.8, color='mediumseagreen', alpha=1.0, linewidth=3)
             if len(img1_norm) > 0: ax2.vlines(img1_norm, 2.0, 2.8, color='darkorange', alpha=1.0, linewidth=3)
+            if has_lidar: ax2.vlines(lidar_norm, 3.0, 3.8, color='mediumpurple', alpha=1.0, linewidth=3)
 
-            for img_norm, base_y, color in [(img2_norm, 1.0, 'green'), (img1_norm, 2.0, 'red')]:
-                for i_ts in img_norm:
-                    if i_ts < zoom_start or i_ts > zoom_start + zoom_duration: continue
-                    idx = np.searchsorted(enc_norm, i_ts, side="left")
-                    if idx == 0: nearest_enc = enc_norm[0]
-                    elif idx == len(enc_norm): nearest_enc = enc_norm[-1]
-                    else:
-                        left, right = enc_norm[idx-1], enc_norm[idx]
-                        nearest_enc = left if (i_ts - left) < (right - i_ts) else right
+            for sensor_norm, base_y, color in [
+                (img2_norm, 1.0, 'green'),
+                (img1_norm, 2.0, 'red'),
+                (lidar_norm, 3.0, 'purple'),
+            ]:
+                for i_ts in sensor_norm:
+                    if i_ts < zoom_start or i_ts > zoom_start + zoom_duration:
+                        continue
+                    nearest_enc = _nearest_encoder_ts(enc_norm, i_ts)
                     ax2.plot([i_ts, nearest_enc], [base_y, 0.8], color=color, linestyle=':', alpha=0.6)
 
             ax2.set_yticks(y_ticks); ax2.set_yticklabels(y_labels, fontsize=11, fontweight='bold')
@@ -166,7 +261,7 @@ def generate_ultimate_report(
             ax2.set_title(f"Micro View: {zoom_start:.1f}s ~ {zoom_start + zoom_duration:.1f}s")
             ax2.set_xlabel("Time (Seconds)"); ax2.grid(axis='x', linestyle='--', alpha=0.7)
 
-            plt.tight_layout(rect=[0, 0.03, 0.75, 0.90]) # 제목 공간 확보를 위해 0.90으로 수정
+            plt.tight_layout(rect=[0, 0.03, 0.75, 0.90])
             pdf.savefig(fig)
             plt.close(fig)
             print("완료!")

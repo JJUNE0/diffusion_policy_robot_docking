@@ -133,6 +133,7 @@ def main(args):
     vision_stride = args.get("vision_stride", 6)
     vision_backend = args.get("vision_backend", "raw_cnn")
     use_lidar = bool(args.get("use_lidar", False))
+    use_goal = bool(args.get("use_goal", True))
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= args.diffusion_gradient_steps:
@@ -183,6 +184,28 @@ def main(args):
             lidar_map = obs_dict["lidar_map"].to(device, non_blocking=True).float().div_(255.0)
             context["lidar_map"] = lidar_map
 
+        # NoMaD-style goal frames. The condition network samples the goal mask
+        # internally during training (Bernoulli(goal_mask_prob)), so we only
+        # supply the goal observation here.
+        if use_goal:
+            if "goal_image1" not in obs_dict:
+                raise KeyError(
+                    "use_goal=True 인데 batch에 'goal_image1'이 없습니다. "
+                    "DockingDataset(with_goal=True)로 생성되었는지 확인하세요."
+                )
+            goal_image1 = obs_dict["goal_image1"].to(device, non_blocking=True).float().div_(255.0)
+            goal_image2 = obs_dict["goal_image2"].to(device, non_blocking=True).float().div_(255.0)
+            if vision_backend == "dino":
+                dino_detector = _get_dino_detector(device)
+                with torch.no_grad():
+                    goal_feat1, _, _ = dino_detector.get_heatmap(goal_image1)
+                    goal_feat2, _, _ = dino_detector.get_heatmap(goal_image2)
+                context["goal_feat1"] = goal_feat1.view(B, 196, 768)
+                context["goal_feat2"] = goal_feat2.view(B, 196, 768)
+            else:
+                context["goal_image1"] = goal_image1
+                context["goal_image2"] = goal_image2
+
         diff_log = nn_diffusion.update(x0=action, condition=context)
         lr_schedulers.step()
 
@@ -199,6 +222,13 @@ def main(args):
             print(f"Velocity history shape: {velocity.shape}")
             if use_lidar:
                 print(f"Lidar map sparse history shape: {context['lidar_map'].shape}")
+            if use_goal:
+                goal_key = "goal_feat1" if vision_backend == "dino" else "goal_image1"
+                print(f"Goal frame shape ({goal_key}): {context[goal_key].shape}")
+                print(
+                    f"Goal masking: goal_mask_prob={args.get('goal_mask_prob', 0.5)} "
+                    f"(per-step expected ~{args.get('goal_mask_prob', 0.5):.2f} of samples blocked)"
+                )
 
         if n_gradient_step % args.get("log_interval", 100) == 0:
             logger.log(

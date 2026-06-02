@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pathlib import Path
 
@@ -44,6 +44,9 @@ class DockingDataset(Dataset):
         obs_horizon: int = 30,
         vision_stride: int = 6,
         dt: float = 0.0333,
+        with_goal: bool = True,
+        goal_offset_min: Optional[int] = None,
+        goal_offset_max: Optional[int] = None,
     ):
         super().__init__()
         self.h5_path = npz_path
@@ -53,6 +56,21 @@ class DockingDataset(Dataset):
         self.vision_stride = max(1, int(vision_stride))
         # Kept for interface compatibility with existing setup / inference code.
         self.dt = dt
+
+        # ------------------------------------------------------------------
+        # NoMaD-style goal masking support.
+        # When ``with_goal`` is on, __getitem__ also returns a single future
+        # camera frame per room ("goal_image1"/"goal_image2") sampled from the
+        # *same episode*, somewhere ahead of the current timestep (up to the
+        # final, docked frame). The condition network turns this into a goal
+        # token that is randomly masked during training.
+        # ------------------------------------------------------------------
+        self.with_goal = bool(with_goal)
+        # Default: sample the goal at least one prediction horizon ahead so it
+        # is a genuine future/destination frame, not inside the predicted
+        # action window.
+        self.goal_offset_min = int(goal_offset_min) if goal_offset_min is not None else int(horizon)
+        self.goal_offset_max = int(goal_offset_max) if goal_offset_max is not None else None
 
         for label, path in (("eval_data", self.h5_path), ("train_norm", self.train_h5_path)):
             p = Path(path).expanduser()
@@ -94,14 +112,18 @@ class DockingDataset(Dataset):
             self.action_max - self.action_min, a_min=1e-5, a_max=None
         ).astype(np.float32)
 
-        # Index map: (timestep, ep_start) for every valid sample window.
+        # Index map: (timestep, ep_start, ep_end) for every valid sample window.
+        # ``ep_end`` (exclusive episode boundary) is needed to sample a goal
+        # frame from the remaining future of the same episode.
         self.index_map: List[int] = []
         self.ep_start_map: List[int] = []
+        self.ep_end_map: List[int] = []
         start_idx = 0
         for end_idx in self.episode_ends:
             for t in range(start_idx, end_idx - self.horizon + 1):
                 self.index_map.append(t)
                 self.ep_start_map.append(start_idx)
+                self.ep_end_map.append(int(end_idx))
             start_idx = end_idx
 
         # Sparse vision offsets that match the legacy ``[:, ::vision_stride]``
@@ -213,6 +235,22 @@ class DockingDataset(Dataset):
         chunk = dset[list(unique)]
         return chunk[inverse]
 
+    def _sample_goal_index(self, t: int, ep_end: int) -> int:
+        """Pick a goal frame index from the *future* of the current episode.
+
+        ``g`` is sampled uniformly from ``[lo, hi]`` where
+        ``lo = min(t + goal_offset_min, ep_end - 1)`` and
+        ``hi = ep_end - 1`` (capped by ``goal_offset_max`` if set). Degenerate
+        ranges (near the episode end) clamp to the final, docked frame."""
+        last = ep_end - 1
+        lo = min(t + self.goal_offset_min, last)
+        hi = last
+        if self.goal_offset_max is not None:
+            hi = min(t + self.goal_offset_max, last)
+        if lo > hi:
+            return last
+        return int(np.random.randint(lo, hi + 1))
+
     # ------------------------------------------------------------------
     # Item retrieval
     # ------------------------------------------------------------------
@@ -221,6 +259,7 @@ class DockingDataset(Dataset):
 
         t = self.index_map[idx]
         ep_start = self.ep_start_map[idx]
+        ep_end = self.ep_end_map[idx]
 
         # Motion history (cheap, full length).
         encoder_seq_raw = self._get_history(self.z_encoder, t, ep_start).astype(np.float32)   # [T_obs, 2]
@@ -247,6 +286,15 @@ class DockingDataset(Dataset):
         if self.z_lidar is not None:
             lidar_seq = self._read_sparse(self.z_lidar, sparse_idx)        # [T_vis, C, S, S] uint8
             obs["lidar_map"] = torch.from_numpy(lidar_seq)                 # uint8
+
+        # NoMaD-style goal: a single future camera frame per room (uint8). The
+        # condition network masks this token randomly during training.
+        if self.with_goal:
+            g = self._sample_goal_index(t, ep_end)
+            goal_image1 = self.z_img1[g]                                   # [3, H, W] uint8
+            goal_image2 = self.z_img2[g]                                   # [3, H, W] uint8
+            obs["goal_image1"] = torch.from_numpy(np.asarray(goal_image1))  # uint8
+            obs["goal_image2"] = torch.from_numpy(np.asarray(goal_image2))  # uint8
 
         return {
             "obs": obs,

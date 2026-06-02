@@ -261,7 +261,13 @@ def main(args):
         obs_horizon=obs_h,
         vision_stride=vision_stride,
         dt=dt,
+        with_goal=False,  # goal frame is supplied manually per episode below
     )
+
+    use_goal_inf = bool(args.get("use_goal", True))
+    goal_mode = str(args.get("goal_mode", "conditioned")).lower()
+    if goal_mode not in ("conditioned", "undirected"):
+        raise ValueError(f"goal_mode must be 'conditioned' or 'undirected', got {goal_mode!r}")
 
     use_lidar_inf = bool(args.get("use_lidar", False))
     lidar_in_ch = int(args.get("lidar_channels", 2))
@@ -291,6 +297,9 @@ def main(args):
         lidar_in_ch=lidar_in_ch,
         num_lidar_latents=args.get("num_lidar_latents", 16),
         lidar_dropout_prob=0.0,
+        use_goal=use_goal_inf,
+        num_goal_latents=args.get("num_goal_latents", 16),
+        goal_mask_prob=args.get("goal_mask_prob", 0.5),
     ).to(device)
 
     nn_diffusion_model = DiT1d(
@@ -373,6 +382,32 @@ def main(args):
         all_ai_v_samples, all_ai_w_samples = [], []
         prev_ema_action = None
 
+        # NoMaD-style goal: use the episode's final (docked) camera frame as the
+        # goal image. Fetched once per episode and reused for every step.
+        goal_ctx = {}
+        if use_goal_inf:
+            goal_frame_idx = int(test_dataset.episode_ends[ep_idx]) - 1
+            g_img1 = (
+                torch.from_numpy(np.asarray(test_dataset.z_img1[goal_frame_idx]))
+                .unsqueeze(0).to(device).float().div_(255.0)
+            )  # [1, 3, H, W]
+            g_img2 = (
+                torch.from_numpy(np.asarray(test_dataset.z_img2[goal_frame_idx]))
+                .unsqueeze(0).to(device).float().div_(255.0)
+            )
+            if vision_backend == "dino":
+                with torch.no_grad():
+                    g_feat1, _, _ = detector.get_heatmap(g_img1)
+                    g_feat2, _, _ = detector.get_heatmap(g_img2)
+                goal_ctx["goal_feat1"] = g_feat1.view(1, 196, 768).repeat(n_samples, 1, 1)
+                goal_ctx["goal_feat2"] = g_feat2.view(1, 196, 768).repeat(n_samples, 1, 1)
+            else:
+                goal_ctx["goal_image1"] = g_img1.repeat(n_samples, 1, 1, 1)
+                goal_ctx["goal_image2"] = g_img2.repeat(n_samples, 1, 1, 1)
+            # goal_mask: 1 = attend (goal-conditioned), 0 = block (undirected).
+            goal_active = 1.0 if goal_mode == "conditioned" else 0.0
+            goal_ctx["goal_mask"] = torch.full((n_samples,), goal_active, device=device)
+
         for step_in_ep in range(n_samples_in_ep):
             sample_idx = sample_offset + step_in_ep
             batch = test_dataset[sample_idx]
@@ -417,6 +452,9 @@ def main(args):
                     batch["obs"]["lidar_map"].unsqueeze(0).to(device).float().div_(255.0)
                 )
                 context["lidar_map"] = lidar_map.repeat(n_samples, 1, 1, 1, 1)
+
+            # Goal frame + goal mask (same docked goal for every step in episode).
+            context.update(goal_ctx)
 
             if enable_zmq:
                 h, w_ = int(args.image_height), int(args.image_width)

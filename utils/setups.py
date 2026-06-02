@@ -61,6 +61,8 @@ def model_setups(args):
     vision_stride = args.get("vision_stride", 6)
     vision_horizon = len(range(0, obs_horizon, vision_stride))
 
+    use_goal = bool(args.get("use_goal", True))
+
     dataset = DockingDataset(
         npz_path=args.train_data_path,
         train_npz_path=args.train_data_path,
@@ -68,6 +70,9 @@ def model_setups(args):
         obs_horizon=obs_horizon,
         vision_stride=vision_stride,
         dt=args.get("dt", 0.0333),
+        with_goal=use_goal,
+        goal_offset_min=args.get("goal_offset_min", None),
+        goal_offset_max=args.get("goal_offset_max", None),
     )
 
     # NOTE: keep DataLoader memory pressure low.
@@ -119,6 +124,9 @@ def model_setups(args):
         lidar_in_ch=lidar_in_ch,
         num_lidar_latents=args.get("num_lidar_latents", 16),
         lidar_dropout_prob=args.get("lidar_dropout_prob", 0.0),
+        use_goal=use_goal,
+        num_goal_latents=args.get("num_goal_latents", 16),
+        goal_mask_prob=args.get("goal_mask_prob", 0.5),
     ).to(args.device)
 
     nn_diffusion_model = DiT1d(

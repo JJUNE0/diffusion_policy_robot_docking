@@ -65,6 +65,16 @@ class SensorFusionConditionNetwork(BaseNNCondition):
     Optional lidar branch (use_lidar=True):
         - lidar_map: [B, Tv, C, S, S]   BEV occupancy map in [0, 1] (same Tv as vision)
 
+    Optional NoMaD-style goal branch (use_goal=True):
+        - raw_cnn backend: goal_image1 / goal_image2: [B, 3, H, W]   (single future frame, [0, 1])
+        - dino   backend: goal_feat1  / goal_feat2 : [B, 196, 768]
+        - goal_mask (optional): [B] float in {0, 1}. 1 = attend to goal
+          (goal-conditioned), 0 = block goal token (undirected). If absent, a
+          mask is sampled internally during training (Bernoulli(goal_mask_prob)
+          of being *blocked*) and defaults to 1 (use goal) at eval.
+          NOTE: this convention is the inverse of NoMaD's ``m`` (where m=1 masks
+          out); here goal_mask=1 keeps the goal active.
+
     where
         - Tv = vision_horizon (default: 5)
         - Tm = obs_horizon    (default: 30)
@@ -72,6 +82,15 @@ class SensorFusionConditionNetwork(BaseNNCondition):
     Output:
         - [B, d_model] condition vector from the readout token.
     """
+
+    # Fixed modality embedding slots (kept stable so token tagging never drifts).
+    MOD_IMG1 = 0
+    MOD_IMG2 = 1
+    MOD_VEL = 2
+    MOD_READOUT = 3
+    MOD_LIDAR = 4
+    MOD_GOAL = 5
+    N_MODALITIES = 6
 
     def __init__(
         self,
@@ -90,6 +109,9 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         lidar_in_ch: int = 2,
         num_lidar_latents: int = 16,
         lidar_dropout_prob: float = 0.0,
+        use_goal: bool = True,
+        num_goal_latents: int = 16,
+        goal_mask_prob: float = 0.5,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -107,6 +129,9 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.lidar_in_ch = lidar_in_ch
         self.num_lidar_latents = num_lidar_latents
         self.lidar_dropout_prob = lidar_dropout_prob
+        self.use_goal = use_goal
+        self.num_goal_latents = num_goal_latents
+        self.goal_mask_prob = goal_mask_prob
 
         if self.vision_backend == "raw_cnn":
             # Shared encoder for both camera streams.
@@ -135,6 +160,19 @@ class SensorFusionConditionNetwork(BaseNNCondition):
             self.lidar_time_emb = None
             self.lidar_slot_emb = None
 
+        # Goal branch (NoMaD-style): a single future camera frame per room is
+        # tokenized into goal latents that the fusion Transformer can attend to
+        # (or be masked out from). The raw patch tokenizer is shared with the
+        # observation branch; only a dedicated resampler / slot embedding are new.
+        if self.use_goal:
+            self.goal_resampler = PerceiverResampler(
+                d_model, num_latents=num_goal_latents, nhead=nhead
+            )
+            self.goal_slot_emb = nn.Parameter(torch.randn(num_goal_latents, d_model) * 0.02)
+        else:
+            self.goal_resampler = None
+            self.goal_slot_emb = None
+
         # Motion branch.
         self.velocity_proj = nn.Sequential(
             nn.Linear(velocity_dim, d_model),
@@ -147,9 +185,10 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.motion_time_emb = nn.Parameter(torch.randn(obs_horizon, d_model) * 0.02)
         self.image_slot_emb = nn.Parameter(torch.randn(num_image_latents, d_model) * 0.02)
 
-        # modality indices: 0=image1, 1=image2, 2=velocity, 3=readout, 4=lidar (only if use_lidar)
-        n_modalities = 5 if self.use_lidar else 4
-        self.modality_emb = nn.Parameter(torch.randn(n_modalities, d_model) * 0.02)
+        # Fixed-size modality table indexed by the MOD_* constants above
+        # (0=image1, 1=image2, 2=velocity, 3=readout, 4=lidar, 5=goal). A couple
+        # of unused rows when lidar/goal are off are harmless.
+        self.modality_emb = nn.Parameter(torch.randn(self.N_MODALITIES, d_model) * 0.02)
 
         self.readout_emb = nn.Parameter(torch.zeros(1, 1, d_model))
         self.token_pos_emb = SinusoidalEmbedding(d_model)
@@ -226,7 +265,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         vel_tokens = (
             vel_tokens
             + self.motion_time_emb.view(1, t_seq, self.d_model)
-            + self.modality_emb[2].view(1, 1, self.d_model)
+            + self.modality_emb[self.MOD_VEL].view(1, 1, self.d_model)
         )
         vel_tokens = self._apply_branch_dropout(vel_tokens, self.velocity_dropout_prob)
         return vel_tokens
@@ -282,6 +321,40 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         tokens = self._apply_branch_dropout(tokens, self.lidar_dropout_prob)
         return tokens
 
+    def _build_goal_tokens(self, goal_feat: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            goal_feat: [B, 196, 768]   (single goal frame, shared tokenizer)
+
+        Returns:
+            [B, num_goal_latents, d_model]
+        """
+        b, n_patch, feat_dim = goal_feat.shape
+        if n_patch != 196 or feat_dim != 768:
+            raise ValueError(
+                f"Expected goal patch shape (*, 196, 768), got (*, {n_patch}, {feat_dim})."
+            )
+
+        patch_tokens = self.vision_proj(goal_feat.float())
+        latent_tokens = self.goal_resampler(patch_tokens, cond=None)  # [B, num_goal_latents, d_model]
+        latent_tokens = (
+            latent_tokens
+            + self.goal_slot_emb.view(1, self.num_goal_latents, self.d_model)
+            + self.modality_emb[self.MOD_GOAL].view(1, 1, self.d_model)
+        )
+        return latent_tokens
+
+    def _encode_goal_frame(self, condition: Dict, idx: int) -> torch.Tensor:
+        """Resolve a single goal frame (room ``idx`` in {1, 2}) into [B, 196, 768]
+        patch features, honoring the active vision backend."""
+        if self.vision_backend == "raw_cnn":
+            raw = condition[f"goal_image{idx}"]
+            if raw.dim() == 5:  # tolerate a [B, 1, 3, H, W] layout
+                raw = raw[:, -1]
+            patches = self.raw_patch_encoder(raw)  # [B, 196, 768]
+            return patches
+        return condition[f"goal_feat{idx}"]
+
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.vision_backend == "raw_cnn":
             required_keys = ("raw_image1", "raw_image2", "velocity")
@@ -307,8 +380,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         b = dino_feat1.shape[0]
         device = dino_feat1.device
 
-        image1_tokens = self._build_image_tokens(dino_feat1, self.room1_resampler, modality_idx=0)
-        image2_tokens = self._build_image_tokens(dino_feat2, self.room2_resampler, modality_idx=1)
+        image1_tokens = self._build_image_tokens(dino_feat1, self.room1_resampler, modality_idx=self.MOD_IMG1)
+        image2_tokens = self._build_image_tokens(dino_feat2, self.room2_resampler, modality_idx=self.MOD_IMG2)
         velocity_tokens = self._build_velocity_tokens(velocity)
 
         # TODO: turn off pos/vel tokens
@@ -316,14 +389,42 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         # image2_tokens = torch.zeros_like(image2_tokens)
         # velocity_tokens = torch.zeros_like(velocity_tokens)
 
-        readout = self.readout_emb.repeat(b, 1, 1) + self.modality_emb[3].view(1, 1, self.d_model)
+        readout = self.readout_emb.repeat(b, 1, 1) + self.modality_emb[self.MOD_READOUT].view(1, 1, self.d_model)
 
         token_groups = [image1_tokens, image2_tokens, velocity_tokens]
 
         if self.use_lidar:
             lidar_feat = self._encode_lidar_to_patches(condition["lidar_map"])
-            lidar_tokens = self._build_lidar_tokens(lidar_feat, modality_idx=4)
+            lidar_tokens = self._build_lidar_tokens(lidar_feat, modality_idx=self.MOD_LIDAR)
             token_groups.append(lidar_tokens)
+
+        # ------------------------------------------------------------------
+        # NoMaD-style goal token + attention masking.
+        #   - Goal tokens are appended right before the readout token.
+        #   - ``goal_active`` (per-sample, 1=attend / 0=block) is taken from
+        #     condition["goal_mask"] if present, else sampled during training
+        #     (blocked with prob goal_mask_prob), else defaults to 1 at eval.
+        #   - Masking is done at the attention level: every query is blocked
+        #     from using the goal tokens as *keys* (so the readout never sees a
+        #     masked goal), while observation tokens stay fully visible.
+        # ------------------------------------------------------------------
+        has_goal_input = self.use_goal and (
+            ("goal_image1" in condition and "goal_image2" in condition)
+            if self.vision_backend == "raw_cnn"
+            else ("goal_feat1" in condition and "goal_feat2" in condition)
+        )
+
+        goal_slice = None
+        if has_goal_input:
+            goal_feat1 = self._encode_goal_frame(condition, 1)
+            goal_feat2 = self._encode_goal_frame(condition, 2)
+            goal_tokens = torch.cat(
+                [self._build_goal_tokens(goal_feat1), self._build_goal_tokens(goal_feat2)], dim=1
+            )  # [B, 2*num_goal_latents, d_model]
+            g_start = sum(t.shape[1] for t in token_groups)
+            g_end = g_start + goal_tokens.shape[1]
+            goal_slice = (g_start, g_end)
+            token_groups.append(goal_tokens)
 
         token_groups.append(readout)
 
@@ -331,10 +432,33 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         token_idx = torch.arange(all_tokens.shape[1], device=device)
         all_tokens = all_tokens + self.token_pos_emb(token_idx).unsqueeze(0)
 
-        fused = self.tfm(all_tokens)[0]
+        attn_mask = None
+        if goal_slice is not None:
+            goal_active = self._resolve_goal_active(condition, b, device)  # [B] in {0, 1}
+            if not bool(torch.all(goal_active > 0.5)):
+                g_start, g_end = goal_slice
+                L = all_tokens.shape[1]
+                attn_mask = torch.ones(b, L, L, device=device)
+                block = goal_active < 0.5  # samples whose goal must be hidden
+                # Block goal columns (keys) for every query of the blocked samples.
+                attn_mask[block, :, g_start:g_end] = 0.0
+
+        fused = self.tfm(all_tokens, mask=attn_mask)[0]
         out = fused[:, -1, :]
 
         if mask is not None:
             out = out * mask.view(b, 1).float()
 
         return out
+
+    def _resolve_goal_active(self, condition: Dict, b: int, device: torch.device) -> torch.Tensor:
+        """Per-sample goal activation in {0, 1} (1=attend to goal, 0=block).
+
+        Priority: explicit ``condition["goal_mask"]`` > training-time Bernoulli
+        sampling (blocked with prob ``goal_mask_prob``) > default 1 (use goal)."""
+        goal_mask = condition.get("goal_mask", None)
+        if goal_mask is not None:
+            return goal_mask.to(device=device, dtype=torch.float32).view(b)
+        if self.training:
+            return (torch.rand(b, device=device) > self.goal_mask_prob).float()
+        return torch.ones(b, device=device)

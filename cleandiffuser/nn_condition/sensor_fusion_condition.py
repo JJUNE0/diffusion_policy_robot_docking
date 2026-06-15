@@ -65,9 +65,12 @@ class SensorFusionConditionNetwork(BaseNNCondition):
     Optional lidar branch (use_lidar=True):
         - lidar_map: [B, Tv, C, S, S]   BEV occupancy map in [0, 1] (same Tv as vision)
 
-    Optional NoMaD-style goal branch (use_goal=True):
-        - raw_cnn backend: goal_image1 / goal_image2: [B, 3, H, W]   (single future frame, [0, 1])
-        - dino   backend: goal_feat1  / goal_feat2 : [B, 196, 768]
+    Optional ViNT/NoMaD-style goal branch (use_goal=True), with EARLY goal fusion:
+        - raw_cnn backend: goal_image1 / goal_image2: [B, 3, H, W]   (single future frame, [0, 1]).
+          Each is stacked channel-wise with the current observation frame
+          (raw_image{i}[:, -1]) and encoded by a dedicated 6-channel goal-fusion
+          encoder phi(o_t, o_g) -> relative goal token.
+        - dino   backend: goal_feat1  / goal_feat2 : [B, 196, 768]   (independent, late-fusion fallback)
         - goal_mask (optional): [B] float in {0, 1}. 1 = attend to goal
           (goal-conditioned), 0 = block goal token (undirected). If absent, a
           mask is sampled internally during training (Bernoulli(goal_mask_prob)
@@ -160,16 +163,29 @@ class SensorFusionConditionNetwork(BaseNNCondition):
             self.lidar_time_emb = None
             self.lidar_slot_emb = None
 
-        # Goal branch (NoMaD-style): a single future camera frame per room is
-        # tokenized into goal latents that the fusion Transformer can attend to
-        # (or be masked out from). The raw patch tokenizer is shared with the
-        # observation branch; only a dedicated resampler / slot embedding are new.
+        # Goal branch (ViNT/NoMaD-style with EARLY goal fusion).
+        # ViNT's key insight: goal features should be *relative* to the current
+        # observation, so the goal frame is stacked channel-wise with the current
+        # observation frame and passed through a dedicated goal-fusion encoder
+        # phi(o_t, o_g) -> goal token (NOT encoded independently / "late fusion").
+        #   - raw_cnn backend: a separate 6-channel patch encoder ingests
+        #     concat([current_frame, goal_frame], dim=channel).
+        #   - dino backend: frozen 3-channel ViT cannot ingest a 6-channel stack,
+        #     so it falls back to independent goal features (kept for completeness;
+        #     this path is not ViNT early-fusion).
         if self.use_goal:
+            if self.vision_backend == "raw_cnn":
+                self.goal_fusion_encoder = RawPatchEncoder(in_ch=6, out_dim=768, spatial=14)
+            else:
+                self.goal_fusion_encoder = None
+            self.goal_proj = nn.Linear(768, d_model)
             self.goal_resampler = PerceiverResampler(
                 d_model, num_latents=num_goal_latents, nhead=nhead
             )
             self.goal_slot_emb = nn.Parameter(torch.randn(num_goal_latents, d_model) * 0.02)
         else:
+            self.goal_fusion_encoder = None
+            self.goal_proj = None
             self.goal_resampler = None
             self.goal_slot_emb = None
 
@@ -324,7 +340,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
     def _build_goal_tokens(self, goal_feat: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            goal_feat: [B, 196, 768]   (single goal frame, shared tokenizer)
+            goal_feat: [B, 196, 768]   (relative goal-fusion features phi(o_t, o_g))
 
         Returns:
             [B, num_goal_latents, d_model]
@@ -335,7 +351,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 f"Expected goal patch shape (*, 196, 768), got (*, {n_patch}, {feat_dim})."
             )
 
-        patch_tokens = self.vision_proj(goal_feat.float())
+        patch_tokens = self.goal_proj(goal_feat.float())
         latent_tokens = self.goal_resampler(patch_tokens, cond=None)  # [B, num_goal_latents, d_model]
         latent_tokens = (
             latent_tokens
@@ -344,15 +360,22 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         )
         return latent_tokens
 
-    def _encode_goal_frame(self, condition: Dict, idx: int) -> torch.Tensor:
-        """Resolve a single goal frame (room ``idx`` in {1, 2}) into [B, 196, 768]
-        patch features, honoring the active vision backend."""
+    def _encode_goal_fused(self, condition: Dict, idx: int) -> torch.Tensor:
+        """ViNT early goal fusion for room ``idx`` in {1, 2} -> [B, 196, 768].
+
+        Stacks the *current* observation frame (o_t = last vision frame) with the
+        goal frame (o_g) channel-wise and runs the dedicated 6-channel goal-fusion
+        encoder phi(o_t, o_g), yielding relative goal features. The dino backend
+        cannot channel-concat into a frozen ViT, so it falls back to independent
+        goal features (``goal_feat{idx}``)."""
         if self.vision_backend == "raw_cnn":
-            raw = condition[f"goal_image{idx}"]
-            if raw.dim() == 5:  # tolerate a [B, 1, 3, H, W] layout
-                raw = raw[:, -1]
-            patches = self.raw_patch_encoder(raw)  # [B, 196, 768]
-            return patches
+            cur = condition[f"raw_image{idx}"]      # [B, Tv, 3, H, W]
+            cur = cur[:, -1]                        # current frame o_t: [B, 3, H, W]
+            goal = condition[f"goal_image{idx}"]    # [B, 3, H, W] (or [B, 1, 3, H, W])
+            if goal.dim() == 5:
+                goal = goal[:, -1]
+            fused = torch.cat([cur, goal], dim=1)   # [B, 6, H, W]
+            return self.goal_fusion_encoder(fused)  # [B, 196, 768]
         return condition[f"goal_feat{idx}"]
 
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -416,8 +439,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
         goal_slice = None
         if has_goal_input:
-            goal_feat1 = self._encode_goal_frame(condition, 1)
-            goal_feat2 = self._encode_goal_frame(condition, 2)
+            goal_feat1 = self._encode_goal_fused(condition, 1)
+            goal_feat2 = self._encode_goal_fused(condition, 2)
             goal_tokens = torch.cat(
                 [self._build_goal_tokens(goal_feat1), self._build_goal_tokens(goal_feat2)], dim=1
             )  # [B, 2*num_goal_latents, d_model]

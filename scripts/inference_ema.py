@@ -248,7 +248,7 @@ def main(args):
 
     # Episode selection knobs.
     eval_episodes_cfg = args.get("eval_episodes", "all")
-    success_threshold_m = float(args.get("success_threshold_m", 0.3))
+    success_threshold_m = float(args.get("success_threshold_m", 0.))
     heading_threshold_deg = args.get("success_heading_threshold_deg", None)
     if heading_threshold_deg is not None:
         heading_threshold_deg = float(heading_threshold_deg)

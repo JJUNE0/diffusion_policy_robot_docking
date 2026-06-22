@@ -15,7 +15,7 @@ train_data_path : ${hydra:runtime.cwd}/dataset/postech_all_dataset_no_lidar.h5
 horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
-batch_size: 32
+batch_size: 16
 num_workers: 4
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)

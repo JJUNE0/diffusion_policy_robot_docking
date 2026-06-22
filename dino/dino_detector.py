@@ -36,6 +36,25 @@ class DinoBatchDetector:
         self.std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
     @torch.no_grad()
+    def get_features(self, img_tensor):
+        """Feature-only fast path for training/inference conditioning.
+
+        Returns just the DINO patch features [B, 196, 768] and skips the
+        OpenCV similarity-map verification that ``get_heatmap`` does (that part
+        is discarded by the policy and only needed for visualization). Runs the
+        frozen ViT under fp16 autocast on CUDA for speed.
+
+        img_tensor: [B, 3, H, W] in [0, 1].
+        """
+        x = F.interpolate(img_tensor, size=(224, 224), mode="bicubic", align_corners=False)
+        x = (x - self.mean) / self.std
+        use_amp = x.is_cuda
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            outputs = self.model(x)
+        # Drop CLS + register tokens; keep the 196 patch tokens.
+        return outputs.last_hidden_state[:, 5:, :]
+
+    @torch.no_grad()
     def get_heatmap(self, img_tensor):
         """
         img_tensor: [B, 3, 240, 320]

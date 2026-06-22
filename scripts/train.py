@@ -160,8 +160,8 @@ def main(args):
             image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
             image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
             with torch.no_grad():
-                dino_feat1, _, _ = dino_detector.get_heatmap(image_room1_flat)
-                dino_feat2, _, _ = dino_detector.get_heatmap(image_room2_flat)
+                dino_feat1 = dino_detector.get_features(image_room1_flat)
+                dino_feat2 = dino_detector.get_features(image_room2_flat)
             context = {
                 "dino_feat1": dino_feat1.view(B, T_vis, 196, 768),
                 "dino_feat2": dino_feat2.view(B, T_vis, 196, 768),
@@ -198,8 +198,8 @@ def main(args):
             if vision_backend == "dino":
                 dino_detector = _get_dino_detector(device)
                 with torch.no_grad():
-                    goal_feat1, _, _ = dino_detector.get_heatmap(goal_image1)
-                    goal_feat2, _, _ = dino_detector.get_heatmap(goal_image2)
+                    goal_feat1 = dino_detector.get_features(goal_image1)
+                    goal_feat2 = dino_detector.get_features(goal_image2)
                 context["goal_feat1"] = goal_feat1.view(B, 196, 768)
                 context["goal_feat2"] = goal_feat2.view(B, 196, 768)
             else:

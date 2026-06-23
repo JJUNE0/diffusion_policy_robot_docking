@@ -75,6 +75,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         num_image_latents: int = 16,
         velocity_dim: int = 2,
         velocity_dropout_prob: float = 0.2,
+        use_goal: bool = False,
+        num_goal_latents: int = 16,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -85,6 +87,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.num_image_latents = num_image_latents
         self.velocity_dim = velocity_dim
         self.velocity_dropout_prob = velocity_dropout_prob
+        self.use_goal = use_goal
+        self.num_goal_latents = num_goal_latents
 
         # Vision branches: one branch per room.
         self.vision_proj = nn.Linear(768, d_model)
@@ -105,6 +109,19 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
         # modality indices: 0=image1, 1=image2, 2=velocity, 3=readout
         self.modality_emb = nn.Parameter(torch.randn(4, d_model) * 0.02)
+
+        # Goal-feature conditioning (CLAUDE.md §2.3 Loss A). The goal is the DINO
+        # feature of a future/docked camera frame; NoMaD-style masking lets one
+        # policy learn both goal-conditioned and undirected docking. Reuses
+        # vision_proj (same DINO space) but has its own resamplers/embeddings so
+        # the goal is a distinct modality. Convention: goal_mask 1 = attend the
+        # goal, 0 = undirected (goal tokens replaced by a learned null token).
+        if use_goal:
+            self.goal_resampler1 = PerceiverResampler(d_model, num_latents=num_goal_latents, nhead=nhead)
+            self.goal_resampler2 = PerceiverResampler(d_model, num_latents=num_goal_latents, nhead=nhead)
+            self.goal_slot_emb = nn.Parameter(torch.randn(num_goal_latents, d_model) * 0.02)
+            self.goal_modality_emb = nn.Parameter(torch.randn(2, d_model) * 0.02)  # room1/room2 goal
+            self.goal_null_emb = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
         self.readout_emb = nn.Parameter(torch.zeros(1, 1, d_model))
         self.token_pos_emb = SinusoidalEmbedding(d_model)
@@ -186,6 +203,39 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         vel_tokens = self._apply_branch_dropout(vel_tokens, self.velocity_dropout_prob)
         return vel_tokens
 
+    def _build_goal_tokens(
+        self,
+        goal_feat1: torch.Tensor,
+        goal_feat2: torch.Tensor,
+        goal_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Encode the goal DINO features into goal tokens (NoMaD-masked).
+
+        Args:
+            goal_feat{1,2}: [B, 1, 196, 768] or [B, 196, 768]  (single goal frame)
+            goal_mask: [B] with 1 = attend goal, 0 = undirected (null token)
+        Returns:
+            [B, 2 * num_goal_latents, d_model]
+        """
+        def one(feat, resampler, modality_idx):
+            if feat.dim() == 4:
+                feat = feat[:, 0]                       # drop the singleton time axis
+            tok = resampler(self.vision_proj(feat.float()))
+            return (
+                tok
+                + self.goal_slot_emb.view(1, self.num_goal_latents, self.d_model)
+                + self.goal_modality_emb[modality_idx].view(1, 1, self.d_model)
+            )
+
+        goal_tokens = torch.cat(
+            [one(goal_feat1, self.goal_resampler1, 0),
+             one(goal_feat2, self.goal_resampler2, 1)], dim=1)
+
+        if goal_mask is not None:
+            m = goal_mask.view(-1, 1, 1).float()
+            goal_tokens = goal_tokens * m + self.goal_null_emb * (1.0 - m)
+        return goal_tokens
+
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         required_keys = ("dino_feat1", "dino_feat2", "velocity")
         missing_keys = [k for k in required_keys if k not in condition]
@@ -210,7 +260,13 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
         readout = self.readout_emb.repeat(b, 1, 1) + self.modality_emb[3].view(1, 1, self.d_model)
 
-        all_tokens = torch.cat([image1_tokens, image2_tokens, velocity_tokens, readout], dim=1)
+        token_list = [image1_tokens, image2_tokens, velocity_tokens]
+        if self.use_goal and "goal_feat1" in condition:
+            token_list.append(self._build_goal_tokens(
+                condition["goal_feat1"], condition["goal_feat2"], condition.get("goal_mask")))
+        token_list.append(readout)
+
+        all_tokens = torch.cat(token_list, dim=1)
         token_idx = torch.arange(all_tokens.shape[1], device=device)
         all_tokens = all_tokens + self.token_pos_emb(token_idx).unsqueeze(0)
 

@@ -29,6 +29,12 @@ n_heads: 6             # Attention 헤드 수 (384 // 64 = 6)
 depth: 12              # DiT 블록의 깊이
 dropout: 0.1           # Classifier-Free Guidance(CFG)를 위한 조건 마스킹 확률
 
+# Goal-feature conditioning (CLAUDE.md §2.3 Loss A) — goal = docked frame's
+# DINO feature; NoMaD-style masking (goal_mask_prob = P(goal active)).
+use_goal: true
+goal_mask_prob: 0.5    # fraction of samples that are goal-conditioned (rest undirected)
+num_goal_latents: 16   # Perceiver latents per goal frame
+
 # ==========================================
 # 4. Diffusion Process
 # ==========================================

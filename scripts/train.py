@@ -120,6 +120,7 @@ def main(args):
 
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)
+    use_goal = args.get("use_goal", False)
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= args.diffusion_gradient_steps:
@@ -152,6 +153,18 @@ def main(args):
             "dino_feat2": dino_feat2.view(B, T_vis, 196, 768),
             "velocity": velocity,
         }
+
+        # Goal-feature conditioning (CLAUDE.md §2.3 Loss A): DINO-encode the goal
+        # (docked) frame and pass it + its NoMaD mask as extra condition inputs.
+        if use_goal:
+            goal_room1 = obs_dict["goal_image_room1"].to(device, non_blocking=True)  # [B, 3, H, W]
+            goal_room2 = obs_dict["goal_image_room2"].to(device, non_blocking=True)
+            with torch.no_grad():
+                goal_feat1, _, _ = dino_detector.get_heatmap(goal_room1)
+                goal_feat2, _, _ = dino_detector.get_heatmap(goal_room2)
+            context["goal_feat1"] = goal_feat1.view(B, 1, 196, 768)
+            context["goal_feat2"] = goal_feat2.view(B, 1, 196, 768)
+            context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
 
         diff_log = nn_diffusion.update(x0=action, condition=context)
         lr_schedulers.step()

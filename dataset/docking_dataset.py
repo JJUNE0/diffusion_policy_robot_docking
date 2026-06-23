@@ -30,6 +30,8 @@ class DockingDataset(Dataset):
         horizon: int = 16,
         obs_horizon: int = 30,
         dt: float = 0.0333,
+        with_goal: bool = False,
+        goal_mask_prob: float = 0.5,
     ):
         super().__init__()
         self.h5_path = npz_path
@@ -38,6 +40,11 @@ class DockingDataset(Dataset):
         self.obs_horizon = obs_horizon
         # Kept for interface compatibility with existing setup / inference code.
         self.dt = dt
+        # Goal-feature conditioning (CLAUDE.md §2.3). Goal = the episode's docked
+        # (final) frame; goal_mask_prob is the probability the goal is ACTIVE
+        # (NoMaD-style: the rest are undirected). with_goal=False = old behavior.
+        self.with_goal = with_goal
+        self.goal_mask_prob = goal_mask_prob
 
         self.root = h5py.File(self.h5_path, "r")
         self.train_root = h5py.File(self.train_h5_path, "r")
@@ -50,12 +57,14 @@ class DockingDataset(Dataset):
 
         self.index_map = []
         self.ep_start_map = []
+        self.ep_end_map = []
 
         start_idx = 0
         for end_idx in self.episode_ends:
             for t in range(start_idx, end_idx - self.horizon + 1):
                 self.index_map.append(t)
                 self.ep_start_map.append(start_idx)
+                self.ep_end_map.append(end_idx)
             start_idx = end_idx
 
         self.action_min = self.z_encoder_train[:].min(axis=0).astype(np.float32)
@@ -105,15 +114,24 @@ class DockingDataset(Dataset):
         act_traj = self.z_encoder[t: t + self.horizon].astype(np.float32)                      # [H, 2]
         act_traj_norm = self.normalize_action(act_traj).astype(np.float32)
 
-        return {
-            "obs": {
-                "encoder": torch.from_numpy(encoder_seq_raw).float(),
-                "velocity": torch.from_numpy(velocity_seq_norm).float(),
-                "image_room1": torch.from_numpy(image_room1).float(),
-                "image_room2": torch.from_numpy(image_room2).float(),
-            },
-            "act": torch.from_numpy(act_traj_norm).float(),
+        obs = {
+            "encoder": torch.from_numpy(encoder_seq_raw).float(),
+            "velocity": torch.from_numpy(velocity_seq_norm).float(),
+            "image_room1": torch.from_numpy(image_room1).float(),
+            "image_room2": torch.from_numpy(image_room2).float(),
         }
+
+        if self.with_goal:
+            # Goal = the episode's docked (final) frame, the ultimate sub-goal.
+            gi = int(self.ep_end_map[idx]) - 1
+            goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0   # [3, H, W]
+            goal_room2 = self.z_img2[gi].astype(np.float32) / 255.0
+            goal_active = 1.0 if np.random.rand() < self.goal_mask_prob else 0.0
+            obs["goal_image_room1"] = torch.from_numpy(goal_room1).float()
+            obs["goal_image_room2"] = torch.from_numpy(goal_room2).float()
+            obs["goal_mask"] = torch.tensor(goal_active, dtype=torch.float32)
+
+        return {"obs": obs, "act": torch.from_numpy(act_traj_norm).float()}
 
 
 def denormalize(norm_action, act_scale, act_min):

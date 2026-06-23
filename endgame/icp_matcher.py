@@ -1,12 +1,13 @@
 """Raw-point known-shape ICP — the mm end-game (CLAUDE.md §2.1, §6).
 
 This is the *only* place a metric SE(2) pose is produced. It aligns the raw
-LiDAR scan (no grid quantization) to the known target template via iterative
-closest point with a closed-form 2D solve. Occupancy never enters here.
+LiDAR scan (no grid quantization) to the known target template via **point-to-line
+ICP** (Censi's PLICP, 2008): Gauss-Newton on per-point normals. Occupancy never
+enters here. See docs/icp_background.md for the concepts and references.
 
 Two CLAUDE.md guards are baked in:
 
-* §2.1 "mm precision" — point-to-point ICP on raw points + coarse-to-fine
+* §2.1 "mm precision" — point-to-line ICP on raw points + coarse-to-fine
   correspondence annealing, with explicit convergence diagnostics (RMS residual,
   inlier ratio) so a bad lock is *detectable* instead of silently trusted.
 * §4 "LiDAR geometry aliasing" — ICP is restarted from several yaw seeds; if

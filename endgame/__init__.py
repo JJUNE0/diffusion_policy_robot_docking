@@ -1,42 +1,22 @@
-"""Two-regime LiDAR end-game subsystem (CLAUDE.md §2.1).
+"""LiDAR known-shape ICP — OFFLINE dock-pose labeling & template building.
 
-Terminal mm-precision docking via 2D LiDAR raw-point known-shape ICP, plus the
-explicit policy->LiDAR handoff trigger. Kept entirely separate from the learned
-diffusion-policy / torch stack (work guideline §3): the learned policy is
-injected into :class:`TwoRegimeController` as an opaque ``policy_fn``.
-
-Quick start
------------
->>> from endgame import EndgameConfig, TwoRegimeController
->>> ctrl = TwoRegimeController(EndgameConfig(), policy_fn=my_policy)
->>> info = ctrl.step(lidar_points_xy, policy_obs)   # -> {'v', 'w', 'mode', ...}
+Option A (single learned model): ICP runs **offline only** — it generates the
+dock-pose labels (scripts/label_subgoals.py) and the canonical template
+(scripts/build_dock_template.py) that supervise the policy's precision aux head.
+ICP does NOT run at inference. (The old runtime two-regime handoff/orchestrator
+was removed; see docs/plan/00_overview.md.)
 """
 
-from .config import (
-    EndgameConfig,
-    ExtrinsicCalibration,
-    HandoffConfig,
-    ICPConfig,
-    TargetShapeConfig,
-)
-from .handoff import HandoffController, HandoffDecision, Regime
+from .config import ExtrinsicCalibration, ICPConfig, TargetShapeConfig
 from .icp_matcher import ICPMatcher, ICPResult
-from .orchestrator import ServoConfig, TwoRegimeController
 from .target_model import TargetTemplate, make_template, template_from_config
 
 __all__ = [
-    "EndgameConfig",
-    "ExtrinsicCalibration",
-    "TargetShapeConfig",
     "ICPConfig",
-    "HandoffConfig",
+    "TargetShapeConfig",
+    "ExtrinsicCalibration",
     "ICPMatcher",
     "ICPResult",
-    "HandoffController",
-    "HandoffDecision",
-    "Regime",
-    "TwoRegimeController",
-    "ServoConfig",
     "TargetTemplate",
     "make_template",
     "template_from_config",

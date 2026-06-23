@@ -121,6 +121,10 @@ def main(args):
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)
     use_goal = args.get("use_goal", False)
+    use_lidar = args.get("use_lidar_points", False)
+    use_aux = args.get("use_aux_pose", False)
+    aux_weight = args.get("aux_weight", 1.0)
+    sparse_vision = args.get("sparse_vision", False)
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= args.diffusion_gradient_steps:
@@ -136,8 +140,13 @@ def main(args):
         #   - image_room2: full 30-step history -> sparse history via ::vision_stride
         #   - velocity:    full 30-step normalized encoder history
         # ------------------------------------------------------------------
-        image_room1 = obs_dict["image_room1"][:, ::vision_stride].to(device, non_blocking=True)
-        image_room2 = obs_dict["image_room2"][:, ::vision_stride].to(device, non_blocking=True)
+        if sparse_vision:
+            # dataset already returned the sparse uint8 frames; convert on GPU.
+            image_room1 = obs_dict["image_room1"].to(device, non_blocking=True).float() / 255.0
+            image_room2 = obs_dict["image_room2"].to(device, non_blocking=True).float() / 255.0
+        else:
+            image_room1 = obs_dict["image_room1"][:, ::vision_stride].to(device, non_blocking=True)
+            image_room2 = obs_dict["image_room2"][:, ::vision_stride].to(device, non_blocking=True)
         velocity = obs_dict["velocity"].to(device, non_blocking=True)
 
         B, T_vis, C, H, W = image_room1.shape
@@ -159,6 +168,9 @@ def main(args):
         if use_goal:
             goal_room1 = obs_dict["goal_image_room1"].to(device, non_blocking=True)  # [B, 3, H, W]
             goal_room2 = obs_dict["goal_image_room2"].to(device, non_blocking=True)
+            if sparse_vision:
+                goal_room1 = goal_room1.float() / 255.0
+                goal_room2 = goal_room2.float() / 255.0
             with torch.no_grad():
                 goal_feat1, _, _ = dino_detector.get_heatmap(goal_room1)
                 goal_feat2, _, _ = dino_detector.get_heatmap(goal_room2)
@@ -166,8 +178,40 @@ def main(args):
             context["goal_feat2"] = goal_feat2.view(B, 1, 196, 768)
             context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
 
-        diff_log = nn_diffusion.update(x0=action, condition=context)
+        # Raw LiDAR points (Option A): point-set branch input.
+        if use_lidar:
+            context["lidar_points"] = obs_dict["lidar_points"].to(device, non_blocking=True)
+            context["lidar_npoints"] = obs_dict["lidar_npoints"].to(device, non_blocking=True)
+
+        # Combined loss = denoising (main) + ICP-distilled aux pose (precision).
+        # nn_diffusion.loss() runs the condition net once and caches its aux pred.
+        denoise_loss = nn_diffusion.loss(x0=action, condition=context)
+        aux_val, mm_val = None, None
+        if use_aux:
+            aux_pred = nn_condition._aux_pred
+            dock_target = batch["dock_target"].to(device, non_blocking=True)
+            m = batch["reliable"].to(device, non_blocking=True).float()
+            se = ((aux_pred - dock_target) ** 2).sum(dim=1)
+            aux_loss = (se * m).sum() / m.sum().clamp(min=1.0)
+            total_loss = denoise_loss + aux_weight * aux_loss
+            aux_val = aux_loss.item()
+            with torch.no_grad():
+                std = torch.as_tensor(dataset.dock_xy_std, device=device)
+                d_xy = (aux_pred[:, :2] - dock_target[:, :2]) * std
+                mm_val = ((torch.hypot(d_xy[:, 0], d_xy[:, 1]) * 1000.0 * m).sum()
+                          / m.sum().clamp(min=1.0)).item()
+        else:
+            total_loss = denoise_loss
+
+        nn_diffusion.optimizer.zero_grad()
+        total_loss.backward()
+        grad_norm = (torch.nn.utils.clip_grad_norm_(nn_diffusion.model.parameters(),
+                     nn_diffusion.grad_clip_norm) if nn_diffusion.grad_clip_norm else None)
+        nn_diffusion.optimizer.step()
+        nn_diffusion.ema_update()
         lr_schedulers.step()
+        diff_log = {"loss": denoise_loss.item(), "grad_norm": grad_norm,
+                    "aux": aux_val, "aux_mm": mm_val}
 
         if n_gradient_step == 0:
             print(f"Action target shape: {action.shape}")
@@ -183,10 +227,14 @@ def main(args):
                     "step": n_gradient_step,
                     "loss": diff_log["loss"],
                     "grad_norm": diff_log["grad_norm"],
+                    "aux_loss": diff_log["aux"],
+                    "aux_pose_mm": diff_log["aux_mm"],
                 },
                 category="train",
             )
-            print(f"Step {n_gradient_step} | Loss: {diff_log['loss']:.4f}")
+            extra = (f" | aux {diff_log['aux']:.4f} | dock {diff_log['aux_mm']:.1f}mm"
+                     if diff_log["aux"] is not None else "")
+            print(f"Step {n_gradient_step} | Loss: {diff_log['loss']:.4f}{extra}")
 
         if n_gradient_step > 0 and n_gradient_step % args.save_interval == 0:
             save_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")

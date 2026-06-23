@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from cleandiffuser.diffusion import ContinuousDiffusionSDE
 from cleandiffuser.nn_diffusion import DiT1d
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
-from dataset.docking_dataset import DockingDataset
+from utils.docking_dataset import DockingDataset
 
 from .utils import Logger
 
@@ -54,6 +54,8 @@ def model_setups(args):
     vision_horizon = len(range(0, obs_horizon, vision_stride))
 
     use_goal = args.get("use_goal", False)
+    use_lidar = args.get("use_lidar_points", False)
+    use_aux = args.get("use_aux_pose", False)
     dataset = DockingDataset(
         npz_path=args.train_data_path,
         train_npz_path=args.train_data_path,
@@ -62,6 +64,10 @@ def model_setups(args):
         dt=args.get("dt", 0.0333),
         with_goal=use_goal,
         goal_mask_prob=args.get("goal_mask_prob", 0.5),
+        with_lidar=use_lidar,
+        with_aux=use_aux,
+        vision_stride=vision_stride,
+        sparse_vision_uint8=args.get("sparse_vision", False),
     )
 
     num_workers = args.get("num_workers", 4)
@@ -88,6 +94,9 @@ def model_setups(args):
         velocity_dropout_prob=args.get("velocity_dropout_prob", 0.0),
         use_goal=use_goal,
         num_goal_latents=args.get("num_goal_latents", 16),
+        use_lidar_points=use_lidar,
+        num_lidar_latents=args.get("num_lidar_latents", 16),
+        use_aux_pose=use_aux,
     ).to(args.device)
 
     nn_diffusion_model = DiT1d(

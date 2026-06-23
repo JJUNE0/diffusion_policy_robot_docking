@@ -22,11 +22,13 @@ class PerceiverResampler(nn.Module):
             nn.Linear(d_model * 2, d_model),
         )
 
-    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None,
+                key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
             x: [B, N_patch, d_model]
             cond: optional conditioning tensor broadcastable to [B, N_latent, d_model]
+            key_padding_mask: [B, N_patch] bool, True = ignore (for padded point sets)
 
         Returns:
             [B, N_latent, d_model]
@@ -39,7 +41,8 @@ class PerceiverResampler(nn.Module):
 
         q_norm = self.ln_q(q)
         kv_norm = self.ln_kv(x)
-        attn_out, _ = self.cross_attn(query=q_norm, key=kv_norm, value=kv_norm)
+        attn_out, _ = self.cross_attn(query=q_norm, key=kv_norm, value=kv_norm,
+                                      key_padding_mask=key_padding_mask)
 
         out = q + attn_out
         out = out + self.ffn(self.ln_post(out))
@@ -77,6 +80,9 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         velocity_dropout_prob: float = 0.2,
         use_goal: bool = False,
         num_goal_latents: int = 16,
+        use_lidar_points: bool = False,
+        num_lidar_latents: int = 16,
+        use_aux_pose: bool = False,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -122,6 +128,28 @@ class SensorFusionConditionNetwork(BaseNNCondition):
             self.goal_slot_emb = nn.Parameter(torch.randn(num_goal_latents, d_model) * 0.02)
             self.goal_modality_emb = nn.Parameter(torch.randn(2, d_model) * 0.02)  # room1/room2 goal
             self.goal_null_emb = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # Raw-LiDAR-point branch (Option A): a point-set encoder, NOT a BEV CNN.
+        # Each (x,y) point -> MLP embedding -> Perceiver resampler (masked over the
+        # zero-padded points) -> num_lidar_latents tokens. Preserves mm info that
+        # rasterization would quantize away, and matches the online raw scan.
+        self.use_lidar_points = use_lidar_points
+        self.num_lidar_latents = num_lidar_latents
+        if use_lidar_points:
+            self.point_proj = nn.Sequential(
+                nn.Linear(2, d_model), nn.GELU(), nn.Linear(d_model, d_model))
+            self.lidar_resampler = PerceiverResampler(d_model, num_latents=num_lidar_latents, nhead=nhead)
+            self.lidar_slot_emb = nn.Parameter(torch.randn(num_lidar_latents, d_model) * 0.02)
+            self.lidar_modality_emb = nn.Parameter(torch.randn(1, d_model) * 0.02)
+
+        # ICP-distilled aux head: predicts the dock pose [x_norm, y_norm, sin, cos]
+        # from the readout vector -> precision/arrival judgment (replaces runtime
+        # ICP). Trained on the reliable ICP labels (masked loss in the train loop).
+        self.use_aux_pose = use_aux_pose
+        if use_aux_pose:
+            self.aux_head = nn.Sequential(
+                nn.Linear(d_model, 128), nn.GELU(), nn.Linear(128, 4))
+            self._aux_pred = None
 
         self.readout_emb = nn.Parameter(torch.zeros(1, 1, d_model))
         self.token_pos_emb = SinusoidalEmbedding(d_model)
@@ -236,6 +264,25 @@ class SensorFusionConditionNetwork(BaseNNCondition):
             goal_tokens = goal_tokens * m + self.goal_null_emb * (1.0 - m)
         return goal_tokens
 
+    def _build_lidar_tokens(self, points: torch.Tensor, npoints: torch.Tensor) -> torch.Tensor:
+        """Encode a padded raw point set into lidar tokens.
+
+        Args:
+            points:  [B, M, 2] robot-frame points, zero-padded.
+            npoints: [B] number of valid points per sample.
+        Returns:
+            [B, num_lidar_latents, d_model]
+        """
+        b, m, _ = points.shape
+        tok = self.point_proj(points.float())                         # [B, M, d]
+        valid = torch.arange(m, device=points.device)[None, :] < npoints.view(-1, 1)
+        pad_mask = ~valid                                             # True = ignore
+        pad_mask[npoints <= 0, 0] = False                            # avoid all-masked NaN
+        lat = self.lidar_resampler(tok, key_padding_mask=pad_mask)    # [B, n_lat, d]
+        return (lat
+                + self.lidar_slot_emb.view(1, self.num_lidar_latents, self.d_model)
+                + self.lidar_modality_emb.view(1, 1, self.d_model))
+
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         required_keys = ("dino_feat1", "dino_feat2", "velocity")
         missing_keys = [k for k in required_keys if k not in condition]
@@ -261,6 +308,9 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         readout = self.readout_emb.repeat(b, 1, 1) + self.modality_emb[3].view(1, 1, self.d_model)
 
         token_list = [image1_tokens, image2_tokens, velocity_tokens]
+        if self.use_lidar_points and "lidar_points" in condition:
+            token_list.append(self._build_lidar_tokens(
+                condition["lidar_points"], condition["lidar_npoints"]))
         if self.use_goal and "goal_feat1" in condition:
             token_list.append(self._build_goal_tokens(
                 condition["goal_feat1"], condition["goal_feat2"], condition.get("goal_mask")))
@@ -272,6 +322,11 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
         fused = self.tfm(all_tokens)[0]
         out = fused[:, -1, :]
+
+        # Cache the aux dock-pose prediction (read by the train loop for the
+        # masked precision loss). Computed from the unmasked readout.
+        if self.use_aux_pose:
+            self._aux_pred = self.aux_head(out)
 
         if mask is not None:
             out = out * mask.view(b, 1).float()

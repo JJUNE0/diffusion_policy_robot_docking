@@ -2,6 +2,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from cleandiffuser.nn_condition import BaseNNCondition
 from cleandiffuser.utils import SinusoidalEmbedding, Transformer
@@ -47,6 +48,43 @@ class PerceiverResampler(nn.Module):
         out = q + attn_out
         out = out + self.ffn(self.ln_post(out))
         return out
+
+
+class CrossAttnPoseHead(nn.Module):
+    """Dock-pose head that cross-attends a learned pose query to the RAW LiDAR
+    point tokens (direct geometric access) instead of regressing from the pooled
+    readout vector. The pooled-MLP head plateaued at ~3 cm because the precise
+    point geometry is diluted in one global vector; here the query reasons over
+    individual points (ICP-like), enabling mm precision.
+
+    Output: [x_norm, y_norm, sin(theta), cos(theta)].
+    """
+
+    def __init__(self, d_model: int, nhead: int = 6):
+        super().__init__()
+        self.pose_query = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.ln_q = nn.LayerNorm(d_model)
+        self.ln_kv = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.ln_post = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 2), nn.GELU(), nn.Linear(d_model * 2, d_model))
+        self.out = nn.Linear(d_model, 4)
+
+    def forward(self, point_tokens, key_padding_mask, cond_vec=None):
+        """point_tokens [B,M,d], key_padding_mask [B,M] (True=ignore), cond_vec [B,d] opt."""
+        b = point_tokens.shape[0]
+        q = self.pose_query.repeat(b, 1, 1)
+        if cond_vec is not None:                       # add fused global context
+            q = q + cond_vec.unsqueeze(1)
+        a, _ = self.attn(self.ln_q(q), self.ln_kv(point_tokens), self.ln_kv(point_tokens),
+                         key_padding_mask=key_padding_mask)
+        h = q + a
+        h = h + self.ffn(self.ln_post(h))
+        raw = self.out(h.squeeze(1))
+        xy = raw[:, :2]
+        sincos = F.normalize(raw[:, 2:4], dim=1)       # keep (sin,cos) on the unit circle
+        return torch.cat([xy, sincos], dim=1)
 
 
 class SensorFusionConditionNetwork(BaseNNCondition):
@@ -147,9 +185,16 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         # ICP). Trained on the reliable ICP labels (masked loss in the train loop).
         self.use_aux_pose = use_aux_pose
         if use_aux_pose:
-            self.aux_head = nn.Sequential(
-                nn.Linear(d_model, 128), nn.GELU(), nn.Linear(128, 4))
+            if use_lidar_points:
+                # ★ cross-attention precision head: pose query → raw point tokens
+                self.aux_pose_head = CrossAttnPoseHead(d_model, nhead)
+            else:
+                # fallback (no lidar): pooled-readout MLP head
+                self.aux_head = nn.Sequential(
+                    nn.Linear(d_model, 128), nn.GELU(), nn.Linear(128, 4))
             self._aux_pred = None
+        self._point_tokens = None        # per-point tokens for the cross-attn head
+        self._point_mask = None
 
         self.readout_emb = nn.Parameter(torch.zeros(1, 1, d_model))
         self.token_pos_emb = SinusoidalEmbedding(d_model)
@@ -278,6 +323,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         valid = torch.arange(m, device=points.device)[None, :] < npoints.view(-1, 1)
         pad_mask = ~valid                                             # True = ignore
         pad_mask[npoints <= 0, 0] = False                            # avoid all-masked NaN
+        self._point_tokens = tok                                     # for the cross-attn aux head
+        self._point_mask = pad_mask
         lat = self.lidar_resampler(tok, key_padding_mask=pad_mask)    # [B, n_lat, d]
         return (lat
                 + self.lidar_slot_emb.view(1, self.num_lidar_latents, self.d_model)
@@ -295,6 +342,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
         b = dino_feat1.shape[0]
         device = dino_feat1.device
+        self._point_tokens = None        # reset; set by _build_lidar_tokens if lidar present
 
         image1_tokens = self._build_image_tokens(dino_feat1, self.room1_resampler, modality_idx=0)
         image2_tokens = self._build_image_tokens(dino_feat2, self.room2_resampler, modality_idx=1)
@@ -323,10 +371,14 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         fused = self.tfm(all_tokens)[0]
         out = fused[:, -1, :]
 
-        # Cache the aux dock-pose prediction (read by the train loop for the
-        # masked precision loss). Computed from the unmasked readout.
+        # Cache the aux dock-pose prediction (read by the train loop for the masked
+        # precision loss). Cross-attn head when lidar present (direct point access);
+        # else pooled-readout MLP fallback.
         if self.use_aux_pose:
-            self._aux_pred = self.aux_head(out)
+            if self.use_lidar_points and self._point_tokens is not None:
+                self._aux_pred = self.aux_pose_head(self._point_tokens, self._point_mask, out)
+            else:
+                self._aux_pred = self.aux_head(out)
 
         if mask is not None:
             out = out * mask.view(b, 1).float()

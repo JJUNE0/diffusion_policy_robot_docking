@@ -12,7 +12,7 @@
 | RGB room1/2 | `image/room1\|room2/*.jpg` (640×480) | 시간 히스토리(희소 Tv=5) | 방향/외관 (DINO feature) |
 | encoder velocity | `encoder.csv` (vx, wz) | [Tm=30, 2] | 자기 운동·metric 변위 |
 | LiDAR | `lidar.jsonl` (raw x,y, ~190점, 12.5Hz) | → **BEV 이미지** | metric 기하(정밀 보조) |
-| (라벨) ICP 도크 포즈 | `subgoal_labels/<ep>.npz` (우리가 생성) | per-frame [x,y,θ] | **정밀 aux 헤드 교사** |
+| (라벨) ICP 도크 포즈 | `icp_labels/<ep>.npz` (우리가 생성) | per-frame [x,y,θ] | **정밀 aux 헤드 교사** |
 | (라벨) goal | 에피소드 도킹 프레임 | 단일 프레임 | goal feature 조건 (Loss A) |
 
 - 전부 같은 물리 도크, 실패 시연 없음, 성공 허용오차 1cm. 자세한 분석은 [../design_of_endgame.md](../design_of_endgame.md) §1.

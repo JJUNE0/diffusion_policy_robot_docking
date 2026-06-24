@@ -19,8 +19,8 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 | | |
 |---|---|
 | **Task** | Autonomous charging-station docking for a differential-drive mobile robot |
-| **Input** | Two RGB camera streams (room1, room2) + wheel encoder velocity history |
-| **Output** | 60-step future velocity trajectory (linear vel, angular vel) |
+| **Input** | RGB (room1, room2) + encoder velocity + **raw 2D LiDAR points** + goal feature |
+| **Output** | 60-step velocity trajectory **+ ICP-distilled dock pose** (precision/arrival, aux head) |
 | **Method** | Conditional diffusion policy with multimodal sensor fusion |
 | **Training** | Offline imitation learning from expert demonstrations |
 
@@ -28,53 +28,34 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 
 ### Pipeline
 
+단일 모델(Option A): 네 모달리티를 토큰으로 융합 → (주) 속도 궤적 + (aux) **ICP-distill 도크 포즈**.
+ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전만 동작.
+
 ```
-                              ┌─────────────────────────────────────────────┐
-                              │          Observation History (T=30)         │
-                              └──────┬──────────────┬──────────────┬───────┘
-                                     │              │              │
-                              Room 1 Images   Room 2 Images   Encoder Vel.
-                              [5, 3, 240, 320] [5, 3, 240, 320]  [30, 2]
-                                     │              │              │
-                              ┌──────▼──────┐┌──────▼──────┐┌─────▼──────┐
-                              │  Frozen     ││  Frozen     ││   MLP +    │
-                              │  DINO-v3    ││  DINO-v3    ││  Pos.Enc.  │
-                              │  ViT-B/16   ││  ViT-B/16   ││            │
-                              └──────┬──────┘└──────┬──────┘└─────┬──────┘
-                              [5, 196, 768]  [5, 196, 768]    [30, 384]
-                                     │              │              │
-                              ┌──────▼──────┐┌──────▼──────┐       │
-                              │  Perceiver  ││  Perceiver  │       │
-                              │  Resampler  ││  Resampler  │       │
-                              │ (16 latents)│| (16 latents)│       │
-                              └──────┬──────┘└──────┬──────┘       │
-                                [5, 16, 384]  [5, 16, 384]         │
-                                     │              │              │
-                                     └──────┬───────┘              │
-                                            │                      │
-                              ┌─────────────▼──────────────────────▼──────┐
-                              │       Sensor Fusion Transformer           │
-                              │     (Cross-Attention, 2 layers)           │
-                              └─────────────────────┬─────────────────────┘
-                                                    │
-                                            Condition Vector
-                                                    │
-                              ┌─────────────────────▼─────────────────────┐
-                              │           DiT1d Denoiser                  │
-                              │    (12 blocks, d=384, 6 heads)            │
-                              │                                           │
-                              │   x_T ──► Denoise ──► ... ──► x_0         │
-                              │   (noise)              (trajectory)       │
-                              └─────────────────────┬─────────────────────┘
-                                                    │
-                                          DPM-Solver++ (ODE)
-                                          100 sampling steps
-                                                    │
-                                                    ▼
-                                    Predicted Velocity Trajectory
-                                            [60, 2]
-                                       (v_linear, v_angular)
+   Room1 RGB     Room2 RGB     Encoder vel.   raw LiDAR pts     Goal frame(docked)
+  [5,3,240,320] [5,3,240,320]    [30,2]      [256,2]+npoints     [3,240,320]
+       │             │             │              │                  │
+   Frozen        Frozen          MLP        PointNet-style       Frozen DINO
+   DINO-v3       DINO-v3      + Pos.Enc.     point encoder       (goal feature)
+       │             │             │              │                  │
+   Perceiver     Perceiver         │        masked Perceiver     Perceiver
+   Resampler     Resampler         │         Resampler          (goal) + NoMaD
+       └─────────────┴──────┬──────┴──────────────┴──────────────────┘  mask
+                            │   (image / velocity / lidar / goal modality tokens)
+                ┌───────────▼────────────┐
+                │ Sensor Fusion Transformer│ → readout = Condition Vector [d=384]
+                └───────────┬────────────┘
+                  ┌─────────┴───────────────────┐
+        ┌─────────▼──────────┐        ┌─────────▼──────────────┐
+        │   DiT1d Denoiser   │        │   ICP aux head         │
+        │ + DPM-Solver++(ODE)│        │  (dock pose x,y,θ)     │
+        └─────────┬──────────┘        └─────────┬──────────────┘
+                  ▼                             ▼
+        Velocity trajectory [60,2]     Dock pose  →  정밀/도착 판정(≤1cm)
+        (v_linear, v_angular)          (ICP-distilled, 런타임 ICP 없음)
 ```
+
+> 나중(`docs/plan/00_overview.md` §5): goal을 **멀티 sub-goal DINO 정합**으로 확장 + anomaly 헤드.
 
 ### Key Design Choices
 
@@ -90,38 +71,66 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 
 ## Project Structure
 
+> 단일 모델(Option A): 하나의 diffusion 정책이 **DINO(room1/2) + encoder velocity + raw LiDAR 점 + goal feature**
+> 를 받아 (주) 미래 속도 궤적과 (aux) **ICP-distill 도크 포즈**를 출력. ICP는 **오프라인 라벨 생성에만** 쓰이고
+> 런타임엔 비전만 동작. 자세한 설계·진행은 `docs/plan/00..05_*.md`, `docs/CLAUDE.md`.
+
 ```
 .
-├── cleandiffuser/               # Diffusion model framework (modified CleanDiffuser)
-│   ├── diffusion/               #   DDPM, SDE, EDM, DPM-Solver, Rectified Flow, ...
-│   ├── nn_diffusion/            #   DiT1d, UNet, Transformer denoiser architectures
-│   ├── nn_condition/            #   SensorFusionConditionNetwork, image/MLP conditioners
-│   ├── dataset/                 #   Base dataset classes and utilities
-│   └── utils/                   #   Transformer blocks, normalizers, tensor ops
+├── cleandiffuser/                  # Diffusion 프레임워크 (modified CleanDiffuser)
+│   ├── diffusion/                  #   DDPM/SDE/DPM-Solver 등 (ContinuousDiffusionSDE: loss/update/sample)
+│   ├── nn_diffusion/               #   DiT1d 디노이저 (adaLN-Zero)
+│   ├── nn_condition/
+│   │   └── sensor_fusion_condition.py  # ★멀티모달 조건망: DINO room1/2 + velocity
+│   │                               #     + raw-LiDAR point 브랜치 + goal 토큰 + ICP aux head
+│   ├── dataset/                    #   base dataset 클래스
+│   └── utils/                      #   Transformer 블록, normalizer, tensor ops
 │
-├── configs/
-│   └── robot/smr.yaml           # Hydra config: architecture, training, inference
-│
-├── dataset/
-│   ├── docking_dataset.py       # HDF5 multimodal dataset loader
-│   └── preprocessing.py         # Raw episode data --> HDF5 converter
+├── endgame/                        # ★오프라인 ICP (라벨 생성 전용, 런타임 미사용)
+│   ├── icp_matcher.py              #   raw-point known-shape ICP (point-to-line, aliasing 가드)
+│   ├── target_model.py             #   도크 형상 템플릿 (make_template, real_dock 로드)
+│   ├── se2.py / config.py          #   SE(2) 유틸 / ICPConfig
+│   └── assets/dock_template_real.* #   155개 에피소드로 만든 공식 도크 템플릿
 │
 ├── dino/
-│   ├── dino_detector.py         # DINOv2 feature extraction + heatmap visualization
-│   └── master_vector.pt         # Pre-computed reference vector for similarity
+│   ├── dino_detector.py            # frozen DINOv3 (facebook/dinov3-vitb16) feature 추출
+│   └── master_vector.pt            # 유사도용 기준 벡터
+│
+├── utils/                          # 데이터 로딩 + 셋업 (preprocessing/loader 여기로 통합)
+│   ├── preprocessing.py            # ★원본 에피소드 → 학습 h5 (이미지/encoder/raw-lidar점/ICP 라벨)
+│   ├── docking_dataset.py          # ★h5 로더 (sparse-uint8 vision, lidar_points, dock_pose 반환)
+│   ├── setups.py                   # 모델/로거 초기화 (model_setups)
+│   ├── utils.py                    # Logger, RK4 궤적 복원, plotting
+│   └── check_dataset.py / viz_*    # 데이터 점검 / 시각화
 │
 ├── scripts/
-│   ├── train.py                 # Training entry point
-│   ├── inference_ema.py         # Inference with EMA trajectory smoothing
-│   └── inference_rtc.py         # Inference with ranking-based trajectory selection
+│   ├── train.py                    # ★단일 모델 학습 (denoising + ICP aux 합산 손실)
+│   ├── eval_heldout.py             # held-out 평가 (dock mm, denoising)
+│   ├── plot_training.py            # 학습 수렴 곡선 plot
+│   ├── label_subgoals.py           # ★오프라인 ICP 라벨러 → dataset/after_0328/icp_labels/
+│   ├── build_dock_template.py      # 공식 도크 템플릿 생성 (endgame/assets/)
+│   ├── icp_real_data.py            # 실데이터 ICP 정밀도 검증
+│   └── inference_ema.py / _rtc.py  # 배포 추론 (EMA / 랭킹 선택, ZMQ 스트리밍)
 │
-├── utils/
-│   ├── setups.py                # Model & logger initialization
-│   └── utils.py                 # Logger, RK4 trajectory reconstruction, plotting
+├── configs/robot/smr.yaml          # Hydra config (architecture/training + lidar/aux/goal/sparse_vision 플래그)
 │
-├── rc_server/                   # Real-time control server (ZMQ-based robot interface)
-├── requirements.txt
-└── README.md
+├── dataset/
+│   ├── after_0328/
+│   │   ├── dock/episode_*_dock/    # 원본: room1/2 jpg, encoder.csv, lidar.jsonl, marker_pose.csv
+│   │   ├── icp_labels/             # ★ICP 산출 라벨: <ep>.npz(프레임별 도크 포즈=최종골, reliable)
+│   │   │                           #   + <ep>.json(sub-goal 마일스톤, handoff onset, success)
+│   │   └── after_0328_{train,test}.h5   # 빌드된 학습/테스트 데이터
+│   └── new/record_46/              # 신규 포맷(orbbec 깊이+usb) — 미래 깊이 브랜치용
+│
+├── docs/
+│   ├── CLAUDE.md                   # 설계 기준 문서
+│   ├── plan/00..05_*.md            # 단일모델 구현 계획·진행(정리→데이터→전처리→학습→결과→plot)
+│   ├── design_of_endgame.md        # 전체 진행 로그
+│   ├── inference.md / icp_background.md / ai_server_robot_pipeline.md
+│
+├── rc_server/  plugins/            # 외부 서버 스택 + AI 플러그인 (배포 인프라; 이 repo 핵심 아님)
+├── outputs/  results/              # 학습 산출(체크포인트/로그/plot)
+└── requirements*.txt / README.md
 ```
 
 ## Getting Started

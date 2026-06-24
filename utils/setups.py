@@ -28,7 +28,7 @@ def logger_setups(args):
     else:
         current_time = datetime.now()
         timestamp = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-        save_path = f"results/{args.experiment_name}/{timestamp}/"
+        save_path = f"train/{args.experiment_name}/{timestamp}/"
         os.makedirs(save_path, exist_ok=True)
         config_save_path = os.path.join(save_path, "config.yaml")
         OmegaConf.save(config=args, f=config_save_path)

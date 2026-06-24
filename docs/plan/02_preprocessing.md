@@ -1,6 +1,6 @@
 # Step 2 — Preprocessing (after_0328 → 학습용 h5, **raw LiDAR 점**)
 
-> 선행: [01_dataset_sensor_fusion.md](01_dataset_sensor_fusion.md) · 코드: `dataset/preprocessing.py`
+> 선행: [01_dataset_sensor_fusion.md](01_dataset_sensor_fusion.md) · 코드: `utils/preprocessing.py`
 > 결정 반영: LiDAR는 **BEV 이미지 대신 raw 점**(정밀·효율·온라인 일관). BEV는 `--lidar_format bev`로 ablation 보존.
 
 ---
@@ -28,13 +28,13 @@
 2. `target_hz`(30) 격자 `target_ts`.
 3. 각 ts에서 최근접 room1/room2 이미지, encoder 선형보간, 최근접 lidar(`lidar_idx`).
 4. **raw 점 crop**(`_make_lidar_points`): 스캔에서 **가장 가까운 점 기준 `crop_r`(0.8m) 이내** 점만 → M=256 패딩 + 유효수. (결정적·ICP 불필요 → 온라인 동일 재현)
-5. **라벨**: `lidar_idx`로 `subgoal_labels/<ep>.npz`의 `pose`,`reliable` 조회 → `dock_pose`,`reliable`. (`ep_name`의 `dock/` 접두사는 basename 처리)
+5. **라벨**: `lidar_idx`로 `icp_labels/<ep>.npz`의 `pose`,`reliable` 조회 → `dock_pose`,`reliable`. (`ep_name`의 `dock/` 접두사는 basename 처리)
 6. h5 기록 + `episode_ends`.
 
 ## 4. 실행
 ```bash
 # 전체(155)  — raw 점(기본)
-python dataset/preprocessing.py \
+python utils/preprocessing.py \
   --data_root dataset/after_0328 --save_path dataset/after_0328_train.h5 \
   --use_lidar --with_labels --lidar_format points --lidar_crop_r 0.8 --lidar_max_points 256
 

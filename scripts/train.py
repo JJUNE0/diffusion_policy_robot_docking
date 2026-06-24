@@ -14,6 +14,7 @@ import torch
 from utils.setups import logger_setups, model_setups
 from dino.dino_detector import DinoBatchDetector
 from cleandiffuser.utils import loop_dataloader, set_seed
+from scripts.plot_training import plot_from_jsonl
 
 
 def _resolve_resume_checkpoint(resume_path: str | None) -> str | None:
@@ -90,6 +91,7 @@ def main(args):
     logger, save_path = logger_setups(args)
     dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion = model_setups(args)
 
+    print(f"Total Samples {len(dataset)}\n")
     print("Start Training...")
     lr_schedulers = torch.optim.lr_scheduler.CosineAnnealingLR(
         nn_diffusion.optimizer, T_max=args.diffusion_gradient_steps
@@ -129,6 +131,7 @@ def main(args):
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= args.diffusion_gradient_steps:
             print("End Training")
+            plot_from_jsonl(os.path.join(save_path, "metrics.jsonl"))
             break
 
         action = batch["act"].to(device, non_blocking=True)  # [B, horizon, 2]

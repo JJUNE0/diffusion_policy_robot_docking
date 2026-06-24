@@ -23,7 +23,7 @@
 
 - **주 출력**: 속도 궤적. 시연이 mm로 도킹했으므로 입력만 충분하면 정밀도 BC로 학습.
 - **goal**: 도킹 프레임 1장의 DINO feature(=방향 안내). NoMaD 마스킹(조건/무지향).
-- **aux head**: 근접(ICP-reliable) 프레임에서 **ICP 도크 포즈 회귀**(교사=ICP 라벨). → "현재 state가 goal인가"의 **도착 판정**(예측 포즈 ≤ 1cm). (σ/anomaly는 §5로 보류.)
+- **aux head**: 근접(ICP-reliable) 프레임에서 **ICP 도크 포즈 회귀**(교사=ICP 라벨). → "현재 state가 goal인가"의 **도착 판정**(예측 포즈 ≤ 1cm).ㅠ (σ/anomaly는 §5로 보류.)
 - **LiDAR = raw 점**: BEV 래스터 X. 이유 — 정밀(양자화 손실 없음)·효율(점~190개로 작음)·온라인 일관(들어오는 raw 그대로). 입력=점집합 → **point-set 인코더**(PointNet/소형 set-transformer). crop=**가장 가까운 군집 주변**(오프라인=온라인 동일).
 - 핸드오프·런타임 ICP·멀티모델 **없음**.
 

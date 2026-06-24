@@ -37,7 +37,7 @@ from endgame.se2 import transform_points, wrap_angle  # noqa: E402
 from scripts.icp_real_data import denoise, load_lidar  # noqa: E402
 
 ROOT = "dataset/after_0328/dock"
-OUT = "dataset/after_0328/subgoal_labels"
+OUT = "dataset/after_0328/icp_labels"
 # Dock-surface clearances at which to drop near sub-goals. The dock floors at
 # ~40 cm (LiDAR standoff) and ICP coverage starts ~60-115 cm, so these span the
 # reliable approach. Farther sub-goals (>coverage) are vision-only (future work).

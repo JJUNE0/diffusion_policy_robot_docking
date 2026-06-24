@@ -65,7 +65,7 @@ class DockingDataset(Dataset):
         self.episode_ends = self.root["episode_ends"][:]
 
         # Raw LiDAR points (Option A) + ICP dock-pose aux labels. Auto-detected
-        # from the h5 keys (built by dataset/preprocessing.py --use_lidar/--with_labels).
+        # from the h5 keys (built by utils/preprocessing.py --use_lidar/--with_labels).
         self.with_lidar = with_lidar and ("lidar_points" in self.root)
         self.with_aux = with_aux and ("dock_pose" in self.root)
         self.z_lidar_points = self.root["lidar_points"] if self.with_lidar else None

@@ -38,11 +38,11 @@ cd ~/ws/diffusion_policy_robot_docking
 # (환경) wandb 끄고, HF DINO는 캐시 사용
 export WANDB_MODE=disabled HF_HUB_OFFLINE=1
 
-# 1) ICP 라벨 생성 (한 번만; 이미 있으면 생략)  → dataset/after_0328/subgoal_labels/
+# 1) ICP 라벨 생성 (한 번만; 이미 있으면 생략)  → dataset/after_0328/icp_labels/
 python scripts/label_subgoals.py --all
 
 # 2) 전처리 → 학습용 h5 (raw 점 + ICP 라벨)
-python dataset/preprocessing.py \
+python utils/preprocessing.py \
   --data_root dataset/after_0328 --save_path dataset/after_0328_train.h5 \
   --use_lidar --with_labels --lidar_format points --lidar_crop_r 0.8 --lidar_max_points 256
 #   (디스크/속도: 전체 155대신 일부만 → 위에 --max_episodes 30)

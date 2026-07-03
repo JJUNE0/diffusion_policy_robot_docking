@@ -32,3 +32,12 @@ results/
 
 # report
 *.pdf
+
+endgame
+rc_server
+dataset/*
+!dataset/__init__.py
+!dataset/check_dataset.py
+!dataset/docking_dataset.py
+!dataset/preprocessing.py
+plugins

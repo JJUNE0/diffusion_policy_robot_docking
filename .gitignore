@@ -34,7 +34,7 @@ results/
 *.pdf
 
 endgame
-rc_server
+rc_server/*
 dataset/*
 !dataset/__init__.py
 !dataset/check_dataset.py

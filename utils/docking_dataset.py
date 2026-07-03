@@ -55,34 +55,33 @@ class DockingDataset(Dataset):
         self.with_goal = with_goal
         self.goal_mask_prob = goal_mask_prob
 
-        self.root = h5py.File(self.h5_path, "r")
-        self.train_root = h5py.File(self.train_h5_path, "r")
+        # IMPORTANT: do NOT keep an open h5 handle in __init__. If we did, every
+        # DataLoader worker would fork that one handle, and HDF5 serializes reads
+        # across a shared handle -> workers don't parallelize (CPU stays flat)
+        # while each still holds read buffers (RAM balloons). Instead read the
+        # metadata via short-lived handles here, and reopen ONE handle per worker
+        # lazily in __getitem__ (see _ensure_open). This makes num_workers
+        # actually parallelize the gzip image decode.
+        with h5py.File(self.h5_path, "r") as f:
+            self.episode_ends = f["episode_ends"][:]
+            self.with_lidar = with_lidar and ("lidar_points" in f)
+            self.with_aux = with_aux and ("dock_pose" in f)
+            if self.with_aux:
+                pose_all = f["dock_pose"][:]
+                rel_all = f["reliable"][:].astype(bool)
+                xy = pose_all[rel_all][:, :2]
+                self.dock_xy_mean = xy.mean(axis=0).astype(np.float32)
+                self.dock_xy_std = (xy.std(axis=0) + 1e-6).astype(np.float32)
 
-        self.z_encoder_train = self.train_root["encoder"]
-        self.z_encoder = self.root["encoder"]
-        self.z_img1 = self.root["image_top"]
-        self.z_img2 = self.root["image_bottom"]
-        self.episode_ends = self.root["episode_ends"][:]
-
-        # Raw LiDAR points (Option A) + ICP dock-pose aux labels. Auto-detected
-        # from the h5 keys (built by utils/preprocessing.py --use_lidar/--with_labels).
-        self.with_lidar = with_lidar and ("lidar_points" in self.root)
-        self.with_aux = with_aux and ("dock_pose" in self.root)
-        self.z_lidar_points = self.root["lidar_points"] if self.with_lidar else None
-        self.z_lidar_npoints = self.root["lidar_npoints"] if self.with_lidar else None
-        self.z_dock_pose = self.root["dock_pose"] if self.with_aux else None
-        self.z_reliable = self.root["reliable"] if self.with_aux else None
-        if self.with_aux:
-            pose_all = self.z_dock_pose[:]
-            rel_all = self.z_reliable[:].astype(bool)
-            xy = pose_all[rel_all][:, :2]
-            self.dock_xy_mean = xy.mean(axis=0).astype(np.float32)
-            self.dock_xy_std = (xy.std(axis=0) + 1e-6).astype(np.float32)
+        with h5py.File(self.train_h5_path, "r") as f:
+            enc = f["encoder"][:]
+        self.action_min = enc.min(axis=0).astype(np.float32)
+        self.action_max = enc.max(axis=0).astype(np.float32)
+        self.action_scale = np.clip(self.action_max - self.action_min, a_min=1e-5, a_max=None).astype(np.float32)
 
         self.index_map = []
         self.ep_start_map = []
         self.ep_end_map = []
-
         start_idx = 0
         for end_idx in self.episode_ends:
             for t in range(start_idx, end_idx - self.horizon + 1):
@@ -91,22 +90,32 @@ class DockingDataset(Dataset):
                 self.ep_end_map.append(end_idx)
             start_idx = end_idx
 
-        self.action_min = self.z_encoder_train[:].min(axis=0).astype(np.float32)
-        self.action_max = self.z_encoder_train[:].max(axis=0).astype(np.float32)
-        self.action_scale = np.clip(self.action_max - self.action_min, a_min=1e-5, a_max=None).astype(np.float32)
+        self.root = None        # opened per worker in _ensure_open()
+
+    def _ensure_open(self):
+        """Open the h5 handle once per process (lazy). Each DataLoader worker
+        opens its OWN handle on first access -> no shared/forked handle, so HDF5
+        reads (gzip decode) parallelize across workers."""
+        if self.root is not None:
+            return
+        self.root = h5py.File(self.h5_path, "r")
+        self.z_encoder = self.root["encoder"]
+        self.z_img1 = self.root["image_top"]
+        self.z_img2 = self.root["image_bottom"]
+        if self.with_lidar:
+            self.z_lidar_points = self.root["lidar_points"]
+            self.z_lidar_npoints = self.root["lidar_npoints"]
+        if self.with_aux:
+            self.z_dock_pose = self.root["dock_pose"]
+            self.z_reliable = self.root["reliable"]
 
     def __len__(self) -> int:
         return len(self.index_map)
 
     def __del__(self):
         try:
-            if hasattr(self, "root"):
+            if getattr(self, "root", None) is not None:
                 self.root.close()
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "train_root"):
-                self.train_root.close()
         except Exception:
             pass
 
@@ -123,6 +132,7 @@ class DockingDataset(Dataset):
         return data[start_t: t + 1]
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        self._ensure_open()        # per-worker lazy h5 open
         t = self.index_map[idx]
         ep_start = self.ep_start_map[idx]
 

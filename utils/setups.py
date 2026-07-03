@@ -70,16 +70,21 @@ def model_setups(args):
         sparse_vision_uint8=args.get("sparse_vision", False),
     )
 
+    # RAM note: in-flight host memory ≈ num_workers × prefetch_factor × batch_size
+    # samples. On the 15 GB machine, large batch × many workers OOMs -> keep these
+    # configurable (prefetch_factor=1 and pin_memory=False save the most RAM).
     num_workers = args.get("num_workers", 4)
-    dataloader = DataLoader(
-        dataset,
+    loader_kwargs = dict(
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=num_workers,
-        persistent_workers=(num_workers > 0),
-        pin_memory=True,
+        pin_memory=args.get("pin_memory", True),
         drop_last=True,
     )
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = args.get("prefetch_factor", 2)
+    dataloader = DataLoader(dataset, **loader_kwargs)
 
     nn_condition = SensorFusionConditionNetwork(
         state_dim=args.state_dim,

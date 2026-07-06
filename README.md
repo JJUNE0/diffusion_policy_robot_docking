@@ -2,7 +2,7 @@
 
 # Diffusion Policy for Autonomous Robot Docking
 
-**Learning Multimodal Visuomotor Policies via Score-Based Diffusion for Charging Station Docking**
+**Learning Multimodal Visuomotor Policies via Rectified Flow for Charging Station Docking**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
@@ -12,7 +12,7 @@
 
 ---
 
-A mobile robot learns to autonomously dock at a charging station by observing two room cameras and its own wheel encoder velocities. A **Diffusion Transformer (DiT)** generates future velocity trajectories conditioned on fused vision--motion representations, producing smooth and reliable docking behaviors from offline demonstration data.
+A mobile robot learns to autonomously dock at a charging station by observing two room cameras and its own wheel encoder velocities. A **Diffusion Transformer (DiT)**, trained as a **Rectified Flow** velocity-field model, generates future velocity trajectories conditioned on fused vision--motion representations, producing smooth and reliable docking behaviors from offline demonstration data. The straight-line flow is integrated with a simple **Euler ODE**, enabling high-quality generation in very few sampling steps.
 
 ## Overview
 
@@ -21,7 +21,7 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 | **Task** | Autonomous charging-station docking for a differential-drive mobile robot |
 | **Input** | Two RGB camera streams (room1, room2) + wheel encoder velocity history |
 | **Output** | 60-step future velocity trajectory (linear vel, angular vel) |
-| **Method** | Conditional diffusion policy with multimodal sensor fusion |
+| **Method** | Conditional Rectified Flow policy with multimodal sensor fusion |
 | **Training** | Offline imitation learning from expert demonstrations |
 
 ## Method
@@ -60,15 +60,15 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
                                             Condition Vector
                                                     │
                               ┌─────────────────────▼─────────────────────┐
-                              │           DiT1d Denoiser                  │
+                              │        DiT1d Velocity Field               │
                               │    (12 blocks, d=384, 6 heads)            │
                               │                                           │
-                              │   x_T ──► Denoise ──► ... ──► x_0         │
+                              │   x_1 ──► Euler ODE ──► ... ──► x_0       │
                               │   (noise)              (trajectory)       │
                               └─────────────────────┬─────────────────────┘
                                                     │
-                                          DPM-Solver++ (ODE)
-                                          100 sampling steps
+                                     Rectified Flow (Euler ODE)
+                                         20 sampling steps
                                                     │
                                                     ▼
                                     Predicted Velocity Trajectory
@@ -77,6 +77,8 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 ```
 
 ### Key Design Choices
+
+- **Rectified Flow generative model** -- Instead of a score-based diffusion process, the DiT is trained to regress the straight-line velocity field between noise and data (`x0 - x1`). The learned flow is nearly straight, so a plain **Euler ODE** produces high-quality trajectories in far fewer steps (~5-20) than DPM-Solver++ diffusion sampling. Backbone, conditioning, and training pipeline are otherwise unchanged, making this a clean drop-in swap via CleanDiffuser's `ContinuousRectifiedFlow`.
 
 - **Frozen DINOv2 backbone** -- No fine-tuning needed. The pretrained ViT-B/16 provides rich spatial features (196 patches x 768-dim per frame) that generalize well to the indoor docking environment.
 
@@ -113,7 +115,8 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 ├── scripts/
 │   ├── train.py                 # Training entry point
 │   ├── inference_ema.py         # Inference with EMA trajectory smoothing
-│   └── inference_rtc.py         # Inference with ranking-based trajectory selection
+│   ├── inference_rtc.py         # Inference with ranking-based trajectory selection
+│   └── chunk_transfer.py        # Split/rejoin large datasets for cloud upload (+sha256 verify)
 │
 ├── utils/
 │   ├── setups.py                # Model & logger initialization
@@ -181,18 +184,20 @@ The resulting HDF5 contains:
 ## Training
 
 ```bash
-cd scripts
-python train.py
+# Run from the repository root -- config paths resolve against the launch directory
+python scripts/train.py
 ```
+
+Training runs for `num_epochs` epochs; the total gradient steps are derived automatically from the dataloader length (`num_epochs x floor(len(dataset) / batch_size)`). A final checkpoint is always saved when training ends.
 
 All hyperparameters are managed via [Hydra](https://hydra.cc/) and can be overridden from the command line:
 
 ```bash
 # Custom training run
-python train.py batch_size=32 learning_rate=5e-5 diffusion_gradient_steps=200000
+python scripts/train.py batch_size=64 num_epochs=10 learning_rate=5e-5
 
 # Resume from checkpoint
-python train.py resume_path=/path/to/checkpoint_step_100000.pt
+python scripts/train.py resume_path=/path/to/checkpoint_step_100000.pt
 ```
 
 ### Configuration Reference
@@ -206,21 +211,22 @@ python train.py resume_path=/path/to/checkpoint_step_100000.pt
 | `horizon` | 60 | Future trajectory length (steps) |
 | `obs_horizon` | 30 | Observation history window |
 | `vision_stride` | 6 | Temporal subsampling for vision (30/6 = 5 frames) |
-| `batch_size` | 16 | Training batch size |
+| `batch_size` | 64 | Training batch size |
 | **Architecture** | | |
 | `d_model` | 384 | Transformer hidden dimension |
 | `n_heads` | 6 | Number of attention heads |
 | `depth` | 12 | DiT block depth |
 | `dropout` | 0.1 | CFG condition masking probability |
 | **Training** | | |
-| `diffusion_gradient_steps` | 400,001 | Total gradient steps |
+| `num_epochs` | 10 | Number of epochs (auto-converted to gradient steps) |
+| `diffusion_gradient_steps` | 400,001 | Fallback total steps, used only when `num_epochs` is unset |
 | `learning_rate` | 1e-4 | Initial learning rate (cosine decay) |
 | `weight_decay` | 1e-5 | AdamW weight decay |
 | `ema_rate` | 0.9999 | EMA model decay rate |
 | `save_interval` | 10,000 | Checkpoint save frequency |
 | **Inference** | | |
-| `solver` | `ode_dpmsolver++_2M` | ODE solver for sampling |
-| `inference_sampling_steps` | 100 | Number of denoising steps |
+| `solver` | `euler` | Euler ODE integrator for Rectified Flow sampling |
+| `inference_sampling_steps` | 20 | Number of Euler ODE steps (Rectified Flow needs only a few) |
 | `w_cfg` | 1.0 | Classifier-free guidance weight |
 | `num_samples` | 8 | Trajectory samples per step |
 

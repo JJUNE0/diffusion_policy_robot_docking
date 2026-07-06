@@ -13,7 +13,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import get_original_cwd
 
-from cleandiffuser.diffusion import ContinuousDiffusionSDE
+from cleandiffuser.diffusion import ContinuousRectifiedFlow
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from cleandiffuser.nn_diffusion import DiT1d
 
@@ -104,7 +104,7 @@ def main(args):
         depth=args.depth,
     ).to(device)
 
-    nn_diffusion = ContinuousDiffusionSDE(
+    nn_diffusion = ContinuousRectifiedFlow(
         nn_diffusion=nn_diffusion_model,
         nn_condition=nn_condition,
         device=device,

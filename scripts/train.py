@@ -90,9 +90,24 @@ def main(args):
     logger, save_path = logger_setups(args)
     dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion = model_setups(args)
 
+    # Resolve total gradient steps. If `num_epochs` is set, derive it from the
+    # dataloader length (drop_last=True -> floor(len(dataset) / batch_size)) so
+    # that "N epochs" is honored regardless of dataset size. Otherwise fall back
+    # to the explicit `diffusion_gradient_steps`.
+    num_epochs = args.get("num_epochs", None)
+    steps_per_epoch = len(dataloader)
+    if num_epochs is not None:
+        total_gradient_steps = int(num_epochs) * steps_per_epoch
+        print(
+            f"num_epochs={num_epochs} x steps_per_epoch={steps_per_epoch} "
+            f"-> total_gradient_steps={total_gradient_steps}"
+        )
+    else:
+        total_gradient_steps = int(args.diffusion_gradient_steps)
+
     print("Start Training...")
     lr_schedulers = torch.optim.lr_scheduler.CosineAnnealingLR(
-        nn_diffusion.optimizer, T_max=args.diffusion_gradient_steps
+        nn_diffusion.optimizer, T_max=total_gradient_steps
     )
 
     # ----------------------------------------------------------
@@ -122,7 +137,7 @@ def main(args):
     vision_stride = args.get("vision_stride", 6)
 
     for batch in loop_dataloader(dataloader):
-        if n_gradient_step >= args.diffusion_gradient_steps:
+        if n_gradient_step >= total_gradient_steps:
             print("End Training")
             break
 
@@ -192,6 +207,23 @@ def main(args):
             print(f"Checkpoint saved at step {n_gradient_step}")
 
         n_gradient_step += 1
+
+    # Always persist a final checkpoint. For short epoch-based runs the step
+    # counter may never land on a save_interval boundary, so save explicitly.
+    final_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")
+    torch.save(
+        {
+            "step": n_gradient_step,
+            "model_state_dict": nn_diffusion.model.state_dict(),
+            "ema_state_dict": nn_diffusion.model_ema.state_dict(),
+            "optimizer_state_dict": nn_diffusion.optimizer.state_dict(),
+            "scheduler_state_dict": lr_schedulers.state_dict(),
+            "action_min": dataset.action_min,
+            "action_scale": dataset.action_scale,
+        },
+        final_ckpt_path,
+    )
+    print(f"Final checkpoint saved at step {n_gradient_step}: {final_ckpt_path}")
 
 
 if __name__ == "__main__":

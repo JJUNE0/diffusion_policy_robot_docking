@@ -5,7 +5,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from cleandiffuser.diffusion import ContinuousDiffusionSDE
+from cleandiffuser.diffusion import ContinuousRectifiedFlow
 from cleandiffuser.nn_diffusion import DiT1d
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from dataset.docking_dataset import DockingDataset
@@ -94,7 +94,9 @@ def model_setups(args):
         dropout=0.0,
     ).to(args.device)
 
-    nn_diffusion = ContinuousDiffusionSDE(
+    # Rectified Flow: straight-line ODE drift 를 네트워크로 학습하고 Euler solver 로 적분한다.
+    # (기존 ContinuousDiffusionSDE 를 대체 — DiT 백본/조건 네트워크는 그대로 유지)
+    nn_diffusion = ContinuousRectifiedFlow(
         nn_diffusion=nn_diffusion_model,
         nn_condition=nn_condition,
         ema_rate=args.ema_rate,

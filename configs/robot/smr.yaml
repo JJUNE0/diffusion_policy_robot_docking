@@ -8,11 +8,11 @@ device: cuda:0
 # ==========================================
 # 2. Dataset & DataLoader
 # ==========================================
-train_data_path : ${hydra:runtime.cwd}/../dataset/validation_dataset1.h5
+train_data_path : ${hydra:runtime.cwd}/dataset/after_0328_train.h5
 horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
-batch_size: 16
+batch_size: 64
 num_workers: 4
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
@@ -37,8 +37,9 @@ ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
 # ==========================================
 # 5. Training
 # ==========================================
-diffusion_gradient_steps: 400001
-log_interval: 1
+num_epochs: 10                    # 학습 epoch 수. dataloader 길이(=floor(len(dataset)/batch_size)) 기반으로 gradient step 자동 환산
+diffusion_gradient_steps: 400001  # num_epochs 가 설정되지 않았을 때만 쓰이는 fallback step 수
+log_interval: 10
 save_interval: 10000
 resume_path: null
 
@@ -50,9 +51,9 @@ weight_decay: 1e-5
 # ==========================================
 diffusion_ckpt: latest
 use_ema: True
-solver : ode_dpmsolver++_2M
+solver : euler                 # Rectified Flow 는 직선 ODE 를 Euler solver 로 적분 (dpmsolver++ 대체)
 w_cfg : 1                      # guidance weight
-inference_sampling_steps: 100  # DPM-Solver++ 2M을 사용하기 위한 최적의 스텝 수 (10~20)
+inference_sampling_steps: 20   # Euler ODE 스텝 수. RF 는 직선 flow 라 5~20 스텝으로도 고품질 (원하면 늘려도 됨)
 num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여러개 궤적 비교
 
 checkpoint_dir  : ${hydra:runtime.cwd}/results/encoder_vision/2026-03-03_17-44-33

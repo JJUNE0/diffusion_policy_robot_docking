@@ -41,3 +41,4 @@ dataset/*
 !dataset/docking_dataset.py
 !dataset/preprocessing.py
 plugins
+upload_chunks

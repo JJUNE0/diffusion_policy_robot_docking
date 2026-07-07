@@ -2,7 +2,7 @@
 
 # Diffusion Policy for Autonomous Robot Docking
 
-**Learning Multimodal Visuomotor Policies via Score-Based Diffusion for Charging Station Docking**
+**Learning Multimodal Visuomotor Policies via Rectified Flow, with LiDAR-ICP-Distilled Precision Docking**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
@@ -12,7 +12,7 @@
 
 ---
 
-A mobile robot learns to autonomously dock at a charging station by observing two room cameras and its own wheel encoder velocities. A **Diffusion Transformer (DiT)** generates future velocity trajectories conditioned on fused vision--motion representations, producing smooth and reliable docking behaviors from offline demonstration data.
+A mobile robot learns to autonomously dock at a charging station by observing two room cameras, its wheel encoder velocities, and a raw 2D LiDAR scan. A **Diffusion Transformer (DiT)**, trained as a **Rectified Flow** velocity-field model and integrated with a simple **Euler ODE**, generates future velocity trajectories conditioned on fused vision--motion--LiDAR representations. A single model handles the whole approach-to-dock path: the main head outputs the velocity trajectory, while an **ICP-distilled auxiliary head** regresses the dock pose (`x, y, θ`) from the raw LiDAR points for mm-level precision/arrival judgment — so no online ICP runs at deployment.
 
 ## Overview
 
@@ -21,15 +21,15 @@ A mobile robot learns to autonomously dock at a charging station by observing tw
 | **Task** | Autonomous charging-station docking for a differential-drive mobile robot |
 | **Input** | RGB (room1, room2) + encoder velocity + **raw 2D LiDAR points** + goal feature |
 | **Output** | 60-step velocity trajectory **+ ICP-distilled dock pose** (precision/arrival, aux head) |
-| **Method** | Conditional diffusion policy with multimodal sensor fusion |
+| **Method** | Conditional **Rectified Flow** policy + LiDAR-ICP-distilled precision head |
 | **Training** | Offline imitation learning from expert demonstrations |
 
 ## Method
 
 ### Pipeline
 
-단일 모델(Option A): 네 모달리티를 토큰으로 융합 → (주) 속도 궤적 + (aux) **ICP-distill 도크 포즈**.
-ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전만 동작.
+단일 모델(Option A): 네 모달리티를 토큰으로 융합 → (주) 속도 궤적(**Rectified Flow**, Euler ODE) + (aux) **ICP-distill 도크 포즈**.
+ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전+LiDAR 정책만 동작.
 
 ```
    Room1 RGB     Room2 RGB     Encoder vel.   raw LiDAR pts     Goal frame(docked)
@@ -47,8 +47,8 @@ ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전만 동작.
                 └───────────┬────────────┘
                   ┌─────────┴───────────────────┐
         ┌─────────▼──────────┐        ┌─────────▼──────────────┐
-        │   DiT1d Denoiser   │        │   ICP aux head         │
-        │ + DPM-Solver++(ODE)│        │  (dock pose x,y,θ)     │
+        │   DiT1d Velocity   │        │   ICP aux head         │
+        │ + Euler ODE (RF)   │        │  (dock pose x,y,θ)     │
         └─────────┬──────────┘        └─────────┬──────────────┘
                   ▼                             ▼
         Velocity trajectory [60,2]     Dock pose  →  정밀/도착 판정(≤1cm)
@@ -58,6 +58,10 @@ ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전만 동작.
 > 나중(`docs/plan/00_overview.md` §5): goal을 **멀티 sub-goal DINO 정합**으로 확장 + anomaly 헤드.
 
 ### Key Design Choices
+
+- **Rectified Flow generative backbone** -- The DiT is trained to regress the straight-line velocity field between noise and data (`x0 - x1`) rather than a score. The learned flow is nearly straight, so a plain **Euler ODE** samples high-quality trajectories in very few steps (~5-20) instead of DPM-Solver++ diffusion sampling. Because the precision (aux ICP head) and sensor-fusion branches live entirely in the condition network, this backbone is a clean drop-in swap over the diffusion version via CleanDiffuser's `ContinuousRectifiedFlow` -- the training loop is unchanged.
+
+- **Role-split precision (LiDAR ICP distillation)** -- The learned policy handles robust wide-area approach; a **cross-attention aux head** attends a pose query to the raw LiDAR point tokens and regresses the dock pose, distilling an offline point-to-line ICP teacher. This yields mm-level arrival judgment (≤1 cm) without any runtime ICP, and lets the policy learn from few coarse demos (precision is not imitated).
 
 - **Frozen DINOv2 backbone** -- No fine-tuning needed. The pretrained ViT-B/16 provides rich spatial features (196 patches x 768-dim per frame) that generalize well to the indoor docking environment.
 
@@ -71,14 +75,14 @@ ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전만 동작.
 
 ## Project Structure
 
-> 단일 모델(Option A): 하나의 diffusion 정책이 **DINO(room1/2) + encoder velocity + raw LiDAR 점 + goal feature**
+> 단일 모델(Option A): 하나의 flow-matching(Rectified Flow) 정책이 **DINO(room1/2) + encoder velocity + raw LiDAR 점 + goal feature**
 > 를 받아 (주) 미래 속도 궤적과 (aux) **ICP-distill 도크 포즈**를 출력. ICP는 **오프라인 라벨 생성에만** 쓰이고
 > 런타임엔 비전만 동작. 자세한 설계·진행은 `docs/plan/00..05_*.md`, `docs/CLAUDE.md`.
 
 ```
 .
 ├── cleandiffuser/                  # Diffusion 프레임워크 (modified CleanDiffuser)
-│   ├── diffusion/                  #   DDPM/SDE/DPM-Solver 등 (ContinuousDiffusionSDE: loss/update/sample)
+│   ├── diffusion/                  #   생성 백본 (ContinuousRectifiedFlow: loss/update/sample, Euler ODE) + DDPM/SDE/DPM-Solver
 │   ├── nn_diffusion/               #   DiT1d 디노이저 (adaLN-Zero)
 │   ├── nn_condition/
 │   │   └── sensor_fusion_condition.py  # ★멀티모달 조건망: DINO room1/2 + velocity
@@ -173,10 +177,15 @@ data_root/
 ### Convert to HDF5
 
 ```bash
-python dataset/preprocessing.py \
+# Raw episodes -> training h5 with raw LiDAR points + offline ICP dock-pose labels
+python utils/preprocessing.py \
     --data_root /path/to/data_root \
-    --save_path dataset/validation_dataset1.h5
+    --save_path dataset/after_0328_train.h5 \
+    --use_lidar --lidar_format points \
+    --with_labels --labels_dir dataset/after_0328/icp_labels
 ```
+
+> The ICP labels are generated offline first (`scripts/build_dock_template.py` to build the dock template, then `scripts/label_subgoals.py` to label every frame); `--with_labels` bakes them into the h5.
 
 The resulting HDF5 contains:
 
@@ -186,22 +195,29 @@ The resulting HDF5 contains:
 | `image_top` | `[N, 3, 240, 320]` | Room 1 camera frames |
 | `image_bottom` | `[N, 3, 240, 320]` | Room 2 camera frames |
 | `episode_ends` | `[E]` | Episode boundary indices |
+| `lidar_points` | `[N, M, 2]` | Raw robot-frame LiDAR points, zero-padded (M=256) |
+| `lidar_npoints` | `[N]` | Number of valid points per frame |
+| `dock_pose` | `[N, 3]` | ICP dock-pose label `[x, y, θ]` (aux head teacher) |
+| `reliable` | `[N]` | 1 = ICP-reliable frame (used to mask the aux loss) |
 
 ## Training
 
 ```bash
-cd scripts
-python train.py
+# Run from the repository root -- config paths resolve against the launch directory
+python scripts/train.py
 ```
 
-All hyperparameters are managed via [Hydra](https://hydra.cc/) and can be overridden from the command line:
+The single model trains with a **combined loss**: the Rectified Flow denoising loss (main) plus a masked ICP dock-pose loss on the reliable frames (aux). Each step logs both the flow loss and the aux pose error in mm. All hyperparameters are managed via [Hydra](https://hydra.cc/) and can be overridden from the command line:
 
 ```bash
 # Custom training run
-python train.py batch_size=32 learning_rate=5e-5 diffusion_gradient_steps=200000
+python scripts/train.py batch_size=48 learning_rate=5e-5 diffusion_gradient_steps=140000
+
+# Toggle the precision / sensor-fusion branches
+python scripts/train.py use_lidar_points=true use_aux_pose=true use_goal=true aux_weight=1.0
 
 # Resume from checkpoint
-python train.py resume_path=/path/to/checkpoint_step_100000.pt
+python scripts/train.py resume_path=/path/to/checkpoint_step_100000.pt
 ```
 
 ### Configuration Reference
@@ -215,21 +231,29 @@ python train.py resume_path=/path/to/checkpoint_step_100000.pt
 | `horizon` | 60 | Future trajectory length (steps) |
 | `obs_horizon` | 30 | Observation history window |
 | `vision_stride` | 6 | Temporal subsampling for vision (30/6 = 5 frames) |
-| `batch_size` | 16 | Training batch size |
+| `batch_size` | 48 | Training batch size |
 | **Architecture** | | |
 | `d_model` | 384 | Transformer hidden dimension |
 | `n_heads` | 6 | Number of attention heads |
 | `depth` | 12 | DiT block depth |
 | `dropout` | 0.1 | CFG condition masking probability |
+| **Precision / Sensor Fusion** | | |
+| `use_lidar_points` | true | Enable the raw-LiDAR point-set branch |
+| `num_lidar_latents` | 16 | Perceiver latents for the LiDAR branch |
+| `use_aux_pose` | true | Enable the ICP-distilled dock-pose aux head |
+| `aux_weight` | 1.0 | Weight of the masked aux pose loss vs the flow loss |
+| `use_goal` | true | Enable goal-feature (docked frame) conditioning |
+| `goal_mask_prob` | 0.5 | P(goal active) for NoMaD-style masking |
+| `sparse_vision` | true | Dataset returns sparse uint8 frames (RAM saver) |
 | **Training** | | |
-| `diffusion_gradient_steps` | 400,001 | Total gradient steps |
+| `diffusion_gradient_steps` | 140,000 | Total gradient steps |
 | `learning_rate` | 1e-4 | Initial learning rate (cosine decay) |
 | `weight_decay` | 1e-5 | AdamW weight decay |
 | `ema_rate` | 0.9999 | EMA model decay rate |
 | `save_interval` | 10,000 | Checkpoint save frequency |
 | **Inference** | | |
-| `solver` | `ode_dpmsolver++_2M` | ODE solver for sampling |
-| `inference_sampling_steps` | 100 | Number of denoising steps |
+| `solver` | `euler` | Euler ODE integrator for Rectified Flow sampling |
+| `inference_sampling_steps` | 20 | Number of Euler ODE steps (RF needs only a few) |
 | `w_cfg` | 1.0 | Classifier-free guidance weight |
 | `num_samples` | 8 | Trajectory samples per step |
 

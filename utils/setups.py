@@ -5,7 +5,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from cleandiffuser.diffusion import ContinuousDiffusionSDE
+from cleandiffuser.diffusion import ContinuousRectifiedFlow
 from cleandiffuser.nn_diffusion import DiT1d
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from utils.docking_dataset import DockingDataset
@@ -113,7 +113,12 @@ def model_setups(args):
         dropout=0.0,
     ).to(args.device)
 
-    nn_diffusion = ContinuousDiffusionSDE(
+    # Rectified Flow backbone: learns the straight-line velocity field (x0 - x1)
+    # and integrates it with a simple Euler ODE. The aux ICP head + lidar/goal
+    # branches live in nn_condition, so this backbone swap is orthogonal to the
+    # end-game precision-docking design (train loop uses .loss(), which RF also
+    # exposes -> no training-loop change needed).
+    nn_diffusion = ContinuousRectifiedFlow(
         nn_diffusion=nn_diffusion_model,
         nn_condition=nn_condition,
         ema_rate=args.ema_rate,

@@ -11,6 +11,10 @@ sys.path.append(parent_dir)
 import hydra
 import torch
 
+# Avoid "/dev/shm ... Resource temporarily unavailable" from DataLoader workers:
+# use file_system sharing instead of the default file_descriptor strategy.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 from utils.setups import logger_setups, model_setups
 from dino.dino_detector import DinoBatchDetector
 from cleandiffuser.utils import loop_dataloader, set_seed

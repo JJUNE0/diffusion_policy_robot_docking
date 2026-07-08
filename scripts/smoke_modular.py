@@ -33,14 +33,21 @@ def make_batch(spec):
     return cond
 
 
-def build_and_run(spec, tag):
+def build_and_run(spec, tag, expect_aux=None):
     net = ModularSensorFusionCondition(spec, d_model=D, nhead=NHEAD, num_layers=2)
     net.train()
     out = net(make_batch(spec))
     n_params = sum(p.numel() for p in net.parameters())
     assert out.shape == (B, D), f"{tag}: expected {(B, D)}, got {tuple(out.shape)}"
     assert torch.isfinite(out).all(), f"{tag}: non-finite output"
-    print(f"[OK] {tag}: sensors={list(spec)} -> out {tuple(out.shape)}, params={n_params:,}")
+    if expect_aux is True:
+        assert net._aux_pred is not None and net._aux_pred.shape == (B, 4), \
+            f"{tag}: expected aux pred [B,4], got {None if net._aux_pred is None else tuple(net._aux_pred.shape)}"
+        assert torch.isfinite(net._aux_pred).all(), f"{tag}: non-finite aux pred"
+    if expect_aux is False:
+        assert net._aux_pred is None, f"{tag}: expected NO aux pred"
+    aux_tag = "" if expect_aux is None else f", aux={'on' if expect_aux else 'off'}"
+    print(f"[OK] {tag}: sensors={list(spec)} -> out {tuple(out.shape)}, params={n_params:,}{aux_tag}")
     return n_params
 
 
@@ -73,6 +80,19 @@ def main():
         raise AssertionError("expected KeyError for missing sensors")
     except KeyError:
         print("[OK] missing-sensor KeyError raised as expected")
+
+    # ---- aux_pose head: ablatable via the `head` field --------------------
+    with_head = {**{k: full[k] for k in ("velocity", "lidar")}}
+    with_head["lidar"] = {**full["lidar"], "head": "aux_pose"}
+    p_head = build_and_run(with_head, "lidar + aux_pose head (cross-attn)", expect_aux=True)
+
+    without_head = {"velocity": full["velocity"], "lidar": full["lidar"]}
+    p_nohead = build_and_run(without_head, "lidar, no head (ablated)", expect_aux=False)
+    assert p_head > p_nohead, "aux head should add params"
+
+    # Pooled fallback: head on a non-pointcloud sensor.
+    pooled = {"velocity": {**full["velocity"], "head": "aux_pose"}}
+    build_and_run(pooled, "velocity + aux_pose head (pooled fallback)", expect_aux=True)
 
     print("\nALL SMOKE CHECKS PASSED")
 

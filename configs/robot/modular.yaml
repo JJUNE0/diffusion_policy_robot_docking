@@ -12,7 +12,11 @@ experiment_name: modular_fusion
 seed: 0
 device: cuda:0
 
-train_data_path: ${hydra:runtime.cwd}/../dataset/after_0328_train.h5
+# NOTE: dataset/new exports (export_XXX) still need preprocessing into a
+# single h5 with keys named exactly like `source` below (camera_orbbec-0, imu,
+# encoder, ...). Until that h5 exists, point this at the legacy file and use
+# the legacy sensor names instead.
+train_data_path: ${hydra:runtime.cwd}/../dataset/new_multimodal_train.h5
 horizon: 60
 obs_horizon: 30
 vision_stride: 6
@@ -28,44 +32,68 @@ diffusion_backbone: rectified_flow
 # encoder: registry key (motion | imu | dino_image | pointcloud)
 # source : h5 dataset key
 # mode   : history | current
+#
+# Naming follows the dataset/new export format verbatim (camera_orbbec-0,
+# camera_usb-0, imu, encoder, ...) so a spec entry maps 1:1 to a recorded
+# stream. dino_image sensors read PRECOMPUTED DINO features stored under
+# `dino/<camera-name>`; preprocessing must create those keys.
 sensors:
-  velocity:
+  encoder:
     encoder: motion
-    source: encoder
+    source: encoder          # wheel odometry [vx, wz] (encoder.csv)
     mode: history
     dim: 2
     horizon: 30
     normalize: action
     dropout_prob: 0.2
-  cam_top:
-    encoder: dino_image
-    source: dino_top        # precomputed DINO features (h5); see NOTE in dataset
+  imu:
+    encoder: imu
+    source: imu              # imu.csv cols: gyro_x,gyro_y,gyro_z,accl_x,accl_y,accl_z
     mode: history
-    horizon: 5              # obs_horizon(30) / vision_stride(6)
+    channels: [2, 3, 4]      # planar subset: gyro_z, accl_x, accl_y (drop gravity/OOP axes)
+    dim: 3                   # must equal len(channels)
+    horizon: 30
+    normalize: zscore        # per-channel whitening (raw accel is gravity-dominated)
+    dropout_prob: 0.2
+  camera_orbbec-0:
+    encoder: dino_image
+    source: dino/camera_orbbec-0
+    mode: history
+    horizon: 5               # obs_horizon(30) / vision_stride(6)
     stride: 6
     num_latents: 16
-  cam_bottom:
+  camera_usb-0:
     encoder: dino_image
-    source: dino_bottom
+    source: dino/camera_usb-0
     mode: history
     horizon: 5
     stride: 6
     num_latents: 16
-  # ---- add IMU for the new multimodal dataset (dataset/new): uncomment ----
-  # imu:
-  #   encoder: imu
-  #   source: imu
+  # ---- ablation candidates: uncomment to include ----
+  # camera_orbbec-2:
+  #   encoder: dino_image
+  #   source: dino/camera_orbbec-2
   #   mode: history
-  #   dim: 6                # gyro xyz + accel xyz
-  #   horizon: 30
-  #   dropout_prob: 0.2
-  # ---- raw LiDAR points ----
-  # lidar:
-  #   encoder: pointcloud
-  #   source: lidar_points
-  #   mode: current
-  #   npoints_source: lidar_npoints
+  #   horizon: 5
+  #   stride: 6
   #   num_latents: 16
+  # camera_orbbec-3:
+  #   encoder: dino_image
+  #   source: dino/camera_orbbec-3
+  #   mode: history
+  #   horizon: 5
+  #   stride: 6
+  #   num_latents: 16
+  lidar:
+    encoder: pointcloud
+    source: lidar_points     # padded [M,2] points from lidar.jsonl
+    mode: current            # single current scan (multi-scan accumulation = future)
+    npoints_source: lidar_npoints
+    num_latents: 16
+    # ICP-distilled precision head (ablatable): predicts dock pose from the RAW
+    # point tokens. Remove this `head` field (or the whole lidar sensor) to
+    # ablate precision supervision. Needs `dock_pose` + `reliable` keys in the h5.
+    head: aux_pose
 
 # ---- Network ----
 d_model: 384
@@ -76,6 +104,7 @@ condition_num_layers: 4
 ema_rate: 0.9999
 
 # ---- Training ----
+aux_weight: 1.0            # weight of the ICP-distilled aux-pose loss (if a head is set)
 num_epochs: null
 diffusion_gradient_steps: 400001
 log_interval: 100

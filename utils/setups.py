@@ -61,9 +61,17 @@ def _select_backbone(args):
 
 
 def _modular_setups(args):
-    from omegaconf import OmegaConf
+    from omegaconf import OmegaConf, open_dict
     obs_horizon = args.get("obs_horizon", 30)
     sensors = OmegaConf.to_container(args.sensors, resolve=True)
+
+    # The `head: aux_pose` field on any sensor is the SINGLE knob for the ICP
+    # precision head: it turns the head on in the condition net AND the targets
+    # on in the dataset. Mirror it into args.use_aux_pose so the existing
+    # train.py aux-loss path activates without a second, separate flag.
+    has_aux = any(s.get("head") == "aux_pose" for s in sensors.values())
+    with open_dict(args):
+        args.use_aux_pose = has_aux
 
     dataset = ModularDockingDataset(
         h5_path=args.train_data_path,

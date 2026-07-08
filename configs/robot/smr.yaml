@@ -37,6 +37,11 @@ ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
 # ==========================================
 # 5. Training
 # ==========================================
+# num_epochs가 설정되면(>0) 이 값으로부터 총 gradient step을 자동 계산합니다:
+#   steps_per_epoch = len(dataset) // batch_size   (drop_last=True)
+#   total_steps     = num_epochs * steps_per_epoch
+# null(또는 0)이면 아래 diffusion_gradient_steps를 그대로 사용합니다.
+num_epochs: null
 diffusion_gradient_steps: 400001
 log_interval: 1
 save_interval: 10000
@@ -68,7 +73,7 @@ hydra:
 
   # 단일 실행 시 저장 경로 (python inference.py 실행 시)
   run:
-    dir: outputs/
+    dir: result/hydra_logs/
 
   # Multi-run 실행 시 저장 경로 (python inference.py -m 실행 시)
   sweep:

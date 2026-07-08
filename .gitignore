@@ -10,6 +10,8 @@ __pycache__/
 *.pth
 !dino/master_vector.pt
 episode*
+dataset/
+!dataset/*.py
 
 # Hydra outputs
 outputs/
@@ -32,3 +34,7 @@ results/
 
 # report
 *.pdf
+
+#server
+plugins/
+rc_server/

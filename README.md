@@ -69,6 +69,10 @@ ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전+LiDAR 정책�
 
 - **Perceiver Resampler** -- Compresses 196 DINO patches per frame into 16 latent tokens via cross-attention, reducing the vision sequence from 980 tokens to 80 tokens per camera.
 
+- **Offline DINO feature caching (training speedup)** -- The DINO backbone is frozen and the input frames are fixed, so the `[196, 768]` patch features are identical every step/epoch. Recomputing them on the GPU each step was the dominant training bottleneck (~1.5k ViT-B forwards/step). `scripts/precompute_dino_cache.py` runs the backbone **once offline** and stores the features (row-aligned, fp16) in a cache HDF5; training then reads features from disk and skips the backbone entirely. Features are **bit-identical** to the live path (float32 diff = 0), so results are unchanged — only faster. Enabled via `use_dino_cache` / `dino_cache_path`.
+
+- **Single-camera option** -- `use_room1=false` uses only room2 (`image_bottom`), dropping the room1 (`image_top`) vision branch. Halves DINO compute and cache size (~66 GB → for one camera at 225k frames). This is a model change (retrain required); default `true` keeps the two-camera setup.
+
 - **Velocity-conditioned fusion** -- The encoder velocity history provides proprioceptive grounding, enabling the policy to reason about the robot's current motion state alongside visual observations.
 
 - **Classifier-Free Guidance (CFG)** -- Supports conditional dropout (p=0.1) during training for optional guidance-weighted sampling at inference time.
@@ -220,6 +224,31 @@ python scripts/train.py use_lidar_points=true use_aux_pose=true use_goal=true au
 python scripts/train.py resume_path=/path/to/checkpoint_step_100000.pt
 ```
 
+### DINO Feature Caching (optional, big speedup)
+
+Precompute the frozen-DINO features once and train from the cache instead of running the backbone every step.
+
+```bash
+# 1) Precompute room2 (image_bottom) DINO features -> cache HDF5 (run once).
+#    Reproduces the exact backbone path of DinoBatchDetector.get_heatmap
+#    (interpolate->224 bicubic, ImageNet normalize, last_hidden_state[:, 5:, :]);
+#    the discarded sim-map / OpenCV path is skipped. Resumable.
+python scripts/precompute_dino_cache.py \
+    --h5 dataset/after_0328_train.h5 \
+    --camera image_bottom \
+    --out dataset/after_0328_train_dino_bottom.h5
+
+# 2) Train reading from the cache (skips the DINO backbone entirely).
+python scripts/train.py use_dino_cache=true use_room1=false \
+    dino_cache_path=dataset/after_0328_train_dino_bottom.h5
+```
+
+**Notes**
+- The cache is **row-aligned 1:1** with the source image rows and stored fp16, so it must be regenerated if the source h5 changes. Size ≈ `N_frames × 196 × 768 × 2 B` per camera (~66 GB for 225k frames, one camera).
+- Both files are used during training: the source h5 still provides encoder velocity / action targets, LiDAR points, and ICP labels; the cache provides only the DINO vision features (`dino_feat_room2`, `goal_feat_room2`). Raw image pixels are no longer read.
+- For `use_room1=true` with a cache, precompute the top camera too (`--camera image_top`) and provide a `dino_top` dataset; otherwise set `use_room1=false`.
+- Features are bit-identical to the live path, so training dynamics are unchanged — only faster.
+
 ### Configuration Reference
 
 <details>
@@ -245,6 +274,9 @@ python scripts/train.py resume_path=/path/to/checkpoint_step_100000.pt
 | `use_goal` | true | Enable goal-feature (docked frame) conditioning |
 | `goal_mask_prob` | 0.5 | P(goal active) for NoMaD-style masking |
 | `sparse_vision` | true | Dataset returns sparse uint8 frames (RAM saver) |
+| `use_room1` | true | Use the room1 (`image_top`) branch; `false` = single camera (room2 only) |
+| `use_dino_cache` | false | Read precomputed DINO features from `dino_cache_path` and skip the backbone |
+| `dino_cache_path` | null | Path to the cache HDF5 (from `scripts/precompute_dino_cache.py`) |
 | **Training** | | |
 | `diffusion_gradient_steps` | 140,000 | Total gradient steps |
 | `learning_rate` | 1e-4 | Initial learning rate (cosine decay) |

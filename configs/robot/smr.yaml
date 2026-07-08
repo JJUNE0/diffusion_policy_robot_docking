@@ -32,7 +32,7 @@ dropout: 0.1           # Classifier-Free Guidance(CFG)를 위한 조건 마스�
 # Goal-feature conditioning (CLAUDE.md §2.3 Loss A) — goal = docked frame's
 # DINO feature; NoMaD-style masking (goal_mask_prob = P(goal active)).
 use_goal: true
-goal_mask_prob: 0.5    # fraction of samples that are goal-conditioned (rest undirected)
+goal_mask_prob: 0.99    # fraction of samples that are goal-conditioned (rest undirected)
 num_goal_latents: 16   # Perceiver latents per goal frame
 
 # Raw-LiDAR-point branch + ICP-distilled precision aux head (Option A, single model).
@@ -44,6 +44,16 @@ aux_weight: 1.0        # weight of the masked aux pose loss vs the denoising los
 # RAM saver: dataset returns only the sparse vision frames as uint8 (~24x less
 # host RAM). Needed on the 15 GB machine. Keep on for training.
 sparse_vision: true
+
+# Single camera: use only room2 (=image_bottom); drops the room1 (image_top)
+# branch. Halves DINO compute and cache size. (Model change: retrain required.)
+use_room1: false
+
+# DINO feature cache: precompute room2 DINO features offline (scripts/
+# precompute_dino_cache.py) and read them during training instead of running the
+# frozen backbone every step. Big training speedup; features are bit-identical.
+use_dino_cache: true
+dino_cache_path: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
 
 # ==========================================
 # 4. Diffusion Process

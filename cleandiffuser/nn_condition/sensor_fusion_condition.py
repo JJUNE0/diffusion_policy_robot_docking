@@ -121,8 +121,13 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         use_lidar_points: bool = False,
         num_lidar_latents: int = 16,
         use_aux_pose: bool = False,
+        use_room1: bool = True,
     ):
         super().__init__()
+        # Single-camera mode: use_room1=False drops the room1 (image_top) branch
+        # and uses only room2 (image_bottom). Default True preserves the original
+        # two-camera behavior.
+        self.use_room1 = use_room1
         self.state_dim = state_dim
         self.obs_horizon = obs_horizon
         self.vision_horizon = vision_horizon
@@ -134,9 +139,10 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         self.use_goal = use_goal
         self.num_goal_latents = num_goal_latents
 
-        # Vision branches: one branch per room.
+        # Vision branches: one branch per room (room1 optional in single-camera mode).
         self.vision_proj = nn.Linear(768, d_model)
-        self.room1_resampler = PerceiverResampler(d_model, num_latents=num_image_latents, nhead=nhead)
+        if self.use_room1:
+            self.room1_resampler = PerceiverResampler(d_model, num_latents=num_image_latents, nhead=nhead)
         self.room2_resampler = PerceiverResampler(d_model, num_latents=num_image_latents, nhead=nhead)
 
         # Motion branch.
@@ -161,7 +167,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         # the goal is a distinct modality. Convention: goal_mask 1 = attend the
         # goal, 0 = undirected (goal tokens replaced by a learned null token).
         if use_goal:
-            self.goal_resampler1 = PerceiverResampler(d_model, num_latents=num_goal_latents, nhead=nhead)
+            if self.use_room1:
+                self.goal_resampler1 = PerceiverResampler(d_model, num_latents=num_goal_latents, nhead=nhead)
             self.goal_resampler2 = PerceiverResampler(d_model, num_latents=num_goal_latents, nhead=nhead)
             self.goal_slot_emb = nn.Parameter(torch.randn(num_goal_latents, d_model) * 0.02)
             self.goal_modality_emb = nn.Parameter(torch.randn(2, d_model) * 0.02)  # room1/room2 goal
@@ -300,9 +307,12 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 + self.goal_modality_emb[modality_idx].view(1, 1, self.d_model)
             )
 
-        goal_tokens = torch.cat(
-            [one(goal_feat1, self.goal_resampler1, 0),
-             one(goal_feat2, self.goal_resampler2, 1)], dim=1)
+        if self.use_room1:
+            goal_tokens = torch.cat(
+                [one(goal_feat1, self.goal_resampler1, 0),
+                 one(goal_feat2, self.goal_resampler2, 1)], dim=1)
+        else:
+            goal_tokens = one(goal_feat2, self.goal_resampler2, 1)
 
         if goal_mask is not None:
             m = goal_mask.view(-1, 1, 1).float()
@@ -331,31 +341,30 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 + self.lidar_modality_emb.view(1, 1, self.d_model))
 
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        required_keys = ("dino_feat1", "dino_feat2", "velocity")
+        required_keys = (("dino_feat1", "dino_feat2", "velocity") if self.use_room1
+                         else ("dino_feat2", "velocity"))
         missing_keys = [k for k in required_keys if k not in condition]
         if missing_keys:
             raise KeyError(f"Missing condition keys: {missing_keys}")
 
-        dino_feat1 = condition["dino_feat1"]
         dino_feat2 = condition["dino_feat2"]
         velocity = condition["velocity"]
 
-        b = dino_feat1.shape[0]
-        device = dino_feat1.device
+        b = dino_feat2.shape[0]
+        device = dino_feat2.device
         self._point_tokens = None        # reset; set by _build_lidar_tokens if lidar present
 
-        image1_tokens = self._build_image_tokens(dino_feat1, self.room1_resampler, modality_idx=0)
         image2_tokens = self._build_image_tokens(dino_feat2, self.room2_resampler, modality_idx=1)
         velocity_tokens = self._build_velocity_tokens(velocity)
 
-        # TODO: turn off pos/vel tokens
-        # image1_tokens = torch.zeros_like(image1_tokens)
-        # image2_tokens = torch.zeros_like(image2_tokens)
-        # velocity_tokens = torch.zeros_like(velocity_tokens)
-
         readout = self.readout_emb.repeat(b, 1, 1) + self.modality_emb[3].view(1, 1, self.d_model)
 
-        token_list = [image1_tokens, image2_tokens, velocity_tokens]
+        if self.use_room1:
+            image1_tokens = self._build_image_tokens(
+                condition["dino_feat1"], self.room1_resampler, modality_idx=0)
+            token_list = [image1_tokens, image2_tokens, velocity_tokens]
+        else:
+            token_list = [image2_tokens, velocity_tokens]
         if self.use_lidar_points and "lidar_points" in condition:
             token_list.append(self._build_lidar_tokens(
                 condition["lidar_points"], condition["lidar_npoints"]))

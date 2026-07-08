@@ -56,6 +56,8 @@ def model_setups(args):
     use_goal = args.get("use_goal", False)
     use_lidar = args.get("use_lidar_points", False)
     use_aux = args.get("use_aux_pose", False)
+    use_room1 = args.get("use_room1", True)
+    dino_cache_path = args.get("dino_cache_path", None) if args.get("use_dino_cache", False) else None
     dataset = DockingDataset(
         npz_path=args.train_data_path,
         train_npz_path=args.train_data_path,
@@ -68,6 +70,8 @@ def model_setups(args):
         with_aux=use_aux,
         vision_stride=vision_stride,
         sparse_vision_uint8=args.get("sparse_vision", False),
+        dino_cache_path=dino_cache_path,
+        use_room1=use_room1,
     )
 
     # RAM note: in-flight host memory ≈ num_workers × prefetch_factor × batch_size
@@ -102,6 +106,7 @@ def model_setups(args):
         use_lidar_points=use_lidar,
         num_lidar_latents=args.get("num_lidar_latents", 16),
         use_aux_pose=use_aux,
+        use_room1=use_room1,
     ).to(args.device)
 
     nn_diffusion_model = DiT1d(

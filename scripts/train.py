@@ -137,9 +137,6 @@ def main(args):
 
     nn_diffusion.train()
 
-    # Frozen DINO feature extractor used only to build condition inputs.
-    dino_detector = DinoBatchDetector(device=device)
-
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)
     use_goal = args.get("use_goal", False)
@@ -147,6 +144,15 @@ def main(args):
     use_aux = args.get("use_aux_pose", False)
     aux_weight = args.get("aux_weight", 1.0)
     sparse_vision = args.get("sparse_vision", False)
+    use_room1 = args.get("use_room1", True)
+    # When DINO features are precomputed (scripts/precompute_dino_cache.py), the
+    # dataset returns cached [Tv,196,768] features directly and we skip the DINO
+    # backbone entirely (see plan: single-camera + offline caching).
+    use_dino_cache = args.get("use_dino_cache", False)
+
+    # Frozen DINO feature extractor used only to build condition inputs. Skipped
+    # (not even loaded) when reading precomputed features from the cache.
+    dino_detector = None if use_dino_cache else DinoBatchDetector(device=device)
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= total_gradient_steps:
@@ -158,48 +164,59 @@ def main(args):
         obs_dict = batch["obs"]
 
         # ------------------------------------------------------------------
-        # Multimodal condition inputs:
-        #   - image_room1: full 30-step history -> sparse history via ::vision_stride
-        #   - image_room2: full 30-step history -> sparse history via ::vision_stride
-        #   - velocity:    full 30-step normalized encoder history
+        # Multimodal condition inputs. Two paths:
+        #   (A) use_dino_cache: dataset returns precomputed [B,Tv,196,768] DINO
+        #       features directly -> skip the backbone (the fast training path).
+        #   (B) live: DINO-encode sparse image history on the fly.
+        # room1 (image_top) is only used when use_room1 is True (else room2 only).
         # ------------------------------------------------------------------
-        if sparse_vision:
-            # dataset already returned the sparse uint8 frames; convert on GPU.
-            image_room1 = obs_dict["image_room1"].to(device, non_blocking=True).float() / 255.0
-            image_room2 = obs_dict["image_room2"].to(device, non_blocking=True).float() / 255.0
-        else:
-            image_room1 = obs_dict["image_room1"][:, ::vision_stride].to(device, non_blocking=True)
-            image_room2 = obs_dict["image_room2"][:, ::vision_stride].to(device, non_blocking=True)
         velocity = obs_dict["velocity"].to(device, non_blocking=True)
 
-        B, T_vis, C, H, W = image_room1.shape
-        image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
-        image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
+        if use_dino_cache:
+            dino_feat2 = obs_dict["dino_feat_room2"].to(device, non_blocking=True).float()
+            B, T_vis = dino_feat2.shape[0], dino_feat2.shape[1]
+            context = {"dino_feat2": dino_feat2.view(B, T_vis, 196, 768), "velocity": velocity}
+            if use_room1:
+                context["dino_feat1"] = (obs_dict["dino_feat_room1"]
+                                         .to(device, non_blocking=True).float().view(B, T_vis, 196, 768))
+            if use_goal:
+                context["goal_feat2"] = (obs_dict["goal_feat_room2"]
+                                         .to(device, non_blocking=True).float().view(B, 1, 196, 768))
+                if use_room1:
+                    context["goal_feat1"] = (obs_dict["goal_feat_room1"]
+                                             .to(device, non_blocking=True).float().view(B, 1, 196, 768))
+                context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
+        else:
+            def _encode(img_key):
+                if sparse_vision:
+                    img = obs_dict[img_key].to(device, non_blocking=True).float() / 255.0
+                else:
+                    img = obs_dict[img_key][:, ::vision_stride].to(device, non_blocking=True)
+                b, tv, c, h, w = img.shape
+                with torch.no_grad():
+                    feat, _, _ = dino_detector.get_heatmap(img.reshape(b * tv, c, h, w))
+                return feat.view(b, tv, 196, 768), b, tv
 
-        with torch.no_grad():
-            dino_feat1, _, _ = dino_detector.get_heatmap(image_room1_flat)
-            dino_feat2, _, _ = dino_detector.get_heatmap(image_room2_flat)
+            dino_feat2, B, T_vis = _encode("image_room2")
+            context = {"dino_feat2": dino_feat2, "velocity": velocity}
+            if use_room1:
+                context["dino_feat1"] = _encode("image_room1")[0]
 
-        context = {
-            "dino_feat1": dino_feat1.view(B, T_vis, 196, 768),
-            "dino_feat2": dino_feat2.view(B, T_vis, 196, 768),
-            "velocity": velocity,
-        }
+            # Goal-feature conditioning (CLAUDE.md §2.3 Loss A): DINO-encode the
+            # goal (docked) frame and pass it + its NoMaD mask as condition inputs.
+            if use_goal:
+                def _encode_goal(img_key):
+                    goal = obs_dict[img_key].to(device, non_blocking=True)
+                    if sparse_vision:
+                        goal = goal.float() / 255.0
+                    with torch.no_grad():
+                        feat, _, _ = dino_detector.get_heatmap(goal)
+                    return feat.view(B, 1, 196, 768)
 
-        # Goal-feature conditioning (CLAUDE.md §2.3 Loss A): DINO-encode the goal
-        # (docked) frame and pass it + its NoMaD mask as extra condition inputs.
-        if use_goal:
-            goal_room1 = obs_dict["goal_image_room1"].to(device, non_blocking=True)  # [B, 3, H, W]
-            goal_room2 = obs_dict["goal_image_room2"].to(device, non_blocking=True)
-            if sparse_vision:
-                goal_room1 = goal_room1.float() / 255.0
-                goal_room2 = goal_room2.float() / 255.0
-            with torch.no_grad():
-                goal_feat1, _, _ = dino_detector.get_heatmap(goal_room1)
-                goal_feat2, _, _ = dino_detector.get_heatmap(goal_room2)
-            context["goal_feat1"] = goal_feat1.view(B, 1, 196, 768)
-            context["goal_feat2"] = goal_feat2.view(B, 1, 196, 768)
-            context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
+                context["goal_feat2"] = _encode_goal("goal_image_room2")
+                if use_room1:
+                    context["goal_feat1"] = _encode_goal("goal_image_room1")
+                context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
 
         # Raw LiDAR points (Option A): point-set branch input.
         if use_lidar:
@@ -238,10 +255,10 @@ def main(args):
 
         if n_gradient_step == 0:
             print(f"Action target shape: {action.shape}")
-            print(f"Room1 image sparse history shape: {image_room1.shape}")
-            print(f"Room2 image sparse history shape: {image_room2.shape}")
-            print(f"DINO room1 feature shape: {dino_feat1.shape}")
-            print(f"DINO room2 feature shape: {dino_feat2.shape}")
+            print(f"use_room1={use_room1} | use_dino_cache={use_dino_cache}")
+            print(f"DINO room2 feature shape: {context['dino_feat2'].shape}")
+            if use_room1:
+                print(f"DINO room1 feature shape: {context['dino_feat1'].shape}")
             print(f"Velocity history shape: {velocity.shape}")
 
         if n_gradient_step % args.get("log_interval", 100) == 0:

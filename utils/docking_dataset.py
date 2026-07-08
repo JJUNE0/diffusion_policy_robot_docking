@@ -36,8 +36,15 @@ class DockingDataset(Dataset):
         with_aux: bool = False,
         vision_stride: int = 6,
         sparse_vision_uint8: bool = False,
+        dino_cache_path: str = None,
+        use_room1: bool = True,
     ):
         super().__init__()
+        # DINO feature cache: when set, __getitem__ returns precomputed room2
+        # (and optionally room1) DINO features instead of raw image pixels, and
+        # the train loop skips the backbone. See scripts/precompute_dino_cache.py.
+        self.dino_cache_path = dino_cache_path
+        self.use_room1 = use_room1
         # RAM saver (training): return only the sparse vision frames as uint8
         # (~24x less RAM than the full 30-frame float32 history). Default False
         # keeps the old behavior for the inference scripts.
@@ -91,6 +98,7 @@ class DockingDataset(Dataset):
             start_idx = end_idx
 
         self.root = None        # opened per worker in _ensure_open()
+        self.cache_root = None   # DINO feature cache handle (per worker)
 
     def _ensure_open(self):
         """Open the h5 handle once per process (lazy). Each DataLoader worker
@@ -109,15 +117,29 @@ class DockingDataset(Dataset):
             self.z_dock_pose = self.root["dock_pose"]
             self.z_reliable = self.root["reliable"]
 
+        # DINO feature cache (row-aligned 1:1 with the image rows). Opened per
+        # worker, same pattern as the image handles above.
+        if self.dino_cache_path is not None:
+            self.cache_root = h5py.File(self.dino_cache_path, "r")
+            self.z_dino2 = self.cache_root["dino_bottom"]   # room2
+            if self.use_room1:
+                if "dino_top" not in self.cache_root:
+                    raise KeyError(
+                        "use_room1=True with a DINO cache requires a 'dino_top' dataset "
+                        "in the cache; precompute it or set use_room1=False.")
+                self.z_dino1 = self.cache_root["dino_top"]
+
     def __len__(self) -> int:
         return len(self.index_map)
 
     def __del__(self):
-        try:
-            if getattr(self, "root", None) is not None:
-                self.root.close()
-        except Exception:
-            pass
+        for attr in ("root", "cache_root"):
+            try:
+                h = getattr(self, attr, None)
+                if h is not None:
+                    h.close()
+            except Exception:
+                pass
 
     def normalize_action(self, action: np.ndarray) -> np.ndarray:
         return 2.0 * (action - self.action_min) / self.action_scale - 1.0
@@ -140,15 +162,6 @@ class DockingDataset(Dataset):
         encoder_seq_raw = self._get_history(self.z_encoder, t, ep_start).astype(np.float32)   # [T, 2]
         velocity_seq_norm = self.normalize_action(encoder_seq_raw).astype(np.float32)          # [T, 2]
 
-        # Vision histories. sparse_vision_uint8 (training) returns only the sparse
-        # frames as uint8 (~24x less RAM); else full float32 history (inference).
-        if self.sparse_vision_uint8:
-            image_room1 = np.ascontiguousarray(self._get_history(self.z_img1, t, ep_start)[::self.vision_stride])
-            image_room2 = np.ascontiguousarray(self._get_history(self.z_img2, t, ep_start)[::self.vision_stride])
-        else:
-            image_room1 = self._get_history(self.z_img1, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
-            image_room2 = self._get_history(self.z_img2, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
-
         # Future target trajectory in normalized encoder space
         act_traj = self.z_encoder[t: t + self.horizon].astype(np.float32)                      # [H, 2]
         act_traj_norm = self.normalize_action(act_traj).astype(np.float32)
@@ -156,23 +169,47 @@ class DockingDataset(Dataset):
         obs = {
             "encoder": torch.from_numpy(encoder_seq_raw).float(),
             "velocity": torch.from_numpy(velocity_seq_norm).float(),
-            "image_room1": torch.from_numpy(image_room1),
-            "image_room2": torch.from_numpy(image_room2),
         }
+
+        if self.dino_cache_path is not None:
+            # Cached path: return precomputed DINO features (sparse history) instead
+            # of raw pixels. Mirror the exact frame selection the live path uses:
+            # _get_history(...) -> [::vision_stride]. Features are stored fp16.
+            feat2 = self._get_history(self.z_dino2, t, ep_start)[::self.vision_stride]  # [Tv,196,768]
+            obs["dino_feat_room2"] = torch.from_numpy(np.ascontiguousarray(feat2))
+            if self.use_room1:
+                feat1 = self._get_history(self.z_dino1, t, ep_start)[::self.vision_stride]
+                obs["dino_feat_room1"] = torch.from_numpy(np.ascontiguousarray(feat1))
+        else:
+            # Vision histories. sparse_vision_uint8 (training) returns only the sparse
+            # frames as uint8 (~24x less RAM); else full float32 history (inference).
+            if self.sparse_vision_uint8:
+                image_room1 = np.ascontiguousarray(self._get_history(self.z_img1, t, ep_start)[::self.vision_stride])
+                image_room2 = np.ascontiguousarray(self._get_history(self.z_img2, t, ep_start)[::self.vision_stride])
+            else:
+                image_room1 = self._get_history(self.z_img1, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
+                image_room2 = self._get_history(self.z_img2, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
+            obs["image_room1"] = torch.from_numpy(image_room1)
+            obs["image_room2"] = torch.from_numpy(image_room2)
 
         if self.with_goal:
             # Goal = the episode's docked (final) frame, the ultimate sub-goal.
             gi = int(self.ep_end_map[idx]) - 1
-            if self.sparse_vision_uint8:
-                goal_room1 = np.ascontiguousarray(self.z_img1[gi])   # uint8 [3, H, W]
-                goal_room2 = np.ascontiguousarray(self.z_img2[gi])
-            else:
-                goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0
-                goal_room2 = self.z_img2[gi].astype(np.float32) / 255.0
             goal_active = 1.0 if np.random.rand() < self.goal_mask_prob else 0.0
-            obs["goal_image_room1"] = torch.from_numpy(goal_room1)
-            obs["goal_image_room2"] = torch.from_numpy(goal_room2)
             obs["goal_mask"] = torch.tensor(goal_active, dtype=torch.float32)
+            if self.dino_cache_path is not None:
+                obs["goal_feat_room2"] = torch.from_numpy(np.ascontiguousarray(self.z_dino2[gi]))  # [196,768]
+                if self.use_room1:
+                    obs["goal_feat_room1"] = torch.from_numpy(np.ascontiguousarray(self.z_dino1[gi]))
+            else:
+                if self.sparse_vision_uint8:
+                    goal_room1 = np.ascontiguousarray(self.z_img1[gi])   # uint8 [3, H, W]
+                    goal_room2 = np.ascontiguousarray(self.z_img2[gi])
+                else:
+                    goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0
+                    goal_room2 = self.z_img2[gi].astype(np.float32) / 255.0
+                obs["goal_image_room1"] = torch.from_numpy(goal_room1)
+                obs["goal_image_room2"] = torch.from_numpy(goal_room2)
 
         if self.with_lidar:
             # Current-frame raw points (robot frame), zero-padded to M.

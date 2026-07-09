@@ -1,9 +1,12 @@
 # ==========================================
-# Modular sensor-fusion config.
+# Modular sensor-fusion config for the NEW dataset format (dataset/new export).
+# For the legacy after_0328 dataset, use configs/robot/smr.yaml (its `sensors:`
+# block + use_modular_fusion=true runs the same modular path).
+# Run with: python scripts/train.py --config-name smr_new
 #
 # ABLATION = edit the `sensors:` dict below. Comment out a sensor to drop it;
-# add a block to include a new modality. The dataset, condition net, and (once
-# wired) train loop all read this one dict -- no code edits per experiment.
+# add a block to include a new modality. The dataset, condition net, and train
+# loop all read this one dict -- no code edits per experiment.
 #
 # BACKBONE ABLATION (flow vs ddpm) = flip `diffusion_backbone` below. It is a
 # one-line backbone swap, orthogonal to the sensors.

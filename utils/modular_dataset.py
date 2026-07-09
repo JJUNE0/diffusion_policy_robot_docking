@@ -4,6 +4,10 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
 `sensors` spec that drives ModularSensorFusionCondition. Each sensor declares:
 
     source         : HDF5 dataset key (e.g. "encoder", "lidar_points")
+    file           : (optional) path to an EXTERNAL h5 holding `source`. Lets a
+                     sensor read from a sidecar file, e.g. the legacy DINO cache
+                     (after_0328_train_dino_bottom.h5) next to after_0328_train.h5.
+                     Row indices must align 1:1 with the main h5.
     mode           : "history" (length-`horizon` window ending at t)
                    | "current" (the single row at t)
     horizon        : window length for mode=history
@@ -65,15 +69,30 @@ class ModularDockingDataset(Dataset):
         # Per-sensor z-score stats (computed once over the source), keyed by name.
         self.norm_stats = {}
 
-        with h5py.File(self.h5_path, "r") as f:
+        # Sensors may read from a sidecar h5 via `file:` (e.g. a DINO feature
+        # cache); everything else (episode_ends, action, aux labels) stays in
+        # the main h5.
+        self._file_paths = sorted({self.h5_path} | {
+            self._sensor_path(spec) for spec in self.sensors.values()})
+
+        files = {p: h5py.File(p, "r") for p in self._file_paths}
+        try:
+            f = files[self.h5_path]
             self.episode_ends = f["episode_ends"][:]
+            n_rows = int(self.episode_ends[-1])
             for name, spec in self.sensors.items():
-                if spec["source"] not in f:
+                sf = files[self._sensor_path(spec)]
+                if spec["source"] not in sf:
                     raise KeyError(
-                        f"sensor '{name}': source '{spec['source']}' not in {self.h5_path}. "
-                        f"Available: {list(f.keys())}")
+                        f"sensor '{name}': source '{spec['source']}' not in {sf.filename}. "
+                        f"Available: {list(sf.keys())}")
+                if sf[spec["source"]].shape[0] != n_rows:
+                    raise ValueError(
+                        f"sensor '{name}': '{spec['source']}' in {sf.filename} has "
+                        f"{sf[spec['source']].shape[0]} rows but the main h5 has {n_rows}; "
+                        f"external files must be row-aligned with the main h5.")
                 if spec.get("normalize") == "zscore":
-                    col = self._select_channels(f[spec["source"]][:], spec).astype(np.float32)
+                    col = self._select_channels(sf[spec["source"]][:], spec).astype(np.float32)
                     mean = col.reshape(-1, col.shape[-1]).mean(axis=0)
                     std = np.clip(col.reshape(-1, col.shape[-1]).std(axis=0), 1e-6, None)
                     self.norm_stats[name] = (mean.astype(np.float32), std.astype(np.float32))
@@ -92,6 +111,9 @@ class ModularDockingDataset(Dataset):
                 xy = pose_all[valid][:, :2]
                 self.dock_xy_mean = xy.mean(axis=0).astype(np.float32)
                 self.dock_xy_std = (xy.std(axis=0) + 1e-6).astype(np.float32)
+        finally:
+            for h in files.values():
+                h.close()
 
         with h5py.File(self.train_h5_path, "r") as f:
             act = f[self.action_key][:]
@@ -107,18 +129,23 @@ class ModularDockingDataset(Dataset):
                 self.ep_start_map.append(start)
             start = end
         self.root = None
+        self.roots = None
+
+    def _sensor_path(self, spec):
+        return spec.get("file") or self.h5_path
 
     def _ensure_open(self):
         if self.root is None:
-            self.root = h5py.File(self.h5_path, "r")
+            self.roots = {p: h5py.File(p, "r") for p in self._file_paths}
+            self.root = self.roots[self.h5_path]
 
     def __len__(self):
         return len(self.index_map)
 
     def __del__(self):
         try:
-            if getattr(self, "root", None) is not None:
-                self.root.close()
+            for h in (getattr(self, "roots", None) or {}).values():
+                h.close()
         except Exception:
             pass
 
@@ -147,7 +174,8 @@ class ModularDockingDataset(Dataset):
         ep_start = self.ep_start_map[idx]
         obs = {}
         for name, spec in self.sensors.items():
-            ds = self.root[spec["source"]]
+            sensor_root = self.roots[self._sensor_path(spec)]
+            ds = sensor_root[spec["source"]]
             mode = spec.get("mode", "history")
             if mode == "history":
                 arr = self._history(ds, t, ep_start)
@@ -168,7 +196,7 @@ class ModularDockingDataset(Dataset):
                 obs[name] = torch.from_numpy(np.ascontiguousarray(arr))
                 nsrc = spec.get("npoints_source")
                 if nsrc is not None:
-                    obs[f"{name}_npoints"] = torch.tensor(int(self.root[nsrc][t]), dtype=torch.long)
+                    obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][t]), dtype=torch.long)
             else:
                 raise ValueError(f"sensor '{name}': unknown mode '{mode}'.")
 

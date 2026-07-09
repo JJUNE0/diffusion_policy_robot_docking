@@ -113,7 +113,9 @@ def _modular_setups(args):
 def model_setups(args):
     # --- Modular sensor-fusion path (opt-in via config). Spec-driven: the
     # `sensors` dict in the YAML defines the dataset reads AND the fusion net
-    # branches, so ablations are config-only. See configs/robot/modular.yaml.
+    # branches, so ablations are config-only. See configs/robot/smr_new.yaml
+    # (new dataset) and the `sensors:` block in configs/robot/smr.yaml (legacy
+    # after_0328 dataset).
     if args.get("use_modular_fusion", False):
         return _modular_setups(args)
 
@@ -186,12 +188,12 @@ def model_setups(args):
         dropout=0.0,
     ).to(args.device)
 
-    # Rectified Flow backbone: learns the straight-line velocity field (x0 - x1)
-    # and integrates it with a simple Euler ODE. The aux ICP head + lidar/goal
-    # branches live in nn_condition, so this backbone swap is orthogonal to the
-    # end-game precision-docking design (train loop uses .loss(), which RF also
-    # exposes -> no training-loop change needed).
-    nn_diffusion = ContinuousRectifiedFlow(
+    # Backbone is config-selected (`diffusion_backbone`: rectified_flow | ddpm),
+    # same knob as the modular path. The aux ICP head + lidar/goal branches live
+    # in nn_condition, so this backbone swap is orthogonal to the end-game
+    # precision-docking design (train loop uses .loss(), which both expose).
+    Backbone = _select_backbone(args)
+    nn_diffusion = Backbone(
         nn_diffusion=nn_diffusion_model,
         nn_condition=nn_condition,
         ema_rate=args.ema_rate,

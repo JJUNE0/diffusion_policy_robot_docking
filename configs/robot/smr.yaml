@@ -12,8 +12,8 @@ train_data_path : ${hydra:runtime.cwd}/dataset/after_0328_train.h5
 horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
-batch_size: 128
-num_workers: 8
+batch_size: 256
+num_workers: 4
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
 state_dim: 2            # encoder(2)
@@ -22,8 +22,46 @@ image_width: 320
 image_height: 240
 
 # ==========================================
+# 2.5 Modular sensor fusion (ablation mode, legacy after_0328 dataset)
+# ==========================================
+# use_modular_fusion=false -> 기존 legacy 경로 그대로 (아래 sensors는 무시됨).
+# use_modular_fusion=true  -> smr_new.yaml과 동일한 spec-driven 모듈 경로로
+# after_0328 데이터를 학습. ABLATION = sensors 블록에서 항목을 주석/삭제.
+# 주의: modular 모드는 사전계산된 DINO 캐시(sidecar h5)를 `file:`로 읽으므로
+# use_dino_cache 플래그와 무관하게 항상 캐시가 필요함.
+use_modular_fusion: false
+
+sensors:
+  encoder:
+    encoder: motion
+    source: encoder              # wheel odometry [vx, wz]
+    mode: history
+    dim: 2
+    horizon: 30
+    normalize: action
+    dropout_prob: 0.2
+  dino_bottom:
+    encoder: dino_image
+    source: dino_bottom          # precomputed DINO features (room2/image_bottom)
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: history
+    horizon: 5                   # obs_horizon(30) / stride(6)
+    stride: 6
+    num_latents: 16
+  lidar:
+    encoder: pointcloud
+    source: lidar_points
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16
+    head: aux_pose               # 제거하면 ICP-distilled 정밀 헤드 ablation
+
+# ==========================================
 # 3. Network Architecture (DiT & Condition)
 # ==========================================
+# rectified_flow | ddpm
+diffusion_backbone: ddpm
+
 d_model: 384           # DiT와 Condition 네트워크의 통일된 은닉 차원
 n_heads: 6             # Attention 헤드 수 (384 // 64 = 6)
 depth: 12              # DiT 블록의 깊이
@@ -64,9 +102,9 @@ ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
 # 5. Training
 # ==========================================
 num_epochs: 10                 # 학습 epoch 수. dataloader 길이(=floor(len(dataset)/batch_size)) 기반으로 gradient step 자동 환산
-diffusion_gradient_steps: 140000  # num_epochs 가 설정되지 않았을 때만 쓰이는 fallback step 수
+diffusion_gradient_steps: null  # num_epochs 가 설정되지 않았을 때만 쓰이는 fallback step 수
 log_interval: 10
-save_interval: 10000
+save_interval: 1000
 resume_path: null
 
 learning_rate: 1e-4
@@ -77,7 +115,7 @@ weight_decay: 1e-5
 # ==========================================
 diffusion_ckpt: latest
 use_ema: True
-solver : euler                 # Rectified Flow: straight ODE integrated with Euler (replaces dpmsolver++)
+solver : dpmsolver++                 # Rectified Flow: straight ODE integrated with Euler (replaces dpmsolver++)
 w_cfg : 1                      # guidance weight
 inference_sampling_steps: 20   # Euler ODE steps. RF is near-straight -> 5~20 steps suffice
 num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여러개 궤적 비교

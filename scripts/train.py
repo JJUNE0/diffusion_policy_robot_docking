@@ -137,6 +137,12 @@ def main(args):
 
     nn_diffusion.train()
 
+    # Modular spec-driven path: the dataset already returns the condition dict
+    # keyed exactly as ModularSensorFusionCondition expects (sensor names from
+    # the YAML `sensors:` block), so the batch is forwarded as-is. DINO features
+    # are precomputed (in-h5 or sidecar `file:`) -> no live backbone here.
+    use_modular = args.get("use_modular_fusion", False)
+
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)
     use_goal = args.get("use_goal", False)
@@ -152,7 +158,7 @@ def main(args):
 
     # Frozen DINO feature extractor used only to build condition inputs. Skipped
     # (not even loaded) when reading precomputed features from the cache.
-    dino_detector = None if use_dino_cache else DinoBatchDetector(device=device)
+    dino_detector = None if (use_dino_cache or use_modular) else DinoBatchDetector(device=device)
 
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= total_gradient_steps:
@@ -164,15 +170,18 @@ def main(args):
         obs_dict = batch["obs"]
 
         # ------------------------------------------------------------------
-        # Multimodal condition inputs. Two paths:
+        # Multimodal condition inputs. Three paths:
+        #   (M) use_modular_fusion: obs dict is already the condition dict
+        #       (spec-driven names) -> forward verbatim.
         #   (A) use_dino_cache: dataset returns precomputed [B,Tv,196,768] DINO
         #       features directly -> skip the backbone (the fast training path).
         #   (B) live: DINO-encode sparse image history on the fly.
         # room1 (image_top) is only used when use_room1 is True (else room2 only).
         # ------------------------------------------------------------------
-        velocity = obs_dict["velocity"].to(device, non_blocking=True)
-
-        if use_dino_cache:
+        if use_modular:
+            context = {k: v.to(device, non_blocking=True) for k, v in obs_dict.items()}
+        elif use_dino_cache:
+            velocity = obs_dict["velocity"].to(device, non_blocking=True)
             dino_feat2 = obs_dict["dino_feat_room2"].to(device, non_blocking=True).float()
             B, T_vis = dino_feat2.shape[0], dino_feat2.shape[1]
             context = {"dino_feat2": dino_feat2.view(B, T_vis, 196, 768), "velocity": velocity}
@@ -187,6 +196,8 @@ def main(args):
                                              .to(device, non_blocking=True).float().view(B, 1, 196, 768))
                 context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
         else:
+            velocity = obs_dict["velocity"].to(device, non_blocking=True)
+
             def _encode(img_key):
                 if sparse_vision:
                     img = obs_dict[img_key].to(device, non_blocking=True).float() / 255.0
@@ -218,8 +229,9 @@ def main(args):
                     context["goal_feat1"] = _encode_goal("goal_image_room1")
                 context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
 
-        # Raw LiDAR points (Option A): point-set branch input.
-        if use_lidar:
+        # Raw LiDAR points (Option A): point-set branch input (legacy path only;
+        # the modular obs dict already carries its lidar keys by sensor name).
+        if use_lidar and not use_modular:
             context["lidar_points"] = obs_dict["lidar_points"].to(device, non_blocking=True)
             context["lidar_npoints"] = obs_dict["lidar_npoints"].to(device, non_blocking=True)
 
@@ -255,11 +267,16 @@ def main(args):
 
         if n_gradient_step == 0:
             print(f"Action target shape: {action.shape}")
-            print(f"use_room1={use_room1} | use_dino_cache={use_dino_cache}")
-            print(f"DINO room2 feature shape: {context['dino_feat2'].shape}")
-            if use_room1:
-                print(f"DINO room1 feature shape: {context['dino_feat1'].shape}")
-            print(f"Velocity history shape: {velocity.shape}")
+            if use_modular:
+                print(f"Modular fusion | backbone={args.get('diffusion_backbone', 'rectified_flow')}")
+                for k, v in context.items():
+                    print(f"  obs[{k}]: {tuple(v.shape)}")
+            else:
+                print(f"use_room1={use_room1} | use_dino_cache={use_dino_cache}")
+                print(f"DINO room2 feature shape: {context['dino_feat2'].shape}")
+                if use_room1:
+                    print(f"DINO room1 feature shape: {context['dino_feat1'].shape}")
+                print(f"Velocity history shape: {velocity.shape}")
 
         if n_gradient_step % args.get("log_interval", 100) == 0:
             logger.log(

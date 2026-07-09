@@ -285,17 +285,18 @@ class SensorFusionConditionNetwork(BaseNNCondition):
 
     def _build_goal_tokens(
         self,
-        goal_feat1: torch.Tensor,
+        goal_feat1: Optional[torch.Tensor],
         goal_feat2: torch.Tensor,
         goal_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Encode the goal DINO features into goal tokens (NoMaD-masked).
 
         Args:
-            goal_feat{1,2}: [B, 1, 196, 768] or [B, 196, 768]  (single goal frame)
+            goal_feat{1,2}: [B, 1, 196, 768] or [B, 196, 768]  (single goal frame);
+                goal_feat1 is None in single-camera mode (use_room1=False)
             goal_mask: [B] with 1 = attend goal, 0 = undirected (null token)
         Returns:
-            [B, 2 * num_goal_latents, d_model]
+            [B, (2 if use_room1 else 1) * num_goal_latents, d_model]
         """
         def one(feat, resampler, modality_idx):
             if feat.dim() == 4:
@@ -308,6 +309,8 @@ class SensorFusionConditionNetwork(BaseNNCondition):
             )
 
         if self.use_room1:
+            if goal_feat1 is None:
+                raise KeyError("use_room1=True requires 'goal_feat1' in the condition dict.")
             goal_tokens = torch.cat(
                 [one(goal_feat1, self.goal_resampler1, 0),
                  one(goal_feat2, self.goal_resampler2, 1)], dim=1)
@@ -368,9 +371,12 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         if self.use_lidar_points and "lidar_points" in condition:
             token_list.append(self._build_lidar_tokens(
                 condition["lidar_points"], condition["lidar_npoints"]))
-        if self.use_goal and "goal_feat1" in condition:
+        # Gate on goal_feat2: it is the goal input that exists in BOTH camera
+        # modes (goal_feat1 only exists when use_room1). Gating on goal_feat1
+        # silently disabled goal conditioning in single-camera mode.
+        if self.use_goal and "goal_feat2" in condition:
             token_list.append(self._build_goal_tokens(
-                condition["goal_feat1"], condition["goal_feat2"], condition.get("goal_mask")))
+                condition.get("goal_feat1"), condition["goal_feat2"], condition.get("goal_mask")))
         token_list.append(readout)
 
         all_tokens = torch.cat(token_list, dim=1)

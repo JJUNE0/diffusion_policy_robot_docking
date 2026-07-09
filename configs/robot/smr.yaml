@@ -1,7 +1,7 @@
 # ==========================================
 # 1. Project & System Setup
 # ==========================================
-experiment_name: velocity_vision_velocity
+experiment_name: flow_goal
 seed: 0
 device: cuda:0
 
@@ -13,7 +13,7 @@ horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
 batch_size: 256
-num_workers: 4
+num_workers: 1
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
 state_dim: 2            # encoder(2)
@@ -60,7 +60,7 @@ sensors:
 # 3. Network Architecture (DiT & Condition)
 # ==========================================
 # rectified_flow | ddpm
-diffusion_backbone: ddpm
+diffusion_backbone: rectified_flow
 
 d_model: 384           # DiT와 Condition 네트워크의 통일된 은닉 차원
 n_heads: 6             # Attention 헤드 수 (384 // 64 = 6)
@@ -115,7 +115,7 @@ weight_decay: 1e-5
 # ==========================================
 diffusion_ckpt: latest
 use_ema: True
-solver : dpmsolver++                 # Rectified Flow: straight ODE integrated with Euler (replaces dpmsolver++)
+solver : Euler                 # Rectified Flow: straight ODE integrated with Euler (replaces dpmsolver++)
 w_cfg : 1                      # guidance weight
 inference_sampling_steps: 20   # Euler ODE steps. RF is near-straight -> 5~20 steps suffice
 num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여러개 궤적 비교

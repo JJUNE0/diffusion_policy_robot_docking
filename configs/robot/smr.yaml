@@ -12,8 +12,9 @@ train_data_path : ${hydra:runtime.cwd}/dataset/after_0328_train.h5
 horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
-batch_size: 256
-num_workers: 1
+batch_size: 512
+num_workers: 0
+prefetch_factor : 2
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
 state_dim: 2            # encoder(2)
@@ -39,7 +40,7 @@ sensors:
     dim: 2
     horizon: 30
     normalize: action
-    dropout_prob: 0.2
+    dropout_prob: 0.1
   dino_bottom:
     encoder: dino_image
     source: dino_bottom          # precomputed DINO features (room2/image_bottom)
@@ -104,7 +105,7 @@ ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
 num_epochs: 10                 # 학습 epoch 수. dataloader 길이(=floor(len(dataset)/batch_size)) 기반으로 gradient step 자동 환산
 diffusion_gradient_steps: null  # num_epochs 가 설정되지 않았을 때만 쓰이는 fallback step 수
 log_interval: 10
-save_interval: 1000
+save_interval: 100
 resume_path: null
 
 learning_rate: 1e-4

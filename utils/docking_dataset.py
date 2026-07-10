@@ -76,9 +76,25 @@ class DockingDataset(Dataset):
             if self.with_aux:
                 pose_all = f["dock_pose"][:]
                 rel_all = f["reliable"][:].astype(bool)
-                xy = pose_all[rel_all][:, :2]
+                # Guard: only use rows that are BOTH reliable and non-NaN, so a
+                # single NaN pose can't poison the mean/std (and thus every
+                # emitted target) with NaN. (Same guard as ModularDockingDataset.)
+                valid = rel_all & ~np.isnan(pose_all).any(axis=1)
+                xy = pose_all[valid][:, :2]
                 self.dock_xy_mean = xy.mean(axis=0).astype(np.float32)
                 self.dock_xy_std = (xy.std(axis=0) + 1e-6).astype(np.float32)
+
+        # The DINO cache must be row-aligned 1:1 with THIS h5. Catch the silent
+        # misalignment of pointing an eval/held-out h5 at the train cache.
+        if self.dino_cache_path is not None:
+            with h5py.File(self.dino_cache_path, "r") as cf:
+                n_cache = cf["dino_bottom"].shape[0]
+            n_rows = int(self.episode_ends[-1])
+            if n_cache != n_rows:
+                raise ValueError(
+                    f"DINO cache {self.dino_cache_path} has {n_cache} rows but "
+                    f"{self.h5_path} has {n_rows}; the cache must be precomputed "
+                    f"from this exact h5 (see scripts/precompute_dino_cache.py).")
 
         with h5py.File(self.train_h5_path, "r") as f:
             enc = f["encoder"][:]
@@ -183,14 +199,19 @@ class DockingDataset(Dataset):
         else:
             # Vision histories. sparse_vision_uint8 (training) returns only the sparse
             # frames as uint8 (~24x less RAM); else full float32 history (inference).
+            # use_room1=False skips the room1 decode entirely (gzip decode + RAM
+            # are wasted otherwise; the single-camera model never reads it).
             if self.sparse_vision_uint8:
-                image_room1 = np.ascontiguousarray(self._get_history(self.z_img1, t, ep_start)[::self.vision_stride])
                 image_room2 = np.ascontiguousarray(self._get_history(self.z_img2, t, ep_start)[::self.vision_stride])
+                if self.use_room1:
+                    image_room1 = np.ascontiguousarray(self._get_history(self.z_img1, t, ep_start)[::self.vision_stride])
             else:
-                image_room1 = self._get_history(self.z_img1, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
                 image_room2 = self._get_history(self.z_img2, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
-            obs["image_room1"] = torch.from_numpy(image_room1)
+                if self.use_room1:
+                    image_room1 = self._get_history(self.z_img1, t, ep_start).astype(np.float32) / 255.0
             obs["image_room2"] = torch.from_numpy(image_room2)
+            if self.use_room1:
+                obs["image_room1"] = torch.from_numpy(image_room1)
 
         if self.with_goal:
             # Goal = the episode's docked (final) frame, the ultimate sub-goal.
@@ -203,13 +224,16 @@ class DockingDataset(Dataset):
                     obs["goal_feat_room1"] = torch.from_numpy(np.ascontiguousarray(self.z_dino1[gi]))
             else:
                 if self.sparse_vision_uint8:
-                    goal_room1 = np.ascontiguousarray(self.z_img1[gi])   # uint8 [3, H, W]
-                    goal_room2 = np.ascontiguousarray(self.z_img2[gi])
+                    goal_room2 = np.ascontiguousarray(self.z_img2[gi])   # uint8 [3, H, W]
                 else:
-                    goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0
                     goal_room2 = self.z_img2[gi].astype(np.float32) / 255.0
-                obs["goal_image_room1"] = torch.from_numpy(goal_room1)
                 obs["goal_image_room2"] = torch.from_numpy(goal_room2)
+                if self.use_room1:
+                    if self.sparse_vision_uint8:
+                        goal_room1 = np.ascontiguousarray(self.z_img1[gi])
+                    else:
+                        goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0
+                    obs["goal_image_room1"] = torch.from_numpy(goal_room1)
 
         if self.with_lidar:
             # Current-frame raw points (robot frame), zero-padded to M.

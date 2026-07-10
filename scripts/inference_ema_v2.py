@@ -217,7 +217,8 @@ def main(args):
             out = nn_diffusion.sample(
                 solver=args.solver, w_cfg=args.w_cfg, prior=prior,
                 condition_cfg=context, n_samples=n_samples,
-                sample_steps=args.inference_sampling_steps, use_ema=True)
+                sample_steps=args.inference_sampling_steps,
+                use_ema=bool(args.get("use_ema", True)))
             out = out[0] if isinstance(out, tuple) else out
             res = denormalize(out.cpu().numpy(), act_scale, act_min)
 

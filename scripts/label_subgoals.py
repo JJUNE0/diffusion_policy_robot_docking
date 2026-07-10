@@ -43,7 +43,7 @@ OUT = "dataset/after_0328/icp_labels"
 # reliable approach. Farther sub-goals (>coverage) are vision-only (future work).
 SUBGOAL_DISTS = [0.9, 0.7, 0.55, 0.45]
 RELIABLE_INLIER = 0.5
-RELIABLE_RMS = 0.025                  # m
+RELIABLE_RMS = 0.015                  # m
 LOST_PATIENCE = 6                    # consecutive unreliable frames -> stop tracking
 
 

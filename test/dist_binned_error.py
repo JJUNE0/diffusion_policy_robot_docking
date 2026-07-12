@@ -36,8 +36,15 @@ import torch  # noqa: E402
 
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork  # noqa: E402
 
-H5 = "dataset/after_0328_train.h5"
-DINO_CACHE = "dataset/after_0328_train_dino_bottom.h5"
+# Env-overridable so the same tooling scores held-out data:
+#   EVAL_H5 / EVAL_CACHE  -> which data to read
+#   EVAL_STATS_H5         -> which data defines the normalization space
+# Stats must stay the TRAIN h5 even when EVAL_H5 is the test h5: the model
+# learned in train-stat space, so targets must be normalized with train stats
+# (same rule as scripts/eval_heldout.py).
+H5 = os.environ.get("EVAL_H5", "dataset/after_0328_train.h5")
+DINO_CACHE = os.environ.get("EVAL_CACHE", "dataset/after_0328_train_dino_bottom.h5")
+STATS_H5 = os.environ.get("EVAL_STATS_H5", "dataset/after_0328_train.h5")
 RUNS = {
     "flow": "outputs/train/flow_goal/2026-07-09_12-02-10/checkpoint_step_4230.pt",
     "auxw": "outputs/train/flow_goal_auxw/2026-07-10_15-36-56/checkpoint_step_4230.pt",
@@ -85,19 +92,23 @@ class H5Batcher:
         self.episode_ends = f["episode_ends"][:]
         pose = f["dock_pose"][:].astype(np.float32)
         rel = f["reliable"][:].astype(bool)
-        valid = rel & ~np.isnan(pose).any(axis=1)
-        xy = pose[valid][:, :2]
-        self.dock_xy_mean = xy.mean(0)
-        self.dock_xy_std = xy.std(0) + 1e-6
-        self.pose, self.rel_valid = np.nan_to_num(pose), valid
+        self.pose, self.rel_valid = np.nan_to_num(pose), rel & ~np.isnan(pose).any(axis=1)
         self.z_lidar = f["lidar_points"]
         self.z_nlidar = f["lidar_npoints"]
         self.cf = h5py.File(DINO_CACHE, "r")
         self.z_dino = self.cf["dino_bottom"]
 
-        # normalization identical to DockingDataset (train min/max of encoder)
-        self.a_min = self.enc.min(0)
-        self.a_scale = np.clip(self.enc.max(0) - self.a_min, 1e-5, None)
+        # Normalization space = the STATS file (train h5): dock-pose mean/std and
+        # encoder min/max the model learned with — not the eval file's own stats.
+        with h5py.File(STATS_H5, "r") as sf:
+            s_pose = sf["dock_pose"][:].astype(np.float32)
+            s_rel = sf["reliable"][:].astype(bool)
+            s_xy = s_pose[s_rel & ~np.isnan(s_pose).any(axis=1)][:, :2]
+            self.dock_xy_mean = s_xy.mean(0)
+            self.dock_xy_std = s_xy.std(0) + 1e-6
+            s_enc = sf["encoder"][:].astype(np.float32)
+        self.a_min = s_enc.min(0)
+        self.a_scale = np.clip(s_enc.max(0) - self.a_min, 1e-5, None)
 
         # per-row episode start/end (same index constraint as the dataset)
         n = int(self.episode_ends[-1])

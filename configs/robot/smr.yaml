@@ -88,6 +88,13 @@ aux_dist_max: 1.1      # meters; 이보다 먼 라벨은 aux loss에서 제외
 aux_dist_power: 2.0    # 역거리 가중 지수 (0.55m 프레임이 1.1m 프레임의 4배 가중)
 aux_dist_ref: 0.6      # 가중 기준 거리 (weight=1이 되는 지점)
 
+# Goal-referenced registration (2026-07-12): goal(도킹 완료) 프레임의 LiDAR 스캔을
+# 별도 modality로 조건에 추가 -> 현재 스캔과 골 스캔의 정합을 모델 내부에서 학습.
+# aux_relative=true면 aux 타깃이 절대 dock pose 대신 "현재->골 상대 pose"(골까지의
+# 거리+각도)가 됨. 두 플래그 모두 아키텍처 변경이라 from-scratch 학습 필요.
+use_goal_lidar: false
+aux_relative: false
+
 # RAM saver: dataset returns only the sparse vision frames as uint8 (~24x less
 # host RAM). Needed on the 15 GB machine. Keep on for training.
 sparse_vision: true

@@ -261,6 +261,11 @@ def main(args):
         if use_lidar and not use_modular:
             context["lidar_points"] = obs_dict["lidar_points"].to(device, non_blocking=True)
             context["lidar_npoints"] = obs_dict["lidar_npoints"].to(device, non_blocking=True)
+            # Goal-referenced registration: the docked frame's scan as its own
+            # modality (dataset emits it when use_goal_lidar).
+            if "goal_lidar_points" in obs_dict:
+                context["goal_lidar_points"] = obs_dict["goal_lidar_points"].to(device, non_blocking=True)
+                context["goal_lidar_npoints"] = obs_dict["goal_lidar_npoints"].to(device, non_blocking=True)
 
         # Combined loss = denoising (main) + ICP-distilled aux pose (precision).
         # nn_diffusion.loss() runs the condition net once and caches its aux pred.
@@ -271,8 +276,11 @@ def main(args):
             dock_target = batch["dock_target"].to(device, non_blocking=True)
             w = batch["reliable"].to(device, non_blocking=True).float()
             if aux_dist_max is not None or aux_dist_power > 0:
-                std = torch.as_tensor(dataset.dock_xy_std, device=device)
-                mean = torch.as_tensor(dataset.dock_xy_mean, device=device)
+                # aux_xy_* = stats of whatever the dataset emitted (absolute dock
+                # pose, or current->goal relative pose when aux_relative). In the
+                # relative case the masking/weighting distance is distance-to-goal.
+                std = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
+                mean = torch.as_tensor(getattr(dataset, "aux_xy_mean", dataset.dock_xy_mean), device=device)
                 xy = dock_target[:, :2] * std + mean
                 dock_d = torch.hypot(xy[:, 0], xy[:, 1]).clamp(min=0.3)
                 if aux_dist_max is not None:
@@ -287,7 +295,7 @@ def main(args):
                 # mm over the SUPERVISED frames (w>0), unweighted. With the
                 # distance mask on, this is not comparable to pre-2026-07-10
                 # logs, which averaged every reliable frame out to 1.6 m.
-                std = torch.as_tensor(dataset.dock_xy_std, device=device)
+                std = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
                 wm = (w > 0).float()
                 d_xy = (aux_pred[:, :2] - dock_target[:, :2]) * std
                 mm_val = ((torch.hypot(d_xy[:, 0], d_xy[:, 1]) * 1000.0 * wm).sum()

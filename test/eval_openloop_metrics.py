@@ -40,8 +40,10 @@ from omegaconf import OmegaConf  # noqa: E402
 from scripts.inference_ema_v2 import build_model_from_cfg, reconstruct_pose_rk4  # noqa: E402
 from utils.docking_dataset import denormalize  # noqa: E402
 
-H5 = "dataset/after_0328_train.h5"
-DINO_CACHE = "dataset/after_0328_train_dino_bottom.h5"
+# Env-overridable (same convention as dist_binned_error.py) so the identical
+# tooling scores held-out data: EVAL_H5 / EVAL_CACHE.
+H5 = os.environ.get("EVAL_H5", "dataset/after_0328_train.h5")
+DINO_CACHE = os.environ.get("EVAL_CACHE", "dataset/after_0328_train_dino_bottom.h5")
 RUNS = {
     "flow": ("outputs/train/flow_goal/2026-07-09_12-02-10", False),        # old, raw weights
     "auxw": ("outputs/train/flow_goal_auxw/2026-07-10_15-36-56", True),    # new, healthy EMA

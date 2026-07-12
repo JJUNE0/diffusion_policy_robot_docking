@@ -122,6 +122,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         num_lidar_latents: int = 16,
         use_aux_pose: bool = False,
         use_room1: bool = True,
+        use_goal_lidar: bool = False,
     ):
         super().__init__()
         # Single-camera mode: use_room1=False drops the room1 (image_top) branch
@@ -186,6 +187,24 @@ class SensorFusionConditionNetwork(BaseNNCondition):
             self.lidar_resampler = PerceiverResampler(d_model, num_latents=num_lidar_latents, nhead=nhead)
             self.lidar_slot_emb = nn.Parameter(torch.randn(num_lidar_latents, d_model) * 0.02)
             self.lidar_modality_emb = nn.Parameter(torch.randn(1, d_model) * 0.02)
+
+        # Goal-referenced registration conditioning: encode the GOAL (docked)
+        # frame's scan with the SAME point encoder as the current scan, as its
+        # own modality. Current-scan and goal-scan tokens then attend to each
+        # other in the fusion transformer, letting the net represent their
+        # alignment (a learned current<->goal registration) — the signal the
+        # aux head needs to output the relative "distance+angle to goal".
+        self.use_goal_lidar = use_goal_lidar
+        if use_goal_lidar:
+            if not use_lidar_points:
+                raise ValueError("use_goal_lidar=True requires use_lidar_points=True "
+                                 "(shares the point encoder).")
+            self.goal_lidar_resampler = PerceiverResampler(d_model, num_latents=num_lidar_latents, nhead=nhead)
+            self.goal_lidar_slot_emb = nn.Parameter(torch.randn(num_lidar_latents, d_model) * 0.02)
+            self.goal_lidar_modality_emb = nn.Parameter(torch.randn(1, d_model) * 0.02)
+            # NoMaD-style: goal_mask 0 -> learned null token (consistent with
+            # the goal-vision branch).
+            self.goal_lidar_null_emb = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
         # ICP-distilled aux head: predicts the dock pose [x_norm, y_norm, sin, cos]
         # from the readout vector -> precision/arrival judgment (replaces runtime
@@ -343,6 +362,25 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 + self.lidar_slot_emb.view(1, self.num_lidar_latents, self.d_model)
                 + self.lidar_modality_emb.view(1, 1, self.d_model))
 
+    def _build_goal_lidar_tokens(self, points: torch.Tensor, npoints: torch.Tensor,
+                                 goal_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """Encode the GOAL frame's scan (same point encoder as the current scan,
+        own resampler/embeddings; does NOT touch the cached current-scan tokens
+        the aux head reads). NoMaD-masked like the goal-vision tokens."""
+        b, m, _ = points.shape
+        tok = self.point_proj(points.float())
+        valid = torch.arange(m, device=points.device)[None, :] < npoints.view(-1, 1)
+        pad_mask = ~valid
+        pad_mask[npoints <= 0, 0] = False
+        lat = self.goal_lidar_resampler(tok, key_padding_mask=pad_mask)
+        lat = (lat
+               + self.goal_lidar_slot_emb.view(1, self.num_lidar_latents, self.d_model)
+               + self.goal_lidar_modality_emb.view(1, 1, self.d_model))
+        if goal_mask is not None:
+            gm = goal_mask.view(-1, 1, 1).float()
+            lat = lat * gm + self.goal_lidar_null_emb * (1.0 - gm)
+        return lat
+
     def forward(self, condition: Dict, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         required_keys = (("dino_feat1", "dino_feat2", "velocity") if self.use_room1
                          else ("dino_feat2", "velocity"))
@@ -377,6 +415,10 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         if self.use_goal and "goal_feat2" in condition:
             token_list.append(self._build_goal_tokens(
                 condition.get("goal_feat1"), condition["goal_feat2"], condition.get("goal_mask")))
+        if self.use_goal_lidar and "goal_lidar_points" in condition:
+            token_list.append(self._build_goal_lidar_tokens(
+                condition["goal_lidar_points"], condition["goal_lidar_npoints"],
+                condition.get("goal_mask")))
         token_list.append(readout)
 
         all_tokens = torch.cat(token_list, dim=1)

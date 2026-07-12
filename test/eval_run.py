@@ -29,7 +29,8 @@ from scripts.inference_ema_v2 import build_model_from_cfg  # noqa: E402
 from dist_binned_error import H5Batcher, BIN_EDGES, bin_stats  # noqa: E402
 from eval_openloop_metrics import load_episode, rollout  # noqa: E402
 
-EVAL_EPISODES = [0, 50, 110]
+# Env-overridable: EVAL_EPISODES="0,4,8" (indices into EVAL_H5's episodes)
+EVAL_EPISODES = [int(x) for x in os.environ.get("EVAL_EPISODES", "0,50,110").split(",")]
 N_AUX_BLOCKS = 15
 BLOCK = 256
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -112,7 +113,8 @@ def main(run_dir):
         vel_rmse=float(np.median([r["vel_rmse"] for r in rolls.values()])),
         near_mm=result["aux"]["near_median_mm"] if result["aux"] else None)
 
-    out = os.path.join(OUT_DIR, f"{exp}.json")
+    tag = os.environ.get("EVAL_TAG", "")
+    out = os.path.join(OUT_DIR, f"{exp}{'_' + tag if tag else ''}.json")
     json.dump(result, open(out, "w"), indent=1)
     s = result["summary"]
     print(f"[{exp}] SUMMARY: near {s['near_mm']} mm | ADE {s['ade_cm']:.1f} cm | "

@@ -1,7 +1,7 @@
 # ==========================================
 # 1. Project & System Setup
 # ==========================================
-experiment_name: velocity_vision_velocity
+experiment_name: flow_goal
 seed: 0
 device: cuda:0
 
@@ -12,8 +12,9 @@ train_data_path : ${hydra:runtime.cwd}/dataset/after_0328_train.h5
 horizon: 60           # 예측할 미래 궤적의 길이 (스텝 수)
 vision_stride: 6
 obs_horizon: 30
-batch_size: 256
-num_workers: 4
+batch_size: 512
+num_workers: 0
+prefetch_factor : 2
 
 # state_dim: 9          # encoder(2) + marker_pose(6) + marker_valid(1)
 state_dim: 2            # encoder(2)
@@ -39,7 +40,7 @@ sensors:
     dim: 2
     horizon: 30
     normalize: action
-    dropout_prob: 0.2
+    dropout_prob: 0.1
   dino_bottom:
     encoder: dino_image
     source: dino_bottom          # precomputed DINO features (room2/image_bottom)
@@ -60,7 +61,7 @@ sensors:
 # 3. Network Architecture (DiT & Condition)
 # ==========================================
 # rectified_flow | ddpm
-diffusion_backbone: ddpm
+diffusion_backbone: rectified_flow
 
 d_model: 384           # DiT와 Condition 네트워크의 통일된 은닉 차원
 n_heads: 6             # Attention 헤드 수 (384 // 64 = 6)
@@ -79,6 +80,21 @@ num_lidar_latents: 16
 use_aux_pose: true     # aux head predicts ICP dock pose (precision/arrival judge)
 aux_weight: 1.0        # weight of the masked aux pose loss vs the denoising loss
 
+# Distance-shaped aux supervision (test/icp_noise_floor.py, 2026-07-10):
+# ICP 라벨은 ~1.0m까지는 mm급이지만 1.1m 밖에서는 라벨 자체가 cm급으로 틀림 ->
+# 1.1m 밖 프레임은 aux loss에서 마스킹, 나머지는 (ref/dist)^power 로 근거리 가중.
+# aux_dist_power: 0 + aux_dist_max: null = 기존 균일 가중과 동일.
+aux_dist_max: 1.1      # meters; 이보다 먼 라벨은 aux loss에서 제외
+aux_dist_power: 2.0    # 역거리 가중 지수 (0.55m 프레임이 1.1m 프레임의 4배 가중)
+aux_dist_ref: 0.6      # 가중 기준 거리 (weight=1이 되는 지점)
+
+# Goal-referenced registration (2026-07-12): goal(도킹 완료) 프레임의 LiDAR 스캔을
+# 별도 modality로 조건에 추가 -> 현재 스캔과 골 스캔의 정합을 모델 내부에서 학습.
+# aux_relative=true면 aux 타깃이 절대 dock pose 대신 "현재->골 상대 pose"(골까지의
+# 거리+각도)가 됨. 두 플래그 모두 아키텍처 변경이라 from-scratch 학습 필요.
+use_goal_lidar: false
+aux_relative: false
+
 # RAM saver: dataset returns only the sparse vision frames as uint8 (~24x less
 # host RAM). Needed on the 15 GB machine. Keep on for training.
 sparse_vision: true
@@ -96,7 +112,10 @@ dino_cache_path: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
 # ==========================================
 # 4. Diffusion Process
 # ==========================================
-ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
+# EMA 시간상수 = 1/(1-rate) 스텝. 0.9999(τ=1만 스텝)는 4230 스텝 학습에서 초기
+# 랜덤 가중치가 65% 남아 EMA가 무용지물이었음 (memory: ema-undertrained-4230-steps).
+# 0.999(τ=1천 스텝)면 4230 스텝 후 초기 가중치 잔량 ~1.5% -> EMA 사용 가능.
+ema_rate: 0.999        # Exponential Moving Average 업데이트 비율
 
 # ==========================================
 # 5. Training
@@ -104,8 +123,12 @@ ema_rate: 0.9999       # Exponential Moving Average 업데이트 비율
 num_epochs: 10                 # 학습 epoch 수. dataloader 길이(=floor(len(dataset)/batch_size)) 기반으로 gradient step 자동 환산
 diffusion_gradient_steps: null  # num_epochs 가 설정되지 않았을 때만 쓰이는 fallback step 수
 log_interval: 10
-save_interval: 1000
+save_interval: 100
 resume_path: null
+# Warm-start: 가중치만 로드하고 새 run(새 config/optimizer/EMA/step 0)으로 시작.
+# resume_path와 달리 살아있는 smr.yaml 설정(새 loss 등)이 적용됨. EMA는 로드한
+# 가중치로 재시드됨(구세대 EMA는 오염 상태라 이어받지 않음).
+init_from: null
 
 learning_rate: 1e-4
 weight_decay: 1e-5
@@ -114,8 +137,11 @@ weight_decay: 1e-5
 # 6. Inference
 # ==========================================
 diffusion_ckpt: latest
-use_ema: True
-solver : dpmsolver++                 # Rectified Flow: straight ODE integrated with Euler (replaces dpmsolver++)
+# 주의: 2026-07-09 이전 체크포인트(ema_rate 0.9999, 4230 스텝)의 EMA는 오염 상태
+# -> 그 체크포인트들은 반드시 use_ema=false로 추론. ema_rate 0.999로 새로 학습한
+# 체크포인트부터 True로 되돌릴 것.
+use_ema: False
+solver : Euler                 # Rectified Flow: straight ODE integrated with Euler (ode_dpmsolver++_2M)
 w_cfg : 1                      # guidance weight
 inference_sampling_steps: 20   # Euler ODE steps. RF is near-straight -> 5~20 steps suffice
 num_samples : 8                # 1 개의 궤적만 비교하는게 아닌 여러개 궤적 비교

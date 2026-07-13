@@ -131,9 +131,27 @@ def main(args):
         )
     else:
         n_gradient_step = 0
-        print("======================================================")
-        print("Starting training from scratch...")
-        print("======================================================")
+        # Warm-start (init_from): load WEIGHTS ONLY from a previous checkpoint
+        # into a fresh run (new run dir/config/optimizer/scheduler/step count).
+        # Unlike resume_path, the live config applies -> use this to continue
+        # training under changed losses (e.g. the distance-shaped aux loss).
+        # The EMA is re-seeded from the loaded weights: the source runs' EMA
+        # still carries most of its random init (ema_rate 0.9999 vs 4230 steps
+        # -> ~65% init, see memory ema-undertrained-4230-steps), so copying the
+        # trained weights is the only sane EMA start.
+        init_from = args.get("init_from", None)
+        if init_from:
+            ck = torch.load(init_from, map_location=device, weights_only=False)
+            nn_diffusion.model.load_state_dict(ck["model_state_dict"])
+            nn_diffusion.model_ema.load_state_dict(ck["model_state_dict"])
+            print("======================================================")
+            print(f"Warm-started weights from: {init_from}")
+            print("(fresh optimizer/scheduler/EMA-seed/step counter)")
+            print("======================================================")
+        else:
+            print("======================================================")
+            print("Starting training from scratch...")
+            print("======================================================")
 
     nn_diffusion.train()
 
@@ -149,6 +167,15 @@ def main(args):
     use_lidar = args.get("use_lidar_points", False)
     use_aux = args.get("use_aux_pose", False)
     aux_weight = args.get("aux_weight", 1.0)
+    # Distance-shaped aux supervision (measured in test/icp_noise_floor.py):
+    # the ICP teacher is mm-accurate up to ~1.0 m but its labels beyond ~1.1 m
+    # are themselves cm-wrong, and precision only matters near the dock. So
+    # frames farther than aux_dist_max are masked out of the aux loss, and the
+    # rest are weighted by (aux_dist_ref / dock_dist)^aux_dist_power.
+    # aux_dist_power=0 and aux_dist_max=null reproduce the old uniform loss.
+    aux_dist_max = args.get("aux_dist_max", None)
+    aux_dist_power = float(args.get("aux_dist_power", 0.0) or 0.0)
+    aux_dist_ref = float(args.get("aux_dist_ref", 0.6))
     sparse_vision = args.get("sparse_vision", False)
     use_room1 = args.get("use_room1", True)
     # When DINO features are precomputed (scripts/precompute_dino_cache.py), the
@@ -234,6 +261,11 @@ def main(args):
         if use_lidar and not use_modular:
             context["lidar_points"] = obs_dict["lidar_points"].to(device, non_blocking=True)
             context["lidar_npoints"] = obs_dict["lidar_npoints"].to(device, non_blocking=True)
+            # Goal-referenced registration: the docked frame's scan as its own
+            # modality (dataset emits it when use_goal_lidar).
+            if "goal_lidar_points" in obs_dict:
+                context["goal_lidar_points"] = obs_dict["goal_lidar_points"].to(device, non_blocking=True)
+                context["goal_lidar_npoints"] = obs_dict["goal_lidar_npoints"].to(device, non_blocking=True)
 
         # Combined loss = denoising (main) + ICP-distilled aux pose (precision).
         # nn_diffusion.loss() runs the condition net once and caches its aux pred.
@@ -242,16 +274,32 @@ def main(args):
         if use_aux:
             aux_pred = nn_condition._aux_pred
             dock_target = batch["dock_target"].to(device, non_blocking=True)
-            m = batch["reliable"].to(device, non_blocking=True).float()
+            w = batch["reliable"].to(device, non_blocking=True).float()
+            if aux_dist_max is not None or aux_dist_power > 0:
+                # aux_xy_* = stats of whatever the dataset emitted (absolute dock
+                # pose, or current->goal relative pose when aux_relative). In the
+                # relative case the masking/weighting distance is distance-to-goal.
+                std = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
+                mean = torch.as_tensor(getattr(dataset, "aux_xy_mean", dataset.dock_xy_mean), device=device)
+                xy = dock_target[:, :2] * std + mean
+                dock_d = torch.hypot(xy[:, 0], xy[:, 1]).clamp(min=0.3)
+                if aux_dist_max is not None:
+                    w = w * (dock_d <= float(aux_dist_max)).float()
+                if aux_dist_power > 0:
+                    w = w * (aux_dist_ref / dock_d) ** aux_dist_power
             se = ((aux_pred - dock_target) ** 2).sum(dim=1)
-            aux_loss = (se * m).sum() / m.sum().clamp(min=1.0)
+            aux_loss = (se * w).sum() / w.sum().clamp(min=1e-6)
             total_loss = denoise_loss + aux_weight * aux_loss
             aux_val = aux_loss.item()
             with torch.no_grad():
-                std = torch.as_tensor(dataset.dock_xy_std, device=device)
+                # mm over the SUPERVISED frames (w>0), unweighted. With the
+                # distance mask on, this is not comparable to pre-2026-07-10
+                # logs, which averaged every reliable frame out to 1.6 m.
+                std = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
+                wm = (w > 0).float()
                 d_xy = (aux_pred[:, :2] - dock_target[:, :2]) * std
-                mm_val = ((torch.hypot(d_xy[:, 0], d_xy[:, 1]) * 1000.0 * m).sum()
-                          / m.sum().clamp(min=1.0)).item()
+                mm_val = ((torch.hypot(d_xy[:, 0], d_xy[:, 1]) * 1000.0 * wm).sum()
+                          / wm.sum().clamp(min=1.0)).item()
         else:
             total_loss = denoise_loss
 

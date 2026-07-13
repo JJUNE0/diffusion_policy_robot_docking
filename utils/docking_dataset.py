@@ -34,6 +34,8 @@ class DockingDataset(Dataset):
         goal_mask_prob: float = 0.5,
         with_lidar: bool = False,
         with_aux: bool = False,
+        with_goal_lidar: bool = False,
+        aux_relative: bool = False,
         vision_stride: int = 6,
         sparse_vision_uint8: bool = False,
         dino_cache_path: str = None,
@@ -69,6 +71,13 @@ class DockingDataset(Dataset):
         # metadata via short-lived handles here, and reopen ONE handle per worker
         # lazily in __getitem__ (see _ensure_open). This makes num_workers
         # actually parallelize the gzip image decode.
+        # Goal-referenced registration conditioning: also return the GOAL frame's
+        # LiDAR scan (docked scan) so the condition net can learn current<->goal
+        # scan alignment, and (aux_relative) supervise the aux head with the
+        # current->goal RELATIVE pose instead of the absolute dock pose.
+        self.with_goal_lidar = with_goal_lidar and with_goal and with_lidar
+        self.aux_relative = aux_relative
+
         with h5py.File(self.h5_path, "r") as f:
             self.episode_ends = f["episode_ends"][:]
             self.with_lidar = with_lidar and ("lidar_points" in f)
@@ -76,9 +85,48 @@ class DockingDataset(Dataset):
             if self.with_aux:
                 pose_all = f["dock_pose"][:]
                 rel_all = f["reliable"][:].astype(bool)
-                xy = pose_all[rel_all][:, :2]
+                # Guard: only use rows that are BOTH reliable and non-NaN, so a
+                # single NaN pose can't poison the mean/std (and thus every
+                # emitted target) with NaN. (Same guard as ModularDockingDataset.)
+                valid = rel_all & ~np.isnan(pose_all).any(axis=1)
+                xy = pose_all[valid][:, :2]
                 self.dock_xy_mean = xy.mean(axis=0).astype(np.float32)
                 self.dock_xy_std = (xy.std(axis=0) + 1e-6).astype(np.float32)
+                if self.aux_relative:
+                    # Per-episode goal reference pose = the LAST valid-label frame
+                    # (the labeler tracks backward from docked, so this is the
+                    # docked pose). Episodes without any valid label get None ->
+                    # their rows are emitted with reliable=0.
+                    self.goal_pose_ep = []
+                    s = 0
+                    rel_rows = []
+                    for e in self.episode_ends:
+                        idx = np.where(valid[s:e])[0]
+                        g = pose_all[s + idx[-1]] if len(idx) else None
+                        self.goal_pose_ep.append(g)
+                        if g is not None:
+                            rel_rows.append(self._relative_to_goal(pose_all[s:e][valid[s:e]], g))
+                        s = e
+                    rel_xy = np.concatenate(rel_rows)[:, :2]
+                    # separate stats: relative xy is near-zero-centered by design
+                    self.rel_xy_mean = rel_xy.mean(axis=0).astype(np.float32)
+                    self.rel_xy_std = (rel_xy.std(axis=0) + 1e-6).astype(np.float32)
+                # What the emitted dock_target's xy is normalized WITH — the train
+                # loop must denormalize with these (not always dock_xy_*).
+                self.aux_xy_mean = self.rel_xy_mean if self.aux_relative else self.dock_xy_mean
+                self.aux_xy_std = self.rel_xy_std if self.aux_relative else self.dock_xy_std
+
+        # The DINO cache must be row-aligned 1:1 with THIS h5. Catch the silent
+        # misalignment of pointing an eval/held-out h5 at the train cache.
+        if self.dino_cache_path is not None:
+            with h5py.File(self.dino_cache_path, "r") as cf:
+                n_cache = cf["dino_bottom"].shape[0]
+            n_rows = int(self.episode_ends[-1])
+            if n_cache != n_rows:
+                raise ValueError(
+                    f"DINO cache {self.dino_cache_path} has {n_cache} rows but "
+                    f"{self.h5_path} has {n_rows}; the cache must be precomputed "
+                    f"from this exact h5 (see scripts/precompute_dino_cache.py).")
 
         with h5py.File(self.train_h5_path, "r") as f:
             enc = f["encoder"][:]
@@ -89,12 +137,14 @@ class DockingDataset(Dataset):
         self.index_map = []
         self.ep_start_map = []
         self.ep_end_map = []
+        self.ep_id_map = []
         start_idx = 0
-        for end_idx in self.episode_ends:
+        for ep_id, end_idx in enumerate(self.episode_ends):
             for t in range(start_idx, end_idx - self.horizon + 1):
                 self.index_map.append(t)
                 self.ep_start_map.append(start_idx)
                 self.ep_end_map.append(end_idx)
+                self.ep_id_map.append(ep_id)
             start_idx = end_idx
 
         self.root = None        # opened per worker in _ensure_open()
@@ -141,6 +191,23 @@ class DockingDataset(Dataset):
             except Exception:
                 pass
 
+    @staticmethod
+    def _relative_to_goal(pose: np.ndarray, g: np.ndarray) -> np.ndarray:
+        """SE(2) relative pose T_t ∘ inv(T_g) for label rows `pose` [N,3] vs the
+        episode's goal reference pose `g` [3]. Its translation is the docked
+        (goal) robot pose expressed in the CURRENT robot frame -> exactly the
+        "distance + angle to goal" signal (vectorized; frames as in endgame/se2)."""
+        pose = np.atleast_2d(pose)
+        cg, sg = np.cos(g[2]), np.sin(g[2])
+        # inv(T_g) translation and rotation
+        tix = -(cg * g[0] + sg * g[1])
+        tiy = -(-sg * g[0] + cg * g[1])
+        ct, st = np.cos(pose[:, 2]), np.sin(pose[:, 2])
+        x = pose[:, 0] + ct * tix - st * tiy
+        y = pose[:, 1] + st * tix + ct * tiy
+        th = (pose[:, 2] - g[2] + np.pi) % (2 * np.pi) - np.pi
+        return np.stack([x, y, th], axis=1)
+
     def normalize_action(self, action: np.ndarray) -> np.ndarray:
         return 2.0 * (action - self.action_min) / self.action_scale - 1.0
 
@@ -183,14 +250,19 @@ class DockingDataset(Dataset):
         else:
             # Vision histories. sparse_vision_uint8 (training) returns only the sparse
             # frames as uint8 (~24x less RAM); else full float32 history (inference).
+            # use_room1=False skips the room1 decode entirely (gzip decode + RAM
+            # are wasted otherwise; the single-camera model never reads it).
             if self.sparse_vision_uint8:
-                image_room1 = np.ascontiguousarray(self._get_history(self.z_img1, t, ep_start)[::self.vision_stride])
                 image_room2 = np.ascontiguousarray(self._get_history(self.z_img2, t, ep_start)[::self.vision_stride])
+                if self.use_room1:
+                    image_room1 = np.ascontiguousarray(self._get_history(self.z_img1, t, ep_start)[::self.vision_stride])
             else:
-                image_room1 = self._get_history(self.z_img1, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
                 image_room2 = self._get_history(self.z_img2, t, ep_start).astype(np.float32) / 255.0  # [T, 3, H, W]
-            obs["image_room1"] = torch.from_numpy(image_room1)
+                if self.use_room1:
+                    image_room1 = self._get_history(self.z_img1, t, ep_start).astype(np.float32) / 255.0
             obs["image_room2"] = torch.from_numpy(image_room2)
+            if self.use_room1:
+                obs["image_room1"] = torch.from_numpy(image_room1)
 
         if self.with_goal:
             # Goal = the episode's docked (final) frame, the ultimate sub-goal.
@@ -203,18 +275,28 @@ class DockingDataset(Dataset):
                     obs["goal_feat_room1"] = torch.from_numpy(np.ascontiguousarray(self.z_dino1[gi]))
             else:
                 if self.sparse_vision_uint8:
-                    goal_room1 = np.ascontiguousarray(self.z_img1[gi])   # uint8 [3, H, W]
-                    goal_room2 = np.ascontiguousarray(self.z_img2[gi])
+                    goal_room2 = np.ascontiguousarray(self.z_img2[gi])   # uint8 [3, H, W]
                 else:
-                    goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0
                     goal_room2 = self.z_img2[gi].astype(np.float32) / 255.0
-                obs["goal_image_room1"] = torch.from_numpy(goal_room1)
                 obs["goal_image_room2"] = torch.from_numpy(goal_room2)
+                if self.use_room1:
+                    if self.sparse_vision_uint8:
+                        goal_room1 = np.ascontiguousarray(self.z_img1[gi])
+                    else:
+                        goal_room1 = self.z_img1[gi].astype(np.float32) / 255.0
+                    obs["goal_image_room1"] = torch.from_numpy(goal_room1)
 
         if self.with_lidar:
             # Current-frame raw points (robot frame), zero-padded to M.
             obs["lidar_points"] = torch.from_numpy(self.z_lidar_points[t].astype(np.float32))
             obs["lidar_npoints"] = torch.tensor(int(self.z_lidar_npoints[t]), dtype=torch.long)
+
+        if self.with_goal_lidar:
+            # Goal (docked) frame's scan: the registration reference the condition
+            # net aligns the current scan against. Same crop/padding as above.
+            gi = int(self.ep_end_map[idx]) - 1
+            obs["goal_lidar_points"] = torch.from_numpy(self.z_lidar_points[gi].astype(np.float32))
+            obs["goal_lidar_npoints"] = torch.tensor(int(self.z_lidar_npoints[gi]), dtype=torch.long)
 
         sample = {"obs": obs, "act": torch.from_numpy(act_traj_norm).float()}
 
@@ -224,7 +306,17 @@ class DockingDataset(Dataset):
             valid = not np.any(np.isnan(p))
             rel = float(self.z_reliable[t]) if valid else 0.0
             p = np.nan_to_num(p)
-            xy = (p[:2] - self.dock_xy_mean) / self.dock_xy_std
+            if self.aux_relative:
+                # target = current->goal relative pose (distance + angle to goal)
+                g = self.goal_pose_ep[self.ep_id_map[idx]]
+                if g is None:
+                    rel = 0.0
+                    p = np.zeros(3, np.float32)
+                else:
+                    p = self._relative_to_goal(p, g)[0].astype(np.float32)
+                xy = (p[:2] - self.rel_xy_mean) / self.rel_xy_std
+            else:
+                xy = (p[:2] - self.dock_xy_mean) / self.dock_xy_std
             sample["dock_target"] = torch.tensor(
                 [xy[0], xy[1], np.sin(p[2]), np.cos(p[2])], dtype=torch.float32)
             sample["reliable"] = torch.tensor(rel, dtype=torch.float32)

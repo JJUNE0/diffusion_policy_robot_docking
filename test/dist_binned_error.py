@@ -83,9 +83,18 @@ def load_condition_weights(net, ckpt_path: str, which: str):
 
 class H5Batcher:
     """Lean batch reader mirroring DockingDataset's frame selection/normalization,
-    but reading only the strided DINO rows (6x less I/O)."""
+    but reading only the strided DINO rows (6x less I/O).
 
-    def __init__(self):
+    aux_relative=True mirrors DockingDataset(aux_relative=True): the emitted aux
+    target is the current->goal SE(2) relative pose (distance+angle to THIS
+    file's own per-episode goal frame), normalized with the STATS file's
+    relative-pose stats — not the absolute dock pose. Required for any run
+    trained with use_goal_lidar/aux_relative (see utils/docking_dataset.py),
+    otherwise pred and target live in different normalized spaces and the mm
+    error is meaningless (caught 2026-07-13 evaluating flow_goal_glidar).
+    """
+
+    def __init__(self, aux_relative: bool = False):
         f = h5py.File(H5, "r")
         self.f = f
         self.enc = f["encoder"][:].astype(np.float32)           # [N,2] small, preload
@@ -115,13 +124,34 @@ class H5Batcher:
         self.n_rows = n
         self.ep_start = np.zeros(n, np.int64)
         self.ep_end = np.zeros(n, np.int64)
+        self.ep_id = np.zeros(n, np.int64)
         s = 0
         self.ok = np.zeros(n, bool)
-        for e in self.episode_ends:
+        for ep_i, e in enumerate(self.episode_ends):
             self.ep_start[s:e] = s
             self.ep_end[s:e] = e
+            self.ep_id[s:e] = ep_i
             self.ok[s:e - HORIZON + 1] = True
             s = e
+
+        self.aux_relative = aux_relative
+        if aux_relative:
+            from utils.docking_dataset import DockingDataset
+            # rel-pose normalization stats, computed from STATS_H5 exactly as
+            # training does (own dataset instance, aux_relative=True).
+            stats_ds = DockingDataset(STATS_H5, STATS_H5, horizon=HORIZON, obs_horizon=OBS_HORIZON,
+                                      with_aux=True, aux_relative=True)
+            self.rel_xy_mean, self.rel_xy_std = stats_ds.rel_xy_mean, stats_ds.rel_xy_std
+            self._relative_to_goal = DockingDataset._relative_to_goal
+            del stats_ds
+            # THIS file's own per-episode goal reference pose (last valid-label
+            # frame) — the actual current->goal target, not the train file's.
+            self.goal_pose_ep = []
+            s = 0
+            for e in self.episode_ends:
+                idx = np.where(self.rel_valid[s:e])[0]
+                self.goal_pose_ep.append(self.pose[s + idx[-1]] if len(idx) else None)
+                s = e
 
     def norm(self, a):
         return 2.0 * (a - self.a_min) / self.a_scale - 1.0
@@ -148,8 +178,42 @@ class H5Batcher:
         lid = self.z_lidar[idxs.tolist()].astype(np.float32)
         nlid = self.z_nlidar[idxs.tolist()].astype(np.int64)
 
-        xy_n = (self.pose[idxs, :2] - self.dock_xy_mean) / self.dock_xy_std
-        tgt = np.concatenate([xy_n, np.sin(self.pose[idxs, 2:3]), np.cos(self.pose[idxs, 2:3])], 1)
+        # dock distance for BINNING: always the raw absolute dock pose (physical
+        # regime), independent of which target space aux_relative trains on.
+        dock_d = np.hypot(self.pose[idxs, 0], self.pose[idxs, 1])
+
+        if self.aux_relative:
+            rel_pose = np.zeros((B, 3), np.float32)
+            row_valid = np.ones(B, bool)
+            for ep_i in np.unique(self.ep_id[idxs]):
+                g = self.goal_pose_ep[ep_i]
+                m = self.ep_id[idxs] == ep_i
+                if g is None:
+                    row_valid[m] = False
+                    continue
+                rel_pose[m] = self._relative_to_goal(self.pose[idxs][m], g)
+            xy_n = (rel_pose[:, :2] - self.rel_xy_mean) / self.rel_xy_std
+            tgt = np.concatenate([xy_n, np.sin(rel_pose[:, 2:3]), np.cos(rel_pose[:, 2:3])], 1)
+            reliable = self.rel_valid[idxs] & row_valid
+        else:
+            xy_n = (self.pose[idxs, :2] - self.dock_xy_mean) / self.dock_xy_std
+            tgt = np.concatenate([xy_n, np.sin(self.pose[idxs, 2:3]), np.cos(self.pose[idxs, 2:3])], 1)
+            reliable = self.rel_valid[idxs]
+
+        # Goal-frame scan (this file's own docked-frame lidar per episode). Always
+        # included: the condition net only consumes it when use_goal_lidar=True
+        # (harmless extra key otherwise), but omitting it for a goal-lidar model
+        # would silently drop a token modality it was trained to always receive.
+        # h5py fancy-indexing needs strictly increasing unique indices -> read the
+        # few unique goal rows once (same pattern as the DINO goal feature above).
+        grows = self.ep_end[idxs] - 1
+        uniq = np.unique(grows)
+        gl_map = {int(r): i for i, r in enumerate(uniq)}
+        glid_u = self.z_lidar[uniq.tolist()].astype(np.float32)
+        gnlid_u = self.z_nlidar[uniq.tolist()].astype(np.int64)
+        pick = np.array([gl_map[int(r)] for r in grows])
+        glid, gnlid = glid_u[pick], gnlid_u[pick]
+
         ctx = {
             "velocity": torch.from_numpy(vel).to(DEVICE),
             "dino_feat2": torch.from_numpy(dino).to(DEVICE).float(),
@@ -157,8 +221,11 @@ class H5Batcher:
             "goal_mask": torch.ones(B, device=DEVICE),          # goal-conditioned, as at deployment
             "lidar_points": torch.from_numpy(lid).to(DEVICE),
             "lidar_npoints": torch.from_numpy(nlid).to(DEVICE),
+            "goal_lidar_points": torch.from_numpy(glid).to(DEVICE),
+            "goal_lidar_npoints": torch.from_numpy(gnlid).to(DEVICE),
         }
-        return ctx, torch.from_numpy(tgt.astype(np.float32)).to(DEVICE), self.rel_valid[idxs]
+        return (ctx, torch.from_numpy(tgt.astype(np.float32)).to(DEVICE), reliable,
+                torch.from_numpy(dock_d.astype(np.float32)).to(DEVICE))
 
 
 def bin_stats(dists, errs):
@@ -192,13 +259,10 @@ def main():
             nets[f"{run}-{which}"] = net
 
     std_t = torch.as_tensor(src.dock_xy_std, device=DEVICE)
-    mean_t = torch.as_tensor(src.dock_xy_mean, device=DEVICE)
     acc = {k: dict(d=[], mm=[], deg=[]) for k in nets}
     for bi, idxs in enumerate(blocks):
-        ctx, tgt, rel = src.batch(idxs)
+        ctx, tgt, rel, dock_d = src.batch(idxs)
         relm = torch.from_numpy(rel).to(DEVICE)
-        xy_raw = tgt[:, :2] * std_t + mean_t
-        dock_d = torch.hypot(xy_raw[:, 0], xy_raw[:, 1])
         yaw_t = torch.atan2(tgt[:, 2], tgt[:, 3])
         for name, net in nets.items():
             net(dict(ctx))

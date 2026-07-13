@@ -1,11 +1,11 @@
-# 주말 Ablation 스터디 (2026-07-10 ~ 07-12) — 각 실험이 확인하는 것
+# Ablation 스터디 (2026-07-10 ~ 07-13) — 각 실험이 확인하는 것
 
-> 기준일: 2026-07-13
+> 기준일: 2026-07-13 (glidar 결과 + 평가 하네스 버그 수정 반영)
 > 근거: `test/weekend_queue.sh`, `outputs/weekend_queue.log`, `test/out/weekend/*.json`
 > 성능을 **두 축**으로만 본다: **정밀도**(aux dock-pose 오차, mm) + **골 도달**(open-loop ADE/FDE, cm).
 > 평가는 두 세트로 한다: **train**(외운 문제, 145 에피소드) vs **held-out**(처음 보는 10 에피소드,
 > `dataset/after_0328_test.h5`). **결론은 반드시 held-out 기준으로 낸다** — train 순위는 07-12 밤
-> 재평가에서 뒤집혔다 (§4).
+> 재평가에서 뒤집혔다 (§4). 총 9개 실험: 주말 큐 8개(§2.1~2.8) + goal-lidar 정합(§2.9, 07-13).
 
 ---
 
@@ -107,6 +107,41 @@ ddpm_goal_auxw: flow_goal_auxw와 같은 세대의 ddpm(구 diffusion) 버전 �
 **결과**: held-out ADE 6.9 / FDE 15.0 — **접근 축이 전 런 중 가장 크게 악화**. goal 조건이 접근
 성능에 실질적으로 기여한다는 증거. (단, 이 런도 10 epoch — scratch20과의 직접 비교엔 같은 캐비엇 적용)
 
+### 2.9 `flow_goal_glidar` — goal-lidar 정합 조건화 (07-13, 새 아키텍처)
+**바꾼 것**: `use_goal_lidar: true` + `aux_relative: true` (커밋 `8bb7c74`). 두 가지가 동시에 켜진다:
+1. **조건 입력 추가**: goal(도킹 완료) 프레임의 LiDAR 스캔을 현재 스캔과 **같은 point encoder**로
+   토큰화해 별도 modality로 fusion transformer에 투입 — 현재 스캔과 골 스캔 토큰이 서로 attention해
+   "정합 상태"를 내부적으로 표현하도록 유도.
+2. **aux 타깃 교체**: 절대 dock pose 대신 **현재→골 SE(2) 상대 pose**(골까지 남은 거리+각도)를
+   회귀하도록 aux head의 지도신호를 바꿈.
+`scratch20`과 동일하게 from-scratch 20 epoch, 나머지 설정(거리 가중, ema_rate 0.999)은 동일.
+
+**확인하는 질문**: §2.7(nolidar)·§2.8(nogoal)이 지지한 가설 — "LiDAR=정밀, goal=접근" — 을 이어받아,
+**"정밀 담당(LiDAR)과 접근 담당(goal)을 하나의 정합 표현으로 합치면 둘 다 더 좋아지는가"**를
+직접 검증하는, 이 스터디의 novelty 본체 실험.
+
+**⚠️ 평가 하네스 버그 (07-13, 발견 즉시 수정)**: 처음 돌린 평가에서 근거리 정밀도가 **60.8mm**로
+나와, 다른 모든 런(4.6~7.3mm)과 10배 이상 차이가 나는 게 이상해 원인을 추적했다. 원인은 모델이
+아니라 평가 스크립트: `test/eval_run.py`/`test/dist_binned_error.py`가 (1) `aux_relative` 타깃을
+반영하지 않고 **항상 절대 dock pose 정규화 통계로 오차를 계산**하고 있었고 (2) **goal-lidar 입력
+자체를 평가 컨텍스트에 안 넣고 있었다** — 즉 학습 때 항상 존재하던 입력 modality 하나가 통째로
+빠진 채로, 그것도 모델이 예측하지 않는 값과 비교하고 있었다. `test/dist_binned_error.py`(H5Batcher에
+`aux_relative` 지원 + goal-lidar 항상 배선), `test/eval_run.py`, `test/eval_openloop_metrics.py`를
+수정해 재평가했다 — scratch20 등 기존(절대 타깃) 런들은 재평가해도 수치가 그대로임을 회귀 테스트로
+확인(5.665 vs 5.663mm, 부동소수점 오차 수준).
+
+**결과 (수정된 하네스, held-out)**: 정밀도 **9.7mm** — scratch20(5.2mm) 대비 오히려 악화, 전 런 중
+최악. 궤적(ADE 5.9 / FDE 11.4)은 scratch20(5.2 / 11.1)과 비슷한 수준, 개선 없음.
+
+**해석 (가설, 미검증)**: 절대 dock pose는 ICP 잡음원이 하나(현재 프레임 추정)인데, 상대 pose
+타깃(`_relative_to_goal`)은 **현재 프레임 추정과 골 프레임 추정(에피소드 기준점 g) 두 ICP 잡음원을
+합성**한다. 두 잡음이 독립에 가깝다면 분산이 대략 더해져, 유효 노이즈 바닥이 `√2 × 5.7mm ≈ 8mm`
+근방으로 올라갈 수 있다 — 관측된 9.7mm와 근접. 즉 **아이디어(정합 조건화) 자체가 아니라, "상대
+pose로 타깃을 바꾼 것"이 노이즈를 두 배로 만들었을 가능성**이 크다. `use_goal_lidar`와
+`aux_relative`는 코드상 독립 플래그이므로, 다음 시도는 **goal-lidar 조건 입력은 유지하되 aux
+타깃은 절대 pose로 되돌리는** 조합(`use_goal_lidar=true, aux_relative=false`)으로 두 변경의 효과를
+분리하는 것을 권장 (§6).
+
 ---
 
 ## 3. 공통 평가 방법
@@ -134,11 +169,14 @@ ddpm_goal_auxw: flow_goal_auxw와 같은 세대의 ddpm(구 diffusion) 버전 �
 | **flow_goal_scratch20** | **from-scratch 20ep** | 5.7 / 2.3 / 6.7 | **5.2 / 5.2 / 11.1** ⭐ |
 | flow_goal_nolidar | from-scratch 10ep | **7.3** / 4.3 / 9.6 | **6.9** / 5.0 / 8.6 |
 | flow_goal_nogoal | from-scratch 10ep | 6.6 / 6.3 / 11.0 | 6.2 / **6.9** / **15.0** |
+| flow_goal_glidar | from-scratch 20ep | 6.9 / 3.1 / 4.7 | **9.7** / 5.9 / 11.4 |
 
 **읽는 법**: train 열만 보면 auxw2가 압도적 1위(FDE 4.0cm)지만, held-out에서는 **전 런 중 가장 나쁜
 축에 속한다(FDE 15.0)** — 전형적 과적합. **held-out 기준 최종 순위는 scratch20 > flow_goal_auxw >
 나머지.** 이래서 "학습을 더 오래"가 무조건 답이 아니고, 판단은 반드시 held-out으로 해야 한다는 게
-이번 스터디의 메타 결론이다.
+이번 스터디의 메타 결론이다. glidar도 train만 보면 정밀 6.9mm로 준수해 보이지만, held-out에서
+**정밀도가 전 런 중 최악(9.7mm)으로 뒤집힌다** — auxw2와는 다른 경로(과적합이 아니라 §2.9의 타깃
+잡음 배가 가설)로 같은 교훈("train 수치를 믿지 말 것")을 한 번 더 확인시켜준 사례.
 
 ---
 
@@ -155,14 +193,21 @@ ddpm_goal_auxw: flow_goal_auxw와 같은 세대의 ddpm(구 diffusion) 버전 �
    6.7cm) — 145개 시연으로는 부분 암기 상태. 다음 개선 대상.
 4. **학습을 오래 하는 것과 일반화는 다른 문제** — auxw2가 이를 명확히 보여줌. 향후 모든 런은
    held-out 평가 없이 "최종"으로 채택하지 않는다.
+5. **goal-lidar 정합(§2.9)은 이번 형태로는 기각** — "LiDAR=정밀, goal=접근"을 하나로 합치면 둘 다
+   좋아질 것이란 가설과 달리, held-out 정밀도가 최악(9.7mm)으로 나왔다. 원인은 아이디어 자체보다
+   **상대 pose 타깃이 ICP 잡음원을 두 개(현재+골 프레임) 합성한다는 구현 선택**일 가능성이 크다
+   (§2.9 해석 참고) — 정합 조건화 자체를 기각하기엔 이르고, 타깃 설계를 분리해 재시도할 가치가 있다.
 
 ---
 
 ## 6. 이 스터디가 가리키는 다음 단계
 
-- **goal-lidar 정합 모델** (`use_goal_lidar` + `aux_relative`, 커밋 `8bb7c74`): §5-1의 결론이
-  "LiDAR=정밀, goal=접근"이라면, **골 LiDAR 스캔과 vision을 함께 조건화**해 두 역할을 한 표현으로
-  합치는 것이 다음 novelty 실험. `flow_goal_glidar`로 from-scratch 20 epoch 학습 진행 중
-  (§0과 동일하게 scratch20/nolidar/nogoal과 같은 절차로 held-out 비교 예정).
+- **goal-lidar 조건화 재시도 (타깃 분리)**: `use_goal_lidar=true` + `aux_relative=false` 조합으로
+  — 골 스캔은 조건 입력으로 유지하되 aux 타깃은 절대 dock pose로 되돌려서, "정합 조건화 자체의
+  효과"와 "상대 타깃 재구성의 잡음 배가 효과"를 분리한다. §2.9에서 관찰된 9.7mm가 후자 때문이라면
+  이 조합은 scratch20(5.2mm) 수준을 회복하면서 접근 축 개선도 볼 수 있어야 한다.
+- **(대안) 상대 타깃을 유지하되 골 기준점의 잡음을 줄이기**: 에피소드의 골 pose `g`를 단일 마지막
+  프레임이 아니라 마지막 N개 reliable 프레임의 평균/median으로 잡으면(라벨 자체의 반복성 측정,
+  [[aux-head-vs-icp-noise-floor]] §B와 동일 원리) 잡음 배가를 줄일 수 있다.
 - **접근 축 일반화 개선**: 시연 개수 증가, 또는 cfg07 방향(무조건부 학습 비중↑ → CFG guidance
   스윕)으로 goal 조건의 강건성을 높이는 방향.

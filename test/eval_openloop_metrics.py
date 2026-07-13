@@ -81,6 +81,13 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
     a_min, a_scale = torch.as_tensor(act_min), torch.as_tensor(act_scale)
     goal = torch.from_numpy(np.ascontiguousarray(dino[-1])).float().to(DEVICE)
     goal = goal.view(1, 1, 196, 768).repeat(N_SAMPLES, 1, 1, 1)
+    # Goal frame's own scan (episode's last row, same frame `goal` above uses).
+    # Always included: the condition net only consumes it when
+    # use_goal_lidar=True; omitting it for a goal-lidar model would silently
+    # drop a token modality it was trained to always receive (see
+    # test/dist_binned_error.py H5Batcher for the same fix on the aux-eval side).
+    goal_lidar_pts = torch.from_numpy(lid[-1]).unsqueeze(0).to(DEVICE).repeat(N_SAMPLES, 1, 1)
+    goal_lidar_npts = torch.tensor([nlid[-1]], device=DEVICE).repeat(N_SAMPLES)
 
     torch.manual_seed(0)
     prev_ema, selected = None, []
@@ -95,6 +102,8 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
             "goal_mask": torch.ones(N_SAMPLES, device=DEVICE),
             "lidar_points": torch.from_numpy(lid[t]).unsqueeze(0).to(DEVICE).repeat(N_SAMPLES, 1, 1),
             "lidar_npoints": torch.tensor([nlid[t]], device=DEVICE).repeat(N_SAMPLES),
+            "goal_lidar_points": goal_lidar_pts,
+            "goal_lidar_npoints": goal_lidar_npts,
         }
         with torch.no_grad():
             prior = torch.randn(N_SAMPLES, HORIZON, 2, device=DEVICE)

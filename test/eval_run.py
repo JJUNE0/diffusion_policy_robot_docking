@@ -44,26 +44,35 @@ def latest_ckpt(run_dir):
 
 @torch.no_grad()
 def aux_eval(nn_condition, cfg, src):
-    """Distance-binned aux error over N_AUX_BLOCKS contiguous blocks."""
+    """Distance-binned aux error over N_AUX_BLOCKS contiguous blocks.
+
+    The (pred, target) comparison must happen in whatever space the model was
+    actually trained on: absolute dock pose (dock_xy_std) normally, or the
+    current->goal RELATIVE pose (src.rel_xy_std) when aux_relative=True — see
+    utils/docking_dataset.py. Mixing the two silently produces a meaningless
+    mm number (caught 2026-07-13 on flow_goal_glidar: 60mm vs the true ~5mm).
+    Distance BINNING always uses the raw absolute dock distance from
+    src.batch()'s dock_d, regardless of target space, so results across
+    absolute/relative runs stay comparable by physical regime.
+    """
+    aux_relative = bool(cfg.get("aux_relative", False))
+    std_t = torch.as_tensor(src.rel_xy_std if aux_relative else src.dock_xy_std, device=DEVICE)
     rng = np.random.default_rng(0)
     starts = np.sort(rng.choice(src.n_rows - BLOCK, size=N_AUX_BLOCKS, replace=False))
-    std_t = torch.as_tensor(src.dock_xy_std, device=DEVICE)
-    mean_t = torch.as_tensor(src.dock_xy_mean, device=DEVICE)
     ds, mms = [], []
     for s in starts:
         blk = np.arange(s, s + BLOCK)
         blk = blk[src.ok[blk]]
         if not len(blk):
             continue
-        ctx, tgt, rel = src.batch(blk)
+        ctx, tgt, rel, dock_d = src.batch(blk)
         nn_condition(ctx)
         pred = nn_condition._aux_pred
         if pred is None:
             return None
         relm = torch.from_numpy(rel).to(DEVICE)
         mm = torch.hypot(*((pred[:, :2] - tgt[:, :2]) * std_t).T) * 1000.0
-        xy = tgt[:, :2] * std_t + mean_t
-        ds.append(torch.hypot(xy[:, 0], xy[:, 1])[relm].cpu().numpy())
+        ds.append(dock_d[relm].cpu().numpy())
         mms.append(mm[relm].cpu().numpy())
     d, mm = np.concatenate(ds), np.concatenate(mms)
     med, p90, cnt = bin_stats(d, mm)
@@ -92,7 +101,7 @@ def main(run_dir):
     result = dict(run_dir=run_dir, ckpt=os.path.basename(ckpt_path), use_ema=use_ema,
                   bin_edges=BIN_EDGES.tolist())
 
-    src = H5Batcher()
+    src = H5Batcher(aux_relative=bool(cfg.get("aux_relative", False)))
     result["aux"] = aux_eval(nn_condition, cfg, src)
     if result["aux"]:
         print(f"[{exp}] aux near(<0.6m) median {result['aux']['near_median_mm']:.1f} mm "

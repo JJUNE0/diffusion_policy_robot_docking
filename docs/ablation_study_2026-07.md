@@ -22,11 +22,42 @@ GPU 시간이 주말 이틀로 제한돼 있어서, **"확실히 좋을 것 같�
 - **from-scratch**: 처음부터 새로 학습(lr 1e-4). 아키텍처가 바뀌거나(`nolidar`, `nogoal`) 깨끗한
   비교 기준이 필요할 때(`scratch20`) 사용.
 
-**주의 (해석 시 계속 의식할 것)**: warm-start 런들은 `flow_goal`(구 EMA 버그 세대) → `flow_goal_auxw`
-→ 이번 런 순으로 가중치를 물려받아, 실질 학습 스텝 수가 label과 다르다(예: `auxw2`는 "20 epoch"이지만
-실제로는 base 4230 + auxw 4230 + auxw2 8460 스텝 노출). **nolidar/nogoal은 10 epoch from-scratch인데
-반해 scratch20은 20 epoch from-scratch** — 그래서 nolidar/nogoal을 scratch20과 직접 비교할 때는
-"에포크 수 차이"와 "모달리티 제거 효과"가 섞여 있다는 걸 감안해야 한다 (§4 표에 표시).
+### ⚠️ 0.1 이 큐의 설계 결함 — §2.1~2.8은 단일 변수 ablation이 **아니다** (07-14 인정, 재실행 착수)
+
+이 주말 큐는 **깨끗한 ablation이 아니다.** 두 가지 confound가 있다:
+
+1. **warm-start 계보 오염** (`cfg07`, `auxw_w2`, `p4`, `auxw2`):
+   `flow_goal_auxw`에서 이어받았는데, 그 가중치는 **구세대 균일 aux loss**로 학습된 것이고,
+   실질 학습량도 다르다(base 4230 + auxw 4230 + 자기 자신 vs scratch20의 8460).
+   → "knob 하나를 바꾼 효과"가 "다른 loss로 사전학습된 효과"와 뒤섞여 있다.
+2. **에포크 불일치** (`nolidar`, `nogoal`): 10 epoch인데 비교 대상 `scratch20`은 20 epoch.
+   → "모달리티 제거 효과"와 "학습량 절반"이 뒤섞여 있다.
+
+**결과적으로 §2.1~2.8의 held-out 순위는 knob의 효과로 읽으면 안 된다.**
+→ **07-14, 전 항목을 `scratch20` 기준 from-scratch 20 epoch으로 재실행 중**
+(`test/queue_gpu0_clean_ablation.sh`: `s20_nolidar`, `s20_nogoal`, `s20_cfg07`, `s20_w2`, `s20_p4`).
+결과가 나오면 §4 표를 이 클린 런들로 교체한다. (§2.9~2.11의 glidar/glidar_abs/adv는 처음부터
+from-scratch 20ep이라 이 문제가 없다.)
+
+**정정 (07-14)**: 이전 판본은 warm-start 런이 "EMA 버그 세대의 가중치를 물려받았다"고 썼는데
+**부정확하다.** `init_from`은 `model_state_dict`(멀쩡한 raw 가중치)를 로드하고 EMA도 그것으로
+재시드하므로, 오염된 EMA 사본은 전파되지 않았다. EMA 버그의 실제 피해는 **가중치가 아니라
+평가/추론**이었다 — §0.2 참조. 위 1번의 confound는 EMA가 아니라 **loss 함수가 다른 가중치에서
+출발했다는 것**이다.
+
+### 0.2 EMA 버그란 무엇이었나 (07-09~07-10)
+
+`ema_rate: 0.9999`의 시간상수 τ=1/(1−0.9999)=**1만 스텝**인데 학습은 **4230 스텝**뿐이었다.
+EMA는 초기 랜덤 가중치의 사본에서 출발하므로, 학습 종료 시점에도
+`0.9999^4230 ≈ 0.655` — **EMA 사본에 랜덤 초기값이 65% 남아 있었다.**
+
+- **오염된 것**: `ema_state_dict`(EMA 사본)뿐. **학습된 raw 가중치(`model_state_dict`)는 멀쩡했다.**
+- **실제 피해**: 추론 기본값이 `use_ema: true`였으므로, 그 시기의 **모든 추론/평가가 반쯤 랜덤인
+  모델을 평가**하고 있었다 — aux 정밀도 17mm(raw) vs **148mm(EMA)**, open-loop 종점 오차
+  10.5cm(raw) vs **404cm(EMA, 6m를 헤매는 랜덤워크)**.
+- **수정**: `ema_rate: 0.999`(τ=1천 스텝 → 4230스텝 후 초기값 잔량 ~1.5%)로 변경.
+  구세대 체크포인트는 반드시 `use_ema: false`로 평가해야 한다.
+  (`test/eval_run.py`가 `ema_rate ≤ 0.999`일 때만 EMA를 쓰도록 자동 판정한다.)
 
 ---
 
@@ -185,6 +216,22 @@ config는 `use_goal_lidar`/`aux_relative` 두 줄만 다르지만, 이게 아키
 
 ---
 
+### 2.11 `flow_goal_adv` / `ddpm_goal_adv` — 오프라인 리워드 학습 (AWR, 07-14 진행 중)
+
+**바꾼 것**: `adv_weight: true` (+ `adv_beta`, `adv_clip`). 나머지는 `scratch20`과 완전히 동일
+(from-scratch 20ep, rectified flow) — 즉 **AWR 하나만의 효과를 분리**하는 대조 실험.
+ddpm backbone 버전(`ddpm_goal_adv`)도 함께 돌려 backbone 독립성을 확인한다.
+
+**확인하는 질문**: 시연을 그대로 흉내 내는 BC의 한계 —
+데이터를 보면 **시연 프레임의 54%가 2cm/s 미만, 28%는 사실상 정지**(중앙값 1.75cm/s)다.
+BC는 `p(행동|관측)`을 시연 분포에서 복사하므로 **시연에 없는 빠른 속도는 원리적으로 낼 수 없다**
+(07-13 시연에서 로봇이 느렸던 근본 원인). 리워드로 "빠르게 접근한 시연 구간"을 더 세게 학습시키면
+정책이 시연 분포의 **빠른 꼬리** 쪽으로 이동하는가?
+
+자세한 알고리즘은 §7 참조.
+
+---
+
 ## 3. 공통 평가 방법
 
 - **정밀도**: aux head가 예측한 dock pose와 ICP 라벨의 오차(mm), dock 거리 <0.6m 구간만
@@ -286,3 +333,195 @@ auxw/glidar_abs 사이의 우열(11.1 vs 11.3 vs 10.0)은 **판별 불가**가 �
 - **(보류) 상대 타깃 재시도 조건**: 골 기준점 `g`를 마지막 N개 reliable 프레임의 median으로 잡아
   잡음 배가를 줄일 수 있다면 재시도 가치가 있으나, §2.10에서 조건화 이득 자체가 없었으므로
   우선순위 낮음.
+
+---
+
+## 7. 강화학습 파트 — AWR (Advantage-Weighted Regression) 핵심 알고리즘
+
+> 07-14 진행 중인 `flow_goal_adv` / `ddpm_goal_adv`가 쓰는 방법.
+> 코드: `scripts/train.py`(가중 적용), `utils/docking_dataset.py`(advantage 계산),
+> `cleandiffuser/diffusion/{rectifiedflow,diffusionsde}.py`(`sample_weight` 인자).
+
+### 7.1 왜 RL이 필요한가 — BC의 원리적 한계
+
+BC(모방학습)는 시연의 조건부 행동분포 `p(a|s)`를 그대로 복사한다. 따라서:
+
+- 시연이 느리면 **정책도 느리다**. 시연에 존재하지 않는 빠른 궤적은 출력 자체가 불가능하다.
+- 시연이 도달한 정밀도가 상한이다. ICP 선생의 노이즈 바닥(~5.7mm)에 이미 붙어 있으므로
+  (§5-2), BC를 더 돌려도 정밀도는 안 내려간다.
+
+**"시연보다 더 잘하려면" 리워드를 직접 최대화해야 한다** — 그게 RL이다.
+
+### 7.2 그런데 진짜 RL은 지금 불가능하다 (중요한 제약)
+
+RL은 "행동 → 결과 관측 → 보정"의 **closed-loop 환경**이 필수다. 지금 우리에겐
+시뮬레이터도, 온라인 로봇 루프도 없다. 정책이 만든 행동이 실제로 어디로 데려가는지
+되먹임받을 수단이 없으므로 PPO/SAC 같은 온라인 RL은 돌릴 수 없다.
+
+그래서 **오프라인에서 가능한 리워드 학습**을 택했다 = AWR.
+(진짜 residual RL은 시뮬레이터 구축 후 — [experiment_roadmap.md](experiment_roadmap.md) Stage D.)
+
+### 7.3 AWR 핵심 아이디어 (한 문장)
+
+> **"좋은 시연 구간은 더 세게, 나쁜 시연 구간은 더 약하게 모방한다."**
+
+수식으로는 BC loss에 리워드 기반 샘플별 가중치를 곱한 것:
+
+```
+표준 BC:   L = E_(s,a)~D [ ‖ε_θ(s, a_noised) − ε‖² ]              (모든 샘플 동일 가중)
+AWR:       L = E_(s,a)~D [ w(s,a) · ‖ε_θ(s, a_noised) − ε‖² ]
+           w(s,a) = exp( A(s,a) / β )                             (advantage에 지수 가중)
+```
+
+이는 advantage-weighted regression / reward-weighted BC로 알려진 표준 오프라인 RL 계열
+(AWR, AWAC, CRR 등)의 가장 단순한 형태다. **정책 구조는 그대로**, loss 가중치만 바뀐다 —
+그래서 diffusion policy에 그대로 얹을 수 있다.
+
+### 7.4 이 문제에서의 Advantage 정의 — "얼마나 빠르게 dock에 접근했나"
+
+우리 데이터는 ICP 라벨(§8) 덕분에 **모든 프레임에 dock까지의 거리가 이미 있다**.
+그래서 리워드를 따로 설계할 필요 없이 거리 감소율을 그대로 쓴다:
+
+```
+프레임 t에서 시작하는 horizon(H=60, 2초)에 대해:
+
+  progress(t) = ( dock_dist(t) − dock_dist(t+H) ) / (H · dt)      [m/s]
+                └ 이 2초 동안 dock에 초당 몇 m 가까워졌나
+
+  A(t) = ( progress(t) − mean ) / std                             [z-score 정규화]
+
+  w(t) = exp( clip(A(t), −adv_clip, +adv_clip) / adv_beta )
+  w(t) ← w(t) / mean(w)                                           [배치 평균 1로 정규화]
+```
+
+- **빠르게 접근한 구간** → progress↑ → A↑ → **w > 1** → 더 세게 학습
+- **꾸물대거나 정지한 구간** → progress≈0 → A<0 → **w < 1** → 약하게 학습
+- **dock에서 멀어진 구간** → progress<0 → **w ≪ 1** → 거의 무시
+
+구현 위치:
+- `utils/docking_dataset.py`: `__init__`에서 전체 프레임의 progress를 미리 계산하고 z-score 통계
+  (`_adv_mean`, `_adv_std`)를 저장 → `__getitem__`이 샘플별 `adv` 반환.
+  라벨이 없는 프레임(t 또는 t+H가 unreliable)은 `adv=0` → `w=1`(중립).
+- `scripts/train.py`: `w = exp(clip(adv/β)) / mean(w)` 를 계산해 `sample_weight`로 전달.
+- `cleandiffuser/diffusion/*.py`: `loss(..., sample_weight=w)` — per-element loss에
+  배치 차원으로 broadcast 후 평균. **기본값 `None`이면 기존 동작과 완전히 동일**(하위호환).
+
+**하이퍼파라미터**:
+- `adv_beta`(온도, 기본 1.0): 작을수록 advantage에 공격적으로 반응. 0에 가까우면 "가장 빠른
+  구간만 학습"(= greedy filtering), 크면 균일 BC로 수렴.
+- `adv_clip`(기본 2.0): z-score를 ±2로 클립. 한 배치가 극단값 소수 샘플에 지배되는 것을 방지.
+
+### 7.5 aux(정밀도) loss는 건드리지 않는다 — 역할 분리
+
+`sample_weight`는 **denoising loss(궤적 생성)에만** 적용되고, aux pose loss(정밀도)는 그대로다:
+
+```
+total_loss = denoise_loss(sample_weight=w)   ← AWR 가중 (속도/효율 담당)
+           + aux_weight · aux_loss           ← 거리 가중 그대로 (정밀도 담당)
+```
+
+이 분리 덕분에 학습 곡선에서 **검증이 가능**하다: AWR을 켜도 `dock` 오차 곡선은
+scratch20과 **동일하게** 움직여야 하고(aux 경로 불변), denoising loss만 달라져야 한다.
+실제로 07-14 학습 중 관측: step 6800에서 dock **26.4mm(adv) vs 26.4mm(scratch20)** — 일치,
+denoising loss 0.0775 vs 0.0758 — AWR 재가중으로 소폭 상승. **의도대로 동작 확인.**
+
+### 7.6 AWR의 정직한 한계 (반드시 인지할 것)
+
+> **AWR은 시연 분포 안에서 재가중할 뿐, 시연에 없는 행동을 창조하지 못한다.**
+
+- 시연 중 가장 빠른 구간이 5cm/s라면, AWR 정책의 상한도 ~5cm/s다. 그 이상은 **온라인 RL만** 가능.
+- 즉 AWR은 "느린 시연을 덜 배우기"이지 "시연보다 빠르기"가 아니다. 기대 효과는
+  **시연 분포의 빠른 꼬리로 이동**하는 정도 — 개선은 있겠지만 극적이진 않을 것이다.
+- 평가 시 주의: 표준 `vel_rmse`는 "시연보다 빠른 것"도 오차로 penalize하므로 AWR에 불리하다.
+  그래서 `test/eval_openloop_metrics.py`에 **비대칭 지표**를 추가했다
+  (`vel_progress_rmse`: 같은 방향으로 더 빠른 것은 0으로 처리, `speedup_frac`: 시연보다 빠른
+  프레임 비율). AWR이 의도대로 작동하면 `speedup_frac`이 baseline 대비 올라가야 한다.
+
+---
+
+## 8. 배경 — ICP 라벨과 aux head는 무엇인가
+
+> §2의 모든 실험이 "정밀도(near_mm)"를 말하는데, 그 숫자가 어디서 오는지의 정본 설명.
+> 코드: `scripts/label_subgoals.py`(라벨 생성), `endgame/icp_matcher.py`(ICP),
+> `cleandiffuser/nn_condition/sensor_fusion_condition.py`(aux head).
+
+### 8.1 문제: 정답(GT)이 없다
+
+정밀 도킹을 학습시키려면 "지금 dock이 정확히 어디 있는가"의 정답이 필요한데,
+이 데이터셋에는 **marker_pose가 죽어 있어 GT가 없다.** 그래서 정답을 **우리가 만들어야** 했다.
+
+### 8.2 ICP — 고전 기하 알고리즘으로 정답을 만든다 (오프라인 교사)
+
+**ICP(Iterative Closest Point)**: 학습이 전혀 없는 고전 알고리즘. 재료는 두 가지 —
+① dock의 알려진 모양(템플릿 점군), ② 방금 들어온 LiDAR 스캔.
+
+```
+1. 현재 추정 pose로 템플릿을 스캔 위에 얹는다
+2. 템플릿의 각 점 → 가장 가까운 스캔 점을 짝짓는다 (correspondence)
+3. 그 짝들의 거리를 최소화하는 강체변환(이동+회전)을 최소제곱으로 푼다
+4. pose 갱신 → 1~3 반복 (수렴까지 수십 회, 수 ms)
+```
+
+"퍼즐 조각을 그림 위에 놓고 조금씩 밀고 돌려가며 가장 잘 맞는 자리를 찾는 것"과 같다.
+결과: **dock의 SE(2) pose (x, y, θ)** — 그것도 **로봇 자신의 현재 좌표계 기준**이다
+(로봇이 원점, dock이 앞쪽 어딘가. dock을 (0,0)으로 잡는 게 아니다).
+
+**템플릿 출처**: `endgame/assets/dock_template_real.npy` — 154개 에피소드의 도킹 완료 스캔을
+ICP로 한 좌표계에 겹쳐 누적한 1,640점의 U-노치 형상 (`scripts/build_dock_template.py`).
+
+**라벨 생성 절차** (`scripts/label_subgoals.py`): 에피소드의 **마지막(도킹 완료) 프레임에서
+시간을 거꾸로** 추적한다. 도킹 완료 시점은 dock이 코앞이라 ICP가 확실히 잠기고, 12.5Hz
+연속 스캔은 프레임 간 이동이 작아 직전 pose를 시드로 쓰면 안정적으로 역추적된다.
+
+**신뢰도 판정**: `inlier_ratio ≥ 0.5` AND `RMS 잔차 ≤ 2.5cm`를 만족하면 `reliable=1`.
+이 두 필드(`dock_pose`, `reliable`)가 h5에 구워져 있다.
+
+**교사의 노이즈 바닥 (핵심 상수)**: 도킹 정지 상태에서 ICP를 반복하면 pose가 **±5.7mm**
+흔들린다(`test/icp_noise_floor.py`로 측정). **이게 라벨 자체의 정확도 한계**이고, 따라서
+**학생(aux head)이 이보다 정확해질 수 없다** — §5-2의 "정밀도 포화"가 여기서 나온다.
+또한 dock 거리 1.1m를 넘으면 라벨 자체가 cm급으로 틀리기 시작해서, aux loss에서 마스킹한다
+(`aux_dist_max: 1.1`).
+
+### 8.3 aux head — ICP를 신경망에 증류(distill)한다
+
+**핵심 구도는 사제(師弟) 관계다:**
+
+| | 선생 (teacher) | 학생 (student) |
+|---|---|---|
+| 무엇 | 고전 ICP 알고리즘 | aux head (신경망) |
+| 언제 | **오프라인** (라벨 생성 시 1회) | **런타임** (매 프레임 추론) |
+| 역할 | 정답 dock pose를 만든다 | 그 정답을 흉내 내도록 학습 |
+
+> ⚠️ 흔한 오해: "모델 안에 ICP가 들어있다"가 **아니다.** 모델 안에 있는 건
+> **ICP의 출력을 흉내 내도록 학습된 신경망**이다. 런타임에 ICP는 돌지 않는다.
+
+**구조** (`sensor_fusion_condition.py`):
+- 조건 네트워크가 카메라(DINO)+속도+LiDAR+goal을 융합하는데, 그 중 **LiDAR 포인트 토큰**에
+  **cross-attention**하는 작은 head(`CrossAttnPoseHead`)를 붙였다.
+- 출력: `[x_norm, y_norm, sin θ, cos θ]` (4차원) — 정규화된 dock pose.
+- LiDAR가 없으면(nolidar 런) 융합 벡터에서 MLP로 뽑는 fallback head를 쓴다
+  → 그래서 nolidar의 정밀도가 확 나빠진다(6.95mm, §2.7).
+
+**손실** (`scripts/train.py`):
+```
+aux_loss = Σ w(t) · ‖aux_pred(t) − ICP_label(t)‖²  /  Σ w(t)
+           w(t) = reliable(t) · (aux_dist_ref / dock_dist)^aux_dist_power · [dock_dist ≤ 1.1m]
+           └ 신뢰 프레임만, 가까울수록 큰 가중 (정밀도가 중요한 건 근거리니까)
+
+total_loss = denoise_loss + aux_weight · aux_loss
+```
+
+**두 가지 목적**:
+1. **표현 강제**: 조건 네트워크가 "dock이 정확히 어디 있는지"를 내부적으로 표현하게 만들어,
+   궤적 생성(denoising)도 정밀해지도록 유도한다.
+2. **런타임 pose 산출**: ICP 없이도 dock pose를 즉답 → 도착 판정, MPC 랭킹(`test/mpc_rank.py`)의
+   심판 등에 쓸 수 있다.
+
+### 8.4 "정밀도 near_mm"이 정확히 무슨 숫자인가
+
+§2/§4 표의 정밀도 = **aux head 예측과 ICP 라벨의 XY 오차(mm)의 median**,
+단 **dock 거리 <0.6m 구간(도킹 직전)의 신뢰 프레임만** (`test/eval_run.py`).
+
+- 왜 <0.6m만? 정밀 도킹에서 중요한 건 마지막 구간이다. 접근 전 구간을 평균 내면
+  멀리 있는 프레임의 큰 오차가 섞여 지표가 흐려진다(07-10에 "29mm"로 보이던 게 실은 이 착시).
+- 수천 프레임 기준이라 **FDE(에피소드 10개)보다 통계적으로 훨씬 신뢰도가 높다**(§4.1).

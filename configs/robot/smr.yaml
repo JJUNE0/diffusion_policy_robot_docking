@@ -104,6 +104,21 @@ adv_weight: false
 adv_beta: 1.0          # 온도. 작을수록 advantage에 공격적으로 반응
 adv_clip: 2.0          # z-score 클립(±). 한 배치가 소수 샘플에 지배되는 것 방지
 
+# adv_mode: speed | precision
+#   speed     = A(progress)                     — 접근 속도만 (v1, 07-14)
+#   precision = w_align·정렬개선 + w_term·최종정렬품질 + w_speed·속도·gate(거리)
+# 정밀도 우선 설계 근거 (145 시연 실측, ICP 노이즈 바닥 대비 편차):
+#   최종 x 1.9x / y 1.2x  -> 도킹 위치는 기구적으로 고정(53.4cm±4mm) = 배울 신호 없음
+#   최종 yaw 7.1x (std 1.57°, 범위 11°) -> 정밀도 신호는 사실상 '정렬(각도)'뿐
+# 따라서 정밀도 보상 = heading 정렬로 구성하고, 속도 보상은 근거리에서 gate로 끈다
+# (dock 코앞에서 속도를 보상하면 정렬을 희생하게 되므로).
+adv_mode: speed
+adv_w_align: 1.0       # 정밀도: horizon 동안 |yaw| 오차를 얼마나 줄였나
+adv_w_term: 1.0        # 정밀도: 그 시연이 최종적으로 얼마나 똑바로 도킹했나 (에피소드 크레딧)
+adv_w_speed: 0.3       # 속도: 정밀도보다 낮은 우선순위
+adv_gate_near: 0.6     # m. 이보다 가까우면 속도 보상 0 (정밀 구간)
+adv_gate_far: 0.8      # m. 이보다 멀면 속도 보상 full (접근 구간)
+
 # RAM saver: dataset returns only the sparse vision frames as uint8 (~24x less
 # host RAM). Needed on the 15 GB machine. Keep on for training.
 sparse_vision: true

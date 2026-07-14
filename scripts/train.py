@@ -185,6 +185,22 @@ def main(args):
     adv_weight = args.get("adv_weight", False)
     adv_beta = float(args.get("adv_beta", 1.0))
     adv_clip = float(args.get("adv_clip", 2.0))
+    # adv_mode:
+    #   "speed"     -> A = progress            (approach speed only; the 07-14 v1)
+    #   "precision" -> A = w_align*align + w_term*term + w_speed*progress*gate(d)
+    # Precision mode encodes the stated priority (precision >> speed):
+    #   * align/term are HEADING-alignment signals — measured on the demos, yaw is
+    #     the only precision axis with real spread (7.1x the ICP noise floor);
+    #     final x/y are mechanically fixed by the dock (1.2-1.9x = noise).
+    #   * the speed term is GATED OFF near the dock (gate=0 below adv_gate_near):
+    #     rewarding speed in the precision zone would trade away alignment, which
+    #     is exactly what we do not want.
+    adv_mode = str(args.get("adv_mode", "speed"))
+    adv_w_align = float(args.get("adv_w_align", 1.0))
+    adv_w_term = float(args.get("adv_w_term", 1.0))
+    adv_w_speed = float(args.get("adv_w_speed", 0.3))
+    adv_gate_near = float(args.get("adv_gate_near", 0.6))   # m: below this, no speed reward
+    adv_gate_far = float(args.get("adv_gate_far", 0.8))     # m: above this, full speed reward
     sparse_vision = args.get("sparse_vision", False)
     use_room1 = args.get("use_room1", True)
     # When DINO features are precomputed (scripts/precompute_dino_cache.py), the
@@ -280,7 +296,16 @@ def main(args):
         # nn_diffusion.loss() runs the condition net once and caches its aux pred.
         loss_kwargs = {}
         if adv_weight:
-            a = batch["adv"].to(device, non_blocking=True)
+            prog = batch["adv_prog"].to(device, non_blocking=True)
+            if adv_mode == "precision":
+                align = batch["adv_align"].to(device, non_blocking=True)
+                term = batch["adv_term"].to(device, non_blocking=True)
+                d = batch["adv_dock_d"].to(device, non_blocking=True)
+                # speed gate: 0 inside the precision zone, ramps to 1 in the approach zone
+                gate = ((d - adv_gate_near) / max(adv_gate_far - adv_gate_near, 1e-6)).clamp(0.0, 1.0)
+                a = adv_w_align * align + adv_w_term * term + adv_w_speed * prog * gate
+            else:
+                a = prog
             w = torch.exp((a / adv_beta).clamp(-adv_clip, adv_clip))
             w = w / w.mean().clamp(min=1e-6)      # keep the loss scale unchanged
             loss_kwargs["sample_weight"] = w

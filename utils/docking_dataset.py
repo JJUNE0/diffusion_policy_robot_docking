@@ -117,30 +117,64 @@ class DockingDataset(Dataset):
                 self.aux_xy_mean = self.rel_xy_mean if self.aux_relative else self.dock_xy_mean
                 self.aux_xy_std = self.rel_xy_std if self.aux_relative else self.dock_xy_std
 
-                # Offline reward-weighted BC (AWR): per-frame ADVANTAGE = how fast
-                # this horizon approached the dock. The demos are mostly slow
-                # (54% of frames < 2 cm/s) and BC copies that; upweighting the
-                # segments that shrank the dock distance fastest shifts the policy
-                # toward the fast tail of the demo distribution (see
-                # scripts/train.py). Raw z-scored progress stored here; the
-                # exp()/beta/clip weight transform is applied in the train loop.
+                # Offline reward-weighted BC (AWR). Emits THREE z-scored advantage
+                # components per frame; scripts/train.py mixes them with config
+                # weights (adv_mode speed|precision) and a distance gate.
+                #
+                # Which signals are actually learnable was measured on the 145
+                # train demos (spread vs the 5.7mm/0.22deg ICP noise floor):
+                #   final x  : 1.9x noise   final y: 1.2x  -> position at docking
+                #              is mechanically fixed (robot stops ON the dock,
+                #              53.4cm +/-4mm) => NO learnable precision signal
+                #   final yaw: 7.1x noise (std 1.57deg, range 11deg) => the ONLY
+                #              strong precision signal the demos contain.
+                # So docking precision must be rewarded through HEADING ALIGNMENT,
+                # not distance. Components:
+                #   prog  = dock-approach speed over the horizon        [speed]
+                #   align = reduction of |yaw| misalignment over the horizon  [precision]
+                #   term  = -|final yaw| of the whole episode (episode-level
+                #           credit: "learn more from demos that docked straight") [precision]
                 self.adv_weight = adv_weight and with_aux
                 if self.adv_weight:
-                    dist_all = np.hypot(pose_all[:, 0], pose_all[:, 1]).astype(np.float32)
+                    # nan_to_num FIRST: unreliable rows hold NaN poses, and a NaN
+                    # reaching dock_d survives even where the advantage is 0
+                    # (0 * NaN = NaN) -> NaN loss on the very first step.
+                    pose_z = np.nan_to_num(pose_all).astype(np.float32)
+                    dist_all = np.hypot(pose_z[:, 0], pose_z[:, 1])
+                    yaw_err = np.abs(pose_z[:, 2])                        # |yaw| = misalignment
                     n = int(self.episode_ends[-1])
-                    prog = np.zeros(n, np.float32)          # per-start-frame progress
-                    prog_ok = np.zeros(n, bool)
+                    prog = np.zeros(n, np.float32)
+                    align = np.zeros(n, np.float32)
+                    term = np.zeros(n, np.float32)
+                    ok = np.zeros(n, bool)
+                    dock_d = np.zeros(n, np.float32)
                     s = 0
                     for e in self.episode_ends:
+                        idx = np.where(valid[s:e])[0]
+                        # episode-level terminal alignment quality (same for all
+                        # its frames); episodes with no valid label get 0 = neutral
+                        t_align = -float(yaw_err[s + idx[-1]]) if len(idx) else 0.0
                         for t in range(s, e - horizon):
+                            # Only trust the distance on labelled rows: 72 unreliable
+                            # rows carry blown-up ICP failures (up to 29 km). They are
+                            # already neutral (advantage 0), but leaving the garbage in
+                            # dock_d would feed the speed gate nonsense.
+                            dock_d[t] = dist_all[t] if valid[t] else 0.0
                             if valid[t] and valid[t + horizon]:
                                 prog[t] = (dist_all[t] - dist_all[t + horizon]) / (horizon * dt)
-                                prog_ok[t] = True
+                                align[t] = yaw_err[t] - yaw_err[t + horizon]   # >0 = got straighter
+                                term[t] = t_align
+                                ok[t] = True
                         s = e
-                    m = prog[prog_ok]
-                    self._adv_mean = float(m.mean()) if len(m) else 0.0
-                    self._adv_std = float(m.std() + 1e-6) if len(m) else 1.0
-                    self._prog, self._prog_ok = prog, prog_ok
+
+                    def _z(v):
+                        m = v[ok]
+                        mu = float(m.mean()) if len(m) else 0.0
+                        sd = float(m.std() + 1e-6) if len(m) else 1.0
+                        return ((v - mu) / sd).astype(np.float32)
+
+                    self._adv_prog, self._adv_align, self._adv_term = _z(prog), _z(align), _z(term)
+                    self._adv_ok, self._adv_dock_d = ok, dock_d
 
         # The DINO cache must be row-aligned 1:1 with THIS h5. Catch the silent
         # misalignment of pointing an eval/held-out h5 at the train cache.
@@ -348,10 +382,13 @@ class DockingDataset(Dataset):
             sample["reliable"] = torch.tensor(rel, dtype=torch.float32)
 
         if getattr(self, "adv_weight", False):
-            # z-scored approach-progress advantage for this start frame; frames
-            # without a valid t/t+H label pair get 0 (neutral -> weight 1).
-            a = ((self._prog[t] - self._adv_mean) / self._adv_std) if self._prog_ok[t] else 0.0
-            sample["adv"] = torch.tensor(a, dtype=torch.float32)
+            # Raw z-scored advantage components (train loop mixes + gates them).
+            # Frames without a valid t/t+H label pair emit zeros -> neutral (w=1).
+            ok = bool(self._adv_ok[t])
+            sample["adv_prog"] = torch.tensor(self._adv_prog[t] if ok else 0.0, dtype=torch.float32)
+            sample["adv_align"] = torch.tensor(self._adv_align[t] if ok else 0.0, dtype=torch.float32)
+            sample["adv_term"] = torch.tensor(self._adv_term[t] if ok else 0.0, dtype=torch.float32)
+            sample["adv_dock_d"] = torch.tensor(self._adv_dock_d[t], dtype=torch.float32)
 
         return sample
 

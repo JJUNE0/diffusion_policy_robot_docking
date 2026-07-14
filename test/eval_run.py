@@ -35,6 +35,10 @@ N_AUX_BLOCKS = 15
 BLOCK = 256
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 OUT_DIR = os.path.join(REPO, "test", "out", "weekend")
+# Counterfactual alignment metric (see align_eval)
+ALIGN_NEAR_M = 0.6          # only score frames inside the precision zone
+ALIGN_N_SAMPLES = 4         # policy samples averaged per frame
+HORIZON, DT = 60, 0.0333
 
 
 def latest_ckpt(run_dir):
@@ -82,6 +86,80 @@ def aux_eval(nn_condition, cfg, src):
                 supervised_median_mm=float(np.median(mm[d <= 1.1])))
 
 
+@torch.no_grad()
+def align_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
+    """Counterfactual FINAL-ALIGNMENT error (deg) — does the policy command the
+    rotation that squares the robot up with the dock?
+
+    Why not just "roll out and see where it stops": open-loop eval feeds GT
+    observations, so the robot's real pose is always the demo's pose no matter
+    what the policy commands — the endpoint tells us nothing about the policy's
+    docking precision. We need a counterfactual.
+
+    The one we can compute exactly: the dock's yaw in the robot frame changes
+    ONLY when the robot rotates (translation does not rotate the frame), i.e.
+
+        theta_dock(t+H) = theta_dock(t) - integral(wz dt)
+
+    Verified on the demos: corr(dtheta, -dpsi) = 0.991 (0.980 near-dock).
+    (Regression slope is 1.069, not 1.0 — the wheel-odometry wz under-reports
+    rotation by ~7%. It biases policy and demo identically, so comparisons are
+    fair, but do not read the absolute degrees as calibrated truth.)
+
+    So for a frame with dock misalignment theta_now, a policy commanding a
+    heading change dpsi over its horizon would be left with |theta_now - dpsi|.
+    That residual, scored on near-dock frames, IS the policy's docking-alignment
+    quality — no compounding, no imitation reference.
+
+    Reported next to the demo's own residual:
+      demo_median = what an average demo achieves -> what PLAIN BC imitates.
+      demo_p25    = what the better demos achieve -> the level AWR is trying to
+                    pull the policy toward (reward-weighting up-weights the good
+                    tail; it cannot beat the best demo, that needs online RL).
+    A working precision reward should move policy_median from ~demo_median down
+    toward ~demo_p25.
+    """
+    rng = np.random.default_rng(0)
+    starts = np.sort(rng.choice(src.n_rows - BLOCK, size=N_AUX_BLOCKS, replace=False))
+    res_pol, res_demo = [], []
+    for s in starts:
+        blk = np.arange(s, s + BLOCK)
+        blk = blk[src.ok[blk]]
+        if not len(blk):
+            continue
+        ctx, _, rel, dock_d = src.batch(blk)
+        # precision zone + a trustworthy ICP label only
+        keep = (dock_d.cpu().numpy() < ALIGN_NEAR_M) & rel
+        if not keep.any():
+            continue
+        idx = np.where(keep)[0]
+        rows = blk[idx]
+
+        sub = {k: v[idx] for k, v in ctx.items()}
+        B = len(idx)
+        rep = {k: v.repeat_interleave(ALIGN_N_SAMPLES, dim=0) for k, v in sub.items()}
+        prior = torch.randn(B * ALIGN_N_SAMPLES, HORIZON, 2, device=DEVICE)
+        out = nn_diffusion.sample(solver=solver, w_cfg=1, prior=prior, condition_cfg=rep,
+                                  n_samples=B * ALIGN_N_SAMPLES, sample_steps=20, use_ema=use_ema)
+        out = out[0] if isinstance(out, tuple) else out
+        act = ((out.cpu().numpy() + 1.0) / 2.0 * act_scale + act_min)      # [B*N, H, 2]
+        act = act.reshape(B, ALIGN_N_SAMPLES, HORIZON, 2).mean(axis=1)      # [B, H, 2]
+
+        theta_now = src.pose[rows, 2]                                       # ICP dock yaw (rad)
+        dpsi_pol = act[:, :, 1].sum(axis=1) * DT                            # policy's commanded rotation
+        dpsi_demo = np.stack([src.enc[r:r + HORIZON, 1].sum() * DT for r in rows])
+        res_pol.append(np.abs(theta_now - dpsi_pol))
+        res_demo.append(np.abs(theta_now - dpsi_demo))
+
+    if not res_pol:
+        return None
+    p = np.degrees(np.concatenate(res_pol))
+    d = np.degrees(np.concatenate(res_demo))
+    return dict(policy_median_deg=float(np.median(p)), policy_p90_deg=float(np.percentile(p, 90)),
+                demo_median_deg=float(np.median(d)), demo_p25_deg=float(np.percentile(d, 25)),
+                demo_p90_deg=float(np.percentile(d, 90)), n_frames=int(len(p)))
+
+
 def main(run_dir):
     os.makedirs(OUT_DIR, exist_ok=True)
     cfg = OmegaConf.load(os.path.join(run_dir, "config.yaml"))
@@ -106,6 +184,16 @@ def main(run_dir):
     if result["aux"]:
         print(f"[{exp}] aux near(<0.6m) median {result['aux']['near_median_mm']:.1f} mm "
               f"(p90 {result['aux']['near_p90_mm']:.1f})", flush=True)
+    # docking-ALIGNMENT quality (the axis the precision AWR reward targets).
+    # aux near_mm above measures PERCEPTION (does the model know where the dock
+    # is); this measures CONTROL (does it command the rotation that squares up).
+    result["align"] = align_eval(nn_diffusion, solver, use_ema, src,
+                                 ck["action_min"], ck["action_scale"])
+    if result["align"]:
+        a = result["align"]
+        print(f"[{exp}] align(<0.6m) policy {a['policy_median_deg']:.2f} deg "
+              f"(p90 {a['policy_p90_deg']:.2f}) | demo median {a['demo_median_deg']:.2f} "
+              f"[BC target] / p25 {a['demo_p25_deg']:.2f} [AWR target] | n={a['n_frames']}", flush=True)
     del src
 
     rolls = {}
@@ -123,7 +211,10 @@ def main(run_dir):
         vel_rmse=float(np.median([r["vel_rmse"] for r in rolls.values()])),
         vel_progress_rmse=float(np.median([r["vel_progress_rmse"] for r in rolls.values()])),
         speedup_frac=float(np.median([r["speedup_frac"] for r in rolls.values()])),
-        near_mm=result["aux"]["near_median_mm"] if result["aux"] else None)
+        near_mm=result["aux"]["near_median_mm"] if result["aux"] else None,
+        align_deg=result["align"]["policy_median_deg"] if result["align"] else None,
+        align_demo_deg=result["align"]["demo_median_deg"] if result["align"] else None,
+        align_demo_p25_deg=result["align"]["demo_p25_deg"] if result["align"] else None)
 
     tag = os.environ.get("EVAL_TAG", "")
     out = os.path.join(OUT_DIR, f"{exp}{'_' + tag if tag else ''}.json")

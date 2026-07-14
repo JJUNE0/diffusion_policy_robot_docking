@@ -123,8 +123,23 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
     ai_path = reconstruct_pose_rk4(ai[:, 0], ai[:, 1], dt=DT)
     disp = np.hypot(*(gt_path[:, :2] - ai_path[:, :2]).T)
     path_len = float(np.sum(np.hypot(*np.diff(gt_path[:, :2], axis=0).T)))
+
+    # Asymmetric forward-speed error (user request 2026-07-14): plain vel_rmse
+    # penalizes a policy that drives FASTER than the demo just as much as one
+    # that drives slower or wrong-direction -- but faster-in-the-same-direction
+    # is exactly what AWR/residual-RL experiments are trying to achieve, so it
+    # should score as neutral (0), not as an error. Only vx (forward progress)
+    # gets this treatment; wz (turning) stays symmetric since faster turning
+    # near the dock is an alignment risk, not a progress win.
+    vx_p, vx_g = ai[:, 0], gt[:, 0]
+    faster_same_dir = (np.sign(vx_p) == np.sign(vx_g)) & (np.abs(vx_p) >= np.abs(vx_g)) & (vx_g != 0)
+    vx_err = np.where(faster_same_dir, 0.0, vx_p - vx_g)
+    wz_err = ai[:, 1] - gt[:, 1]                                    # symmetric, unchanged
+
     return dict(
         vel_rmse=float(np.sqrt(((ai - gt) ** 2).mean())),
+        vel_progress_rmse=float(np.sqrt(np.mean(np.concatenate([vx_err, wz_err]) ** 2))),
+        speedup_frac=float(faster_same_dir.mean()),                 # how often AWR/RL behavior shows up
         ade_cm=float(disp.mean() * 100), fde_cm=float(disp[-1] * 100),
         path_len_cm=path_len * 100,
         fde_over_path=float(disp[-1] / max(path_len, 1e-9)),

@@ -114,12 +114,15 @@ def main(run_dir):
         r = rollout(nn_diffusion, solver, ep, ck["action_min"], ck["action_scale"], use_ema)
         rolls[str(ep_idx)] = {k: v for k, v in r.items() if not k.endswith("_path")}
         print(f"[{exp}] ep{ep_idx}: ADE {r['ade_cm']:.1f} cm | FDE {r['fde_cm']:.1f} cm | "
-              f"velRMSE {r['vel_rmse']:.4f}", flush=True)
+              f"velRMSE {r['vel_rmse']:.4f} | progRMSE {r['vel_progress_rmse']:.4f} | "
+              f"speedup {r['speedup_frac']*100:.0f}%", flush=True)
     result["openloop"] = rolls
     result["summary"] = dict(
         ade_cm=float(np.median([r["ade_cm"] for r in rolls.values()])),
         fde_cm=float(np.median([r["fde_cm"] for r in rolls.values()])),
         vel_rmse=float(np.median([r["vel_rmse"] for r in rolls.values()])),
+        vel_progress_rmse=float(np.median([r["vel_progress_rmse"] for r in rolls.values()])),
+        speedup_frac=float(np.median([r["speedup_frac"] for r in rolls.values()])),
         near_mm=result["aux"]["near_median_mm"] if result["aux"] else None)
 
     tag = os.environ.get("EVAL_TAG", "")

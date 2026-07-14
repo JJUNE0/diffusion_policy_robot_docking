@@ -147,10 +147,28 @@ pose로 타깃을 바꾼 것"이 노이즈를 두 배로 만들었을 가능성*
 
 ### 2.10 `flow_goal_glidar_abs` — 정합 조건화와 타깃 설계의 분리 (07-14)
 **바꾼 것**: `use_goal_lidar: true` + **`aux_relative: false`** — §2.9의 두 변경 중 골-스캔 조건
-입력만 유지하고, aux 타깃은 절대 dock pose(다른 모든 런과 동일)로 되돌림. from-scratch 20 epoch,
-scratch20과 그 외 조건 전부 동일.
+입력만 유지하고, aux 타깃은 절대 dock pose(다른 모든 런과 동일)로 되돌림. from-scratch 20 epoch.
 **확인하는 질문**: §2.9의 9.7mm 악화가 (a) 정합 조건화 아이디어 자체의 문제인가,
 (b) 상대 pose 타깃의 잡음 배가 문제인가 — 두 요인의 분리 실험.
+
+**glidar(_abs)와 scratch20의 실제 구조적 차이** (config diff + state_dict 비교로 확인, 07-14):
+config는 `use_goal_lidar`/`aux_relative` 두 줄만 다르지만, 이게 아키텍처에 실질적인 변화를
+만든다 — "그 외 조건 전부 동일"은 부정확한 표현이라 정정한다.
+
+| 항목 | scratch20 | glidar(_abs) |
+|---|---|---|
+| condition net 파라미터 | 41,152,134 | 42,349,830 (**+1.20M, +2.9%**) |
+| 신규 모듈 | — | `goal_lidar_resampler` (lidar_resampler와 동일 구조의 독립 PerceiverResampler) + slot/modality/null 임베딩 3종 |
+| fusion transformer 입력 시퀀스 길이 | 기본 토큰 수 | **+16 토큰** (goal-lidar latent) → self-attention 연산량↑ |
+| 체크포인트 크기 | 659MB | 678MB |
+
+즉 glidar는 "같은 모델에 조건 하나 추가"가 아니라 **새 서브네트워크(2.9% 더 큰 모델)를 처음부터
+같이 학습**시킨 것이다. 이게 갖는 함의: (1) 파라미터가 늘었는데 20 epoch·145 에피소드라는 같은
+데이터/스텝 예산을 나눠 써야 해서 미세한 용량 경쟁이 있을 수 있고, (2) 골 스캔이 매 스텝 20-step
+샘플링 루프 안에서 매번 새로 인코딩되므로(현재 스캔과 달리 값이 매 스텝 불변인데도) 추론 연산량도
+약간 늘어난다(최적화 여지 — 골 스캔 latent를 에피소드당 1회만 계산해 캐싱 가능). 성능 차이(§2.10
+결과)가 크지 않았던 것과 별개로, 이 구조 차이 자체가 "정합 조건화 자체는 무효과"라는 결론에
+힘을 보탠다 — 파라미터를 더 쓰고도 이득이 없었다는 뜻이므로.
 
 **결과 (held-out)**: 정밀도 **4.95mm** — glidar(9.72mm)에서 정상 복귀, scratch20(5.18mm)과 동급.
 궤적 ADE 6.5 / FDE 10.0.
@@ -181,19 +199,31 @@ scratch20과 그 외 조건 전부 동일.
 
 ## 4. 결과 종합표 — train vs held-out (근거: `test/out/weekend/*.json`)
 
-| 실험 | 학습 방식 | train: 정밀(mm)/ADE/FDE(cm) | **held-out: 정밀(mm)/ADE/FDE(cm)** |
+정밀(mm) / ADE(cm) / FDE(cm) / **velRMSE**(×1000, 정규화 행동공간 [-1,1] 기준 — 절대 속도 단위
+아님, 런 간 상대 비교용). velRMSE는 지금까지 측정만 하고 표에 누락돼 있었다 (07-14 보정).
+`vel_progress_rmse`(vx 비대칭)·`speedup_frac`은 §4.2 참고 — AWR 실험 전용이라 이 표에는 아직
+포함하지 않음(재현/암기 성적표에 시연-초과 지표를 섞으면 해석이 꼬인다, [[offline_metrics]] §3).
+
+| 실험 | 학습 방식 | train (mm/ADE/FDE/velRMSE) | **held-out (mm/ADE/FDE/velRMSE)** |
 |---|---|---|---|
-| ddpm_goal_auxw | warm-start(ddpm) | 6.0 / 4.3 / 7.1 | 5.3 / 8.3 / 15.3 |
-| flow_goal_auxw | warm-start(base) | 5.9 / 4.5 / 4.8 | 5.2 / 5.7 / 11.3 |
-| flow_goal_auxw2 | warm-start +10ep | 5.4 / 2.7 / **4.0** | 4.6 / 7.7 / 15.0 (과적합) |
-| flow_goal_cfg07 | warm-start | 5.6 / 2.6 / 5.8 | 4.8 / 8.3 / 12.3 |
-| flow_goal_auxw_w2 | warm-start | 5.7 / 3.2 / 5.6 | 4.8 / 7.3 / 12.4 |
-| flow_goal_p4 | warm-start | 5.3 / 2.8 / 6.3 | 4.9 / 8.6 / 12.8 |
-| **flow_goal_scratch20** | **from-scratch 20ep** | 5.7 / 2.3 / 6.7 | **5.2 / 5.2 / 11.1** ⭐ |
-| flow_goal_nolidar | from-scratch 10ep | **7.3** / 4.3 / 9.6 | **6.9** / 5.0 / 8.6 |
-| flow_goal_nogoal | from-scratch 10ep | 6.6 / 6.3 / 11.0 | 6.2 / **6.9** / **15.0** |
-| flow_goal_glidar | from-scratch 20ep | 6.9 / 3.1 / 4.7 | **9.7** / 5.9 / 11.4 |
-| flow_goal_glidar_abs | from-scratch 20ep | 5.6 / 2.7 / 5.4 | 5.0 / 6.5 / 10.0 |
+| ddpm_goal_auxw | warm-start(ddpm) | 6.0 / 4.3 / 7.1 / 34.7 | 5.3 / 8.3 / 15.3 / 46.2 |
+| flow_goal_auxw | warm-start(base) | 5.9 / 4.5 / 4.8 / 21.0 | 5.2 / 5.7 / 11.3 / 25.1 |
+| flow_goal_auxw2 | warm-start +10ep | 5.4 / 2.7 / **4.0** / 22.6 | 4.6 / 7.7 / 15.0 / 29.3 (과적합) |
+| flow_goal_cfg07 | warm-start | 5.6 / 2.6 / 5.8 / 21.1 | 4.8 / 8.3 / 12.3 / 26.6 |
+| flow_goal_auxw_w2 | warm-start | 5.7 / 3.2 / 5.6 / 21.1 | 4.8 / 7.3 / 12.4 / 25.8 |
+| flow_goal_p4 | warm-start | 5.3 / 2.8 / 6.3 / 21.3 | 4.9 / 8.6 / 12.8 / 26.4 |
+| **flow_goal_scratch20** | **from-scratch 20ep** | 5.7 / 2.3 / 6.7 / **19.1** | **5.2 / 5.2 / 11.1** / 25.5 ⭐ |
+| flow_goal_nolidar | from-scratch 10ep | **7.3** / 4.3 / 9.6 / 21.0 | **6.9** / 5.0 / 8.6 / 28.4 |
+| flow_goal_nogoal | from-scratch 10ep | 6.6 / 6.3 / 11.0 / 27.3 | 6.2 / **6.9** / **15.0** / 29.2 |
+| flow_goal_glidar | from-scratch 20ep | 6.9 / 3.1 / 4.7 / 19.2 | **9.7** / 5.9 / 11.4 / 27.6 |
+| flow_goal_glidar_abs | from-scratch 20ep | 5.6 / 2.7 / 5.4 / **18.9** | 5.0 / 6.5 / 10.0 / 28.3 |
+
+**velRMSE로 본 추가 통찰**: scratch20과 glidar_abs가 train velRMSE 최저(18.9~19.1)인데, 이 둘이
+FDE 기준으로도 상위권이던 것과 방향이 일치 — velRMSE는 누적이 없어(§4.1) FDE보다 믿을 만한
+신호다. nogoal은 train velRMSE부터 이미 최악(27.3)이라, 접근 축 악화가 "적분 오차의 우연"이
+아니라 매 스텝 행동 자체가 부정확해서임을 확인해준다 (goal 조건이 진짜 행동 정확도에 기여).
+ddpm_goal_auxw도 train부터 velRMSE가 압도적으로 나쁨(34.7, 2위와 1.6배 차이) — backbone
+선택이 FDE 노이즈에 기대지 않고도 flow 우위로 판정 가능한 사례.
 
 **읽는 법**: train 열만 보면 auxw2가 압도적 1위(FDE 4.0cm)지만, held-out에서는 **전 런 중 가장 나쁜
 축에 속한다(FDE 15.0)** — 전형적 과적합. 이래서 "학습을 더 오래"가 무조건 답이 아니고, 판단은 반드시

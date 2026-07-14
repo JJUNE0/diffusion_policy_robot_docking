@@ -62,9 +62,9 @@ def compute_ranking_weights(horizon, gamma=0.35):
     return w / (w.sum() + 1e-8)
 
 
-def continuity_cost_action_path(candidate_path, prev_path_shifted, weights, w_ang=2.0):
-    dv = candidate_path[:, 0] - prev_path_shifted[:, 0]
-    dw = candidate_path[:, 1] - prev_path_shifted[:, 1]
+def path_weighted_sq_dist(path_a, path_b, weights, w_ang=2.0):
+    dv = path_a[:, 0] - path_b[:, 0]
+    dw = path_a[:, 1] - path_b[:, 1]
     step_cost = (dv ** 2) + w_ang * (dw ** 2)
     return float(np.sum(weights * step_cost))
 
@@ -76,23 +76,37 @@ def shift_previous_path(prev_path):
     return shifted
 
 
-def select_best_sample_with_ranking(samples, prev_selected_action=None, ranking_gamma=0.35, w_ang=2.0):
+def select_best_sample_with_ranking(samples, prev_selected_action=None, ranking_gamma=0.35,
+                                     w_ang=2.0, repr_weight=0.3):
+    """Rank candidate action paths by two terms:
+    - continuity: distance to the previous committed path (shifted one step), so the
+      executed command doesn't jitter between independently-resampled modes.
+    - representativeness: distance to this step's cross-sample mean, so we don't lock
+      onto an outlier draw just because it happens to continue the prior plan.
+    Note: the aux dock-pose head is NOT usable here — all n_samples share the same
+    conditioning (only the ODE noise prior differs), so its prediction is identical
+    across candidates and can't discriminate between them.
+    """
     n_samples, horizon, _ = samples.shape
+    weights = compute_ranking_weights(horizon, gamma=ranking_gamma)
+    mean_path = samples.mean(axis=0)
 
     if prev_selected_action is None:
-        norms = np.sum(samples[:, :, 0] ** 2 + samples[:, :, 1] ** 2, axis=1)
-        best_idx = int(np.argmin(norms))
-        return samples[best_idx], best_idx, -norms
+        scores = np.asarray([
+            -path_weighted_sq_dist(samples[k], mean_path, weights, w_ang)
+            for k in range(n_samples)
+        ], dtype=np.float32)
+        best_idx = int(np.argmax(scores))
+        return samples[best_idx], best_idx, scores
 
     prev_shifted = shift_previous_path(prev_selected_action)
-    weights = compute_ranking_weights(horizon, gamma=ranking_gamma)
 
-    scores = []
+    scores = np.empty(n_samples, dtype=np.float32)
     for k in range(n_samples):
-        cost = continuity_cost_action_path(samples[k], prev_shifted, weights, w_ang)
-        scores.append(-cost)
+        continuity = path_weighted_sq_dist(samples[k], prev_shifted, weights, w_ang)
+        representativeness = path_weighted_sq_dist(samples[k], mean_path, weights, w_ang)
+        scores[k] = -(continuity + repr_weight * representativeness)
 
-    scores = np.asarray(scores, dtype=np.float32)
     best_idx = int(np.argmax(scores))
     return samples[best_idx], best_idx, scores
 
@@ -126,6 +140,7 @@ def main(args):
     ranking_gamma = args.get("ranking_gamma", 0.35)
     blend_gamma = args.get("blend_gamma", 0.60)
     w_ang = args.get("continuity_w_ang", 2.0)
+    repr_weight = args.get("repr_weight", 0.3)
     vision_stride = args.get("vision_stride", 6)
     vision_h = len(range(0, obs_h, vision_stride))
     dt = float(args.get("dt", 0.0333))
@@ -267,6 +282,7 @@ def main(args):
                 prev_selected_action=prev_selected_action,
                 ranking_gamma=ranking_gamma,
                 w_ang=w_ang,
+                repr_weight=repr_weight,
             )
 
             selected_action = apply_exponential_continuity_smoothing(

@@ -103,11 +103,18 @@ class BaseDiffusionSDE(DiffusionModel):
             loss = (self.model["diffusion"](xt, t, condition) - x0) ** 2
         
         loss = loss * self.loss_weight * (1 - self.fix_mask)
-        
+
         # find weighted_regression_tensor in kwargs
         weighted_regression_tensor = kwargs.get("weighted_regression_tensor", None)
         if weighted_regression_tensor is not None:
             loss *= weighted_regression_tensor.unsqueeze(-1)
+
+        # Per-sample advantage weighting (AWR-style offline RWBC), same contract
+        # as ContinuousRectifiedFlow.loss: sample_weight is [B], broadcast over
+        # the horizon/action dims. See scripts/train.py adv_weight.
+        sample_weight = kwargs.get("sample_weight", None)
+        if sample_weight is not None:
+            loss = loss * at_least_ndim(sample_weight, loss.dim())
 
         return loss.mean()
 

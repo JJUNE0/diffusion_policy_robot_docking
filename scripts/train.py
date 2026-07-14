@@ -176,6 +176,15 @@ def main(args):
     aux_dist_max = args.get("aux_dist_max", None)
     aux_dist_power = float(args.get("aux_dist_power", 0.0) or 0.0)
     aux_dist_ref = float(args.get("aux_dist_ref", 0.6))
+    # Offline reward-weighted BC (AWR-style; the offline stand-in for residual
+    # RL, no simulator needed): scale each sample's denoising loss by
+    # exp(advantage/adv_beta) where advantage = z-scored dock-approach speed of
+    # that horizon (computed in the dataset). Upweights the fast-approaching
+    # demo segments so the policy stops copying the slow/parked majority.
+    # adv_weight=false -> uniform (standard BC).
+    adv_weight = args.get("adv_weight", False)
+    adv_beta = float(args.get("adv_beta", 1.0))
+    adv_clip = float(args.get("adv_clip", 2.0))
     sparse_vision = args.get("sparse_vision", False)
     use_room1 = args.get("use_room1", True)
     # When DINO features are precomputed (scripts/precompute_dino_cache.py), the
@@ -269,7 +278,13 @@ def main(args):
 
         # Combined loss = denoising (main) + ICP-distilled aux pose (precision).
         # nn_diffusion.loss() runs the condition net once and caches its aux pred.
-        denoise_loss = nn_diffusion.loss(x0=action, condition=context)
+        loss_kwargs = {}
+        if adv_weight:
+            a = batch["adv"].to(device, non_blocking=True)
+            w = torch.exp((a / adv_beta).clamp(-adv_clip, adv_clip))
+            w = w / w.mean().clamp(min=1e-6)      # keep the loss scale unchanged
+            loss_kwargs["sample_weight"] = w
+        denoise_loss = nn_diffusion.loss(x0=action, condition=context, **loss_kwargs)
         aux_val, mm_val = None, None
         if use_aux:
             aux_pred = nn_condition._aux_pred

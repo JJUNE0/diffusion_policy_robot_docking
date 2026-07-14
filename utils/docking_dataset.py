@@ -36,6 +36,7 @@ class DockingDataset(Dataset):
         with_aux: bool = False,
         with_goal_lidar: bool = False,
         aux_relative: bool = False,
+        adv_weight: bool = False,
         vision_stride: int = 6,
         sparse_vision_uint8: bool = False,
         dino_cache_path: str = None,
@@ -115,6 +116,31 @@ class DockingDataset(Dataset):
                 # loop must denormalize with these (not always dock_xy_*).
                 self.aux_xy_mean = self.rel_xy_mean if self.aux_relative else self.dock_xy_mean
                 self.aux_xy_std = self.rel_xy_std if self.aux_relative else self.dock_xy_std
+
+                # Offline reward-weighted BC (AWR): per-frame ADVANTAGE = how fast
+                # this horizon approached the dock. The demos are mostly slow
+                # (54% of frames < 2 cm/s) and BC copies that; upweighting the
+                # segments that shrank the dock distance fastest shifts the policy
+                # toward the fast tail of the demo distribution (see
+                # scripts/train.py). Raw z-scored progress stored here; the
+                # exp()/beta/clip weight transform is applied in the train loop.
+                self.adv_weight = adv_weight and with_aux
+                if self.adv_weight:
+                    dist_all = np.hypot(pose_all[:, 0], pose_all[:, 1]).astype(np.float32)
+                    n = int(self.episode_ends[-1])
+                    prog = np.zeros(n, np.float32)          # per-start-frame progress
+                    prog_ok = np.zeros(n, bool)
+                    s = 0
+                    for e in self.episode_ends:
+                        for t in range(s, e - horizon):
+                            if valid[t] and valid[t + horizon]:
+                                prog[t] = (dist_all[t] - dist_all[t + horizon]) / (horizon * dt)
+                                prog_ok[t] = True
+                        s = e
+                    m = prog[prog_ok]
+                    self._adv_mean = float(m.mean()) if len(m) else 0.0
+                    self._adv_std = float(m.std() + 1e-6) if len(m) else 1.0
+                    self._prog, self._prog_ok = prog, prog_ok
 
         # The DINO cache must be row-aligned 1:1 with THIS h5. Catch the silent
         # misalignment of pointing an eval/held-out h5 at the train cache.
@@ -320,6 +346,12 @@ class DockingDataset(Dataset):
             sample["dock_target"] = torch.tensor(
                 [xy[0], xy[1], np.sin(p[2]), np.cos(p[2])], dtype=torch.float32)
             sample["reliable"] = torch.tensor(rel, dtype=torch.float32)
+
+        if getattr(self, "adv_weight", False):
+            # z-scored approach-progress advantage for this start frame; frames
+            # without a valid t/t+H label pair get 0 (neutral -> weight 1).
+            a = ((self._prog[t] - self._adv_mean) / self._adv_std) if self._prog_ok[t] else 0.0
+            sample["adv"] = torch.tensor(a, dtype=torch.float32)
 
         return sample
 

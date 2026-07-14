@@ -141,6 +141,7 @@ def model_setups(args):
         with_aux=use_aux,
         with_goal_lidar=use_goal_lidar,
         aux_relative=args.get("aux_relative", False),
+        adv_weight=args.get("adv_weight", False),
         vision_stride=vision_stride,
         sparse_vision_uint8=args.get("sparse_vision", False),
         dino_cache_path=dino_cache_path,

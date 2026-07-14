@@ -95,6 +95,15 @@ aux_dist_ref: 0.6      # 가중 기준 거리 (weight=1이 되는 지점)
 use_goal_lidar: false
 aux_relative: false
 
+# Offline reward-weighted BC (AWR; 2026-07-13) — residual RL의 simulator-free
+# 오프라인 버전. denoising loss를 exp(advantage/adv_beta)로 샘플별 가중.
+# advantage = 그 horizon의 dock 접근 속도(z-score). 시연의 54%가 <2cm/s로 느린데,
+# 빠르게 접근한 구간을 더 세게 학습시켜 정책을 빠른 쪽으로 이동. (한계: 시연 최고
+# 속도를 넘진 못함 — 그건 online RL 필요.) adv_weight=false = 기존 균일 BC.
+adv_weight: false
+adv_beta: 1.0          # 온도. 작을수록 advantage에 공격적으로 반응
+adv_clip: 2.0          # z-score 클립(±). 한 배치가 소수 샘플에 지배되는 것 방지
+
 # RAM saver: dataset returns only the sparse vision frames as uint8 (~24x less
 # host RAM). Needed on the 15 GB machine. Keep on for training.
 sparse_vision: true

@@ -9,8 +9,16 @@
 |---|---|---|---|
 | `scratch20.pt` | flow_goal_scratch20 | **기본 추천**. 종합 1위, 안정판 | 정밀 5.18mm / FDE 11.1 |
 | `flow_adv_speed.pt` | flow_goal_adv (속도 AWR) | **더 빠르고 결단적**. 오른쪽 우회전 도킹 개선 확인용 | 정밀 5.30mm / FDE 12.6 |
+| `flow_glidar_abs.pt` | flow_goal_glidar_abs | goal LiDAR 정합 조건. **추가 입력 필요**(아래) | 정밀 4.95mm / FDE 10.0 |
 
-두 모델 아키텍처 동일(rectified flow + goal이미지 + lidar + aux). config는 `scratch20_config.yaml` 공통.
+플러그인이 체크포인트의 아키텍처를 **자동 감지**한다 (goal-lidar 브랜치 유무). `DEMO_CKPT`만 바꾸면 됨.
+
+> ⚠️ **glidar_abs만의 추가 요구**: 이 모델은 "도킹 완료 시점의 LiDAR 스캔"을 입력으로 받는다
+> (goal_image.jpg의 LiDAR 버전). 번들의 `goal_lidar_scan.npy`(같은 dock의 도킹 스캔)를 기본으로
+> 쓰지만, **현장 dock 위치/형상이 바뀌었으면** 도킹 위치에서 스캔을 떠서 `[M,2]` robot-frame
+> 포인트 `.npy`로 저장 후 `DEMO_GOAL_LIDAR=경로`로 지정해야 정확하다.
+> 참고: ablation에서 glidar_abs는 scratch20 대비 **통계적으로 유의한 개선 없음**(짝지은 비교).
+> 정밀도 숫자(4.95mm)만 근소히 좋아 비교 시연용으로 넣은 것.
 
 ## 실행 — 환경변수로 모델/집계/EMA를 코드 수정 없이 바꾼다
 

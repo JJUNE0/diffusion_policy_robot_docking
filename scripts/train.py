@@ -197,6 +197,7 @@ def main(args):
     #     is exactly what we do not want.
     adv_mode = str(args.get("adv_mode", "speed"))
     adv_w_align = float(args.get("adv_w_align", 1.0))
+    adv_w_pos = float(args.get("adv_w_pos", 0.0))       # forward-x position term (0 = angle-only)
     adv_w_term = float(args.get("adv_w_term", 1.0))
     adv_w_speed = float(args.get("adv_w_speed", 0.3))
     adv_gate_near = float(args.get("adv_gate_near", 0.6))   # m: below this, no speed reward
@@ -299,11 +300,15 @@ def main(args):
             prog = batch["adv_prog"].to(device, non_blocking=True)
             if adv_mode == "precision":
                 align = batch["adv_align"].to(device, non_blocking=True)
+                pos = batch["adv_pos"].to(device, non_blocking=True)
                 term = batch["adv_term"].to(device, non_blocking=True)
                 d = batch["adv_dock_d"].to(device, non_blocking=True)
                 # speed gate: 0 inside the precision zone, ramps to 1 in the approach zone
                 gate = ((d - adv_gate_near) / max(adv_gate_far - adv_gate_near, 1e-6)).clamp(0.0, 1.0)
-                a = adv_w_align * align + adv_w_term * term + adv_w_speed * prog * gate
+                # align (yaw) + pos (forward-x) are both precision, ungated;
+                # speed is gated off near the dock. adv_w_pos=0 -> angle-only.
+                a = (adv_w_align * align + adv_w_pos * pos
+                     + adv_w_term * term + adv_w_speed * prog * gate)
             else:
                 a = prog
             w = torch.exp((a / adv_beta).clamp(-adv_clip, adv_clip))

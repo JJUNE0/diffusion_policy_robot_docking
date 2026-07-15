@@ -142,9 +142,11 @@ class DockingDataset(Dataset):
                     pose_z = np.nan_to_num(pose_all).astype(np.float32)
                     dist_all = np.hypot(pose_z[:, 0], pose_z[:, 1])
                     yaw_err = np.abs(pose_z[:, 2])                        # |yaw| = misalignment
+                    x_abs = np.abs(pose_z[:, 0])                          # forward dock offset
                     n = int(self.episode_ends[-1])
                     prog = np.zeros(n, np.float32)
                     align = np.zeros(n, np.float32)
+                    pos = np.zeros(n, np.float32)
                     term = np.zeros(n, np.float32)
                     ok = np.zeros(n, bool)
                     dock_d = np.zeros(n, np.float32)
@@ -154,6 +156,8 @@ class DockingDataset(Dataset):
                         # episode-level terminal alignment quality (same for all
                         # its frames); episodes with no valid label get 0 = neutral
                         t_align = -float(yaw_err[s + idx[-1]]) if len(idx) else 0.0
+                        # docked forward-x of this episode (goal reference for pos)
+                        x_goal = float(pose_z[s + idx[-1], 0]) if len(idx) else 0.0
                         for t in range(s, e - horizon):
                             # Only trust the distance on labelled rows: 72 unreliable
                             # rows carry blown-up ICP failures (up to 29 km). They are
@@ -163,6 +167,14 @@ class DockingDataset(Dataset):
                             if valid[t] and valid[t + horizon]:
                                 prog[t] = (dist_all[t] - dist_all[t + horizon]) / (horizon * dt)
                                 align[t] = yaw_err[t] - yaw_err[t + horizon]   # >0 = got straighter
+                                # forward-x error reduction toward the docked x.
+                                # Measured: final x spread is 1.9x the ICP noise
+                                # floor (weak but real), y only 1.2x (= noise) —
+                                # so ONLY x carries a learnable position signal.
+                                # NOT gated: position precision matters near dock
+                                # (unlike speed, which is gated off there).
+                                pos[t] = (abs(pose_z[t, 0] - x_goal)
+                                          - abs(pose_z[t + horizon, 0] - x_goal))
                                 term[t] = t_align
                                 ok[t] = True
                         s = e
@@ -173,7 +185,8 @@ class DockingDataset(Dataset):
                         sd = float(m.std() + 1e-6) if len(m) else 1.0
                         return ((v - mu) / sd).astype(np.float32)
 
-                    self._adv_prog, self._adv_align, self._adv_term = _z(prog), _z(align), _z(term)
+                    self._adv_prog, self._adv_align = _z(prog), _z(align)
+                    self._adv_pos, self._adv_term = _z(pos), _z(term)
                     self._adv_ok, self._adv_dock_d = ok, dock_d
 
         # The DINO cache must be row-aligned 1:1 with THIS h5. Catch the silent
@@ -387,6 +400,7 @@ class DockingDataset(Dataset):
             ok = bool(self._adv_ok[t])
             sample["adv_prog"] = torch.tensor(self._adv_prog[t] if ok else 0.0, dtype=torch.float32)
             sample["adv_align"] = torch.tensor(self._adv_align[t] if ok else 0.0, dtype=torch.float32)
+            sample["adv_pos"] = torch.tensor(self._adv_pos[t] if ok else 0.0, dtype=torch.float32)
             sample["adv_term"] = torch.tensor(self._adv_term[t] if ok else 0.0, dtype=torch.float32)
             sample["adv_dock_d"] = torch.tensor(self._adv_dock_d[t], dtype=torch.float32)
 

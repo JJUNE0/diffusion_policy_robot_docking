@@ -121,7 +121,15 @@ def align_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
     """
     rng = np.random.default_rng(0)
     starts = np.sort(rng.choice(src.n_rows - BLOCK, size=N_AUX_BLOCKS, replace=False))
-    res_pol, res_demo = [], []
+    # per-row docked forward-x (goal reference for the counterfactual x error):
+    # x of each episode's last reliable frame, broadcast to all its rows.
+    x_goal_all = np.zeros(src.n_rows, np.float32)
+    _s = 0
+    for _e in src.episode_ends:
+        _iv = np.where(src.rel_valid[_s:_e])[0]
+        x_goal_all[_s:_e] = src.pose[_s + _iv[-1], 0] if len(_iv) else 0.0
+        _s = _e
+    res_pol, res_demo, xerr_pol, xerr_demo = [], [], [], []
     for s in starts:
         blk = np.arange(s, s + BLOCK)
         blk = blk[src.ok[blk]]
@@ -134,6 +142,7 @@ def align_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
             continue
         idx = np.where(keep)[0]
         rows = blk[idx]
+        x_goal_row = x_goal_all[rows]
 
         sub = {k: v[idx] for k, v in ctx.items()}
         B = len(idx)
@@ -151,13 +160,39 @@ def align_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
         res_pol.append(np.abs(theta_now - dpsi_pol))
         res_demo.append(np.abs(theta_now - dpsi_demo))
 
+        # Counterfactual forward-x error: integrate the robot's SE(2) motion
+        # under the policy's (vx,wz) from the ICP-measured start pose, express
+        # the dock in the frame at t+H, and take |x - x_goal|. Position needs
+        # full integration (translation + rotation compound), unlike the yaw
+        # identity above. x only: y has no learnable signal (1.2x ICP noise).
+        for arr, sink in ((act, xerr_pol), (None, xerr_demo)):
+            for j, r in enumerate(rows):
+                a_seq = arr[j] if arr is not None else src.enc[r:r + HORIZON]
+                # dock pose in the CURRENT robot frame
+                dx, dy, dth = src.pose[r, 0], src.pose[r, 1], src.pose[r, 2]
+                px, py, pth = 0.0, 0.0, 0.0                                  # robot pose accumulator
+                for k in range(HORIZON):
+                    v, w = float(a_seq[k, 0]), float(a_seq[k, 1])
+                    px += v * np.cos(pth) * DT
+                    py += v * np.sin(pth) * DT
+                    pth += w * DT
+                # dock in the frame at t+H = inverse(robot motion) applied to dock
+                c, sN = np.cos(-pth), np.sin(-pth)
+                rx = dx - px, dy - py
+                x_H = c * rx[0] - sN * rx[1]                                 # forward-x of dock at t+H
+                sink.append(abs(x_H - x_goal_row[j]))
+
     if not res_pol:
         return None
     p = np.degrees(np.concatenate(res_pol))
     d = np.degrees(np.concatenate(res_demo))
+    xp = np.array(xerr_pol) * 1000.0                                         # mm
+    xd = np.array(xerr_demo) * 1000.0
     return dict(policy_median_deg=float(np.median(p)), policy_p90_deg=float(np.percentile(p, 90)),
                 demo_median_deg=float(np.median(d)), demo_p25_deg=float(np.percentile(d, 25)),
-                demo_p90_deg=float(np.percentile(d, 90)), n_frames=int(len(p)))
+                demo_p90_deg=float(np.percentile(d, 90)), n_frames=int(len(p)),
+                x_policy_median_mm=float(np.median(xp)), x_policy_p90_mm=float(np.percentile(xp, 90)),
+                x_demo_median_mm=float(np.median(xd)), x_demo_p25_mm=float(np.percentile(xd, 25)))
 
 
 def main(run_dir):
@@ -194,6 +229,9 @@ def main(run_dir):
         print(f"[{exp}] align(<0.6m) policy {a['policy_median_deg']:.2f} deg "
               f"(p90 {a['policy_p90_deg']:.2f}) | demo median {a['demo_median_deg']:.2f} "
               f"[BC target] / p25 {a['demo_p25_deg']:.2f} [AWR target] | n={a['n_frames']}", flush=True)
+        print(f"[{exp}] xpos (<0.6m) policy {a['x_policy_median_mm']:.1f} mm "
+              f"(p90 {a['x_policy_p90_mm']:.1f}) | demo median {a['x_demo_median_mm']:.1f} "
+              f"/ p25 {a['x_demo_p25_mm']:.1f}", flush=True)
     del src
 
     rolls = {}
@@ -214,7 +252,9 @@ def main(run_dir):
         near_mm=result["aux"]["near_median_mm"] if result["aux"] else None,
         align_deg=result["align"]["policy_median_deg"] if result["align"] else None,
         align_demo_deg=result["align"]["demo_median_deg"] if result["align"] else None,
-        align_demo_p25_deg=result["align"]["demo_p25_deg"] if result["align"] else None)
+        align_demo_p25_deg=result["align"]["demo_p25_deg"] if result["align"] else None,
+        xpos_mm=result["align"]["x_policy_median_mm"] if result["align"] else None,
+        xpos_demo_mm=result["align"]["x_demo_median_mm"] if result["align"] else None)
 
     tag = os.environ.get("EVAL_TAG", "")
     out = os.path.join(OUT_DIR, f"{exp}{'_' + tag if tag else ''}.json")

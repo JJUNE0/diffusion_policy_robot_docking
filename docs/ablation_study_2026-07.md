@@ -117,7 +117,7 @@ ddpm_goal_auxw: flow_goal_auxw와 같은 세대의 ddpm(구 diffusion) 버전 �
 포화(선생 ICP 노이즈 바닥에 근접, [[aux-head-vs-icp-noise-floor]])했는가?
 
 ### 2.6 `flow_goal_scratch20` — 깨끗한 기준선 ⭐ (held-out 1위)
-**바꾼 것**: 없음(warm-start 안 함) — `flow_goal_auxw`와 동일한 최종 설정(거리 가중 aux, ema 0.999)을
+**바꾼 것**: 없음(warm-start 안 함) — `flow_goal_auxw`와 동일한 최종 설정(거리 가중 aux, ema 0.999)을 , goal image : O , goal lidar : x
 **처음부터** 20 epoch 학습.
 **확인하는 질문**: warm-start 계보(구세대 uniform-loss 가중치를 물려받음)가 실험 결과를 오염시키고
 있진 않은가? 즉 "auxw 계열이 좋아 보이는 게 새 loss 덕분인지, 단지 사전학습된 가중치 덕분인지"를

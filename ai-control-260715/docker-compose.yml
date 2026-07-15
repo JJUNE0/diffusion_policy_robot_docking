@@ -1,0 +1,76 @@
+# ai-control 노드 — 단독 docker-compose (도킹 제어).
+#   cd additional-nodes/ai-control && docker compose up -d --build
+#
+# 전제: rc 스택(nats/livekit/connection)이 떠 있어야 함 (cd ../../rc_server && ./scripts/local.sh up).
+# 외부 네트워크 rc-kernel_rc-kernel-network에 붙어 nats/livekit에 접속.
+# 이미지(ai-node-base)는 plugin 의존 없는 deps-only — ai-world와 공유.
+# ENABLE_SEND=true면 상시 도킹(멀티스텝 궤적 → MQTT robot/{id}/ai-command). false면 추론만.
+name: ai-control
+
+services:
+  ai-control:
+    image: ai-node-base
+    build:
+      context: ..                 # additional-nodes/ (Dockerfile 위치)
+      dockerfile: Dockerfile
+    pull_policy: never
+    working_dir: /app/ai-control
+    command: ["python3", "-m", "ai_control_node"]
+    # LiveKit은 host 네트워크라 host.docker.internal로 접근 (rc record 노드와 동일)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # 추론 knob(모델/집계/EMA/샘플수/스텝/use_ema/video/goal_lidar)은 config.yml의
+      # demo_* 로 이동함. 여기엔 배포/인프라 env만 둔다.
+      PYTHONUNBUFFERED: "1"
+      # rc 노드 SDK
+      RC_NATS_URL: "nats://nats:4222"
+      RC_PROTOCOL_DIR: "/protocol"
+      # LiveKit 시그널링 포트 = rc 배포 env(.env.dgx)의 LIVEKIT_PORT=47320 (record 노드 동일). 7880 아님.
+      LIVEKIT_URL: "ws://${LIVEKIT_HOST:-host.docker.internal}:${LIVEKIT_PORT:-47320}"
+      ROBOT_ID: "${ROBOT_ID:-7023}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      # 상시 도킹 — 멀티스텝 궤적을 MQTT robot/{id}/ai-command 로 발행
+      ENABLE_SEND: "${ENABLE_SEND:-true}"
+      PYTHONPATH: "/opt/rcpkg:/opt/nodes:/app/ai-control"
+      # GPU / HF
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "all"
+      NVIDIA_DISABLE_REQUIRE: "true"
+      HF_TOKEN: "${HF_TOKEN:-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}"
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
+    volumes:
+      # rc 패키지 + node_sdk(전송+AI런타임 통합) + protocol
+      - ../../rc_server/rc/rc:/opt/rcpkg/rc:ro
+      - ../node_sdk:/opt/nodes/node_sdk:ro
+      - ../../rc_server/protocol:/protocol:ro
+      # ai-control 노드 코드 + 모델 + config
+      - ./ai_control_node:/app/ai-control/ai_control_node:ro
+      - ./ai_models:/app/ai-control/ai_models:ro
+      - ./config.yml:/app/ai-control/config.yml:ro
+      # 모델 가중치 + HF 캐시
+      - ${MODELS_DIR_CONTROL:-../../models/ai-control}:/models:ro
+      - ${HF_CACHE_DIR:-../../models/hf-cache}:/root/.cache/huggingface
+    runtime: nvidia
+    ipc: host
+    privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - rc-kernel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  rc-kernel-network:
+    external: true
+    name: rc-kernel_rc-kernel-network

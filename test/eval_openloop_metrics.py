@@ -70,17 +70,24 @@ def load_episode(ep_idx):
     nlid = f["lidar_npoints"][s:e].astype(np.int64)
     cf = h5py.File(DINO_CACHE, "r")
     dino = cf["dino_bottom"][s:e]
+    # room1 features when the cache carries them (merged 2-camera cache);
+    # None for the plain bottom-only caches -> rollout() skips dino_feat1.
+    dino1 = cf["dino_top"][s:e] if "dino_top" in cf else None
     f.close(), cf.close()
-    return enc, lid, nlid, dino
+    return enc, lid, nlid, dino, dino1
 
 
 def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
     """scripts/inference_ema_v2.py open-loop protocol, cache-fed."""
-    enc, lid, nlid, dino = ep
+    enc, lid, nlid, dino, dino1 = ep
     ep_steps = min(len(enc) - HORIZON + 1, MAX_STEPS)
     a_min, a_scale = torch.as_tensor(act_min), torch.as_tensor(act_scale)
     goal = torch.from_numpy(np.ascontiguousarray(dino[-1])).float().to(DEVICE)
     goal = goal.view(1, 1, 196, 768).repeat(N_SAMPLES, 1, 1, 1)
+    goal1 = None
+    if dino1 is not None:
+        goal1 = torch.from_numpy(np.ascontiguousarray(dino1[-1])).float().to(DEVICE)
+        goal1 = goal1.view(1, 1, 196, 768).repeat(N_SAMPLES, 1, 1, 1)
     # Goal frame's own scan (episode's last row, same frame `goal` above uses).
     # Always included: the condition net only consumes it when
     # use_goal_lidar=True; omitting it for a goal-lidar model would silently
@@ -105,6 +112,10 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
             "goal_lidar_points": goal_lidar_pts,
             "goal_lidar_npoints": goal_lidar_npts,
         }
+        if dino1 is not None:
+            feats1 = torch.from_numpy(dino1[rows[::VISION_STRIDE]].astype(np.float32)).to(DEVICE)
+            context["dino_feat1"] = feats1.unsqueeze(0).repeat(N_SAMPLES, 1, 1, 1, 1).view(N_SAMPLES, -1, 196, 768)
+            context["goal_feat1"] = goal1
         with torch.no_grad():
             prior = torch.randn(N_SAMPLES, HORIZON, 2, device=DEVICE)
             out = nn_diffusion.sample(

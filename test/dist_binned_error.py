@@ -106,6 +106,11 @@ class H5Batcher:
         self.z_nlidar = f["lidar_npoints"]
         self.cf = h5py.File(DINO_CACHE, "r")
         self.z_dino = self.cf["dino_bottom"]
+        # room1 (image_top) features, present when the cache was merged for
+        # 2-camera runs. Auto-detected: 1-camera models simply ignore the extra
+        # dino_feat1/goal_feat1 context keys, while a use_room1=True model
+        # would hard-fail without them.
+        self.z_dino1 = self.cf["dino_top"] if "dino_top" in self.cf else None
 
         # Normalization space = the STATS file (train h5): dock-pose mean/std and
         # encoder min/max the model learned with — not the eval file's own stats.
@@ -224,6 +229,14 @@ class H5Batcher:
             "goal_lidar_points": torch.from_numpy(glid).to(DEVICE),
             "goal_lidar_npoints": torch.from_numpy(gnlid).to(DEVICE),
         }
+        if self.z_dino1 is not None:
+            # room1 history + goal frame, mirroring the dino_bottom reads above
+            block1 = self.z_dino1[a:b]
+            dino1 = np.stack([block1[rw - a] for rw in drows])
+            g1feat = {int(g): self.z_dino1[int(g)] for g in np.unique(self.ep_end[idxs] - 1)}
+            goal1 = np.stack([g1feat[int(self.ep_end[t] - 1)] for t in idxs])[:, None]
+            ctx["dino_feat1"] = torch.from_numpy(dino1).to(DEVICE).float()
+            ctx["goal_feat1"] = torch.from_numpy(goal1).to(DEVICE).float()
         return (ctx, torch.from_numpy(tgt.astype(np.float32)).to(DEVICE), reliable,
                 torch.from_numpy(dock_d.astype(np.float32)).to(DEVICE))
 

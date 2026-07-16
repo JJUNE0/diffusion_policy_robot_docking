@@ -142,10 +142,24 @@ def main(args):
         init_from = args.get("init_from", None)
         if init_from:
             ck = torch.load(init_from, map_location=device, weights_only=False)
-            nn_diffusion.model.load_state_dict(ck["model_state_dict"])
-            nn_diffusion.model_ema.load_state_dict(ck["model_state_dict"])
+            src = ck["model_state_dict"]
+            # Partial (graft) loading: when the live architecture ADDS branches
+            # the source checkpoint never had (e.g. grafting goal/lidar/aux onto
+            # the old 2-camera baseline), load every matching key and leave the
+            # new branches at their fresh init. strict load stays the default
+            # path so exact warm-starts still catch real mismatches loudly.
+            missing, unexpected = nn_diffusion.model.load_state_dict(src, strict=False)
+            nn_diffusion.model_ema.load_state_dict(src, strict=False)
             print("======================================================")
             print(f"Warm-started weights from: {init_from}")
+            print(f"  loaded {len(src) - len(unexpected)}/{len(src)} source params"
+                  f" | new (randomly initialized) params: {len(missing)}")
+            if unexpected:
+                print(f"  source-only params ignored: {len(unexpected)} e.g. {unexpected[:3]}")
+            if missing:
+                print(f"  fresh branches e.g. {missing[:3]}")
+            if len(missing) == 0 and len(unexpected) == 0:
+                print("  (exact match — plain warm-start)")
             print("(fresh optimizer/scheduler/EMA-seed/step counter)")
             print("======================================================")
         else:

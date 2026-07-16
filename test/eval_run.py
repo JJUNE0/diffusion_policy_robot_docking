@@ -149,7 +149,8 @@ def align_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
         rep = {k: v.repeat_interleave(ALIGN_N_SAMPLES, dim=0) for k, v in sub.items()}
         prior = torch.randn(B * ALIGN_N_SAMPLES, HORIZON, 2, device=DEVICE)
         out = nn_diffusion.sample(solver=solver, w_cfg=1, prior=prior, condition_cfg=rep,
-                                  n_samples=B * ALIGN_N_SAMPLES, sample_steps=20, use_ema=use_ema)
+                                  n_samples=B * ALIGN_N_SAMPLES,
+                                  sample_steps=int(os.environ.get("EVAL_STEPS", "20")), use_ema=use_ema)
         out = out[0] if isinstance(out, tuple) else out
         act = ((out.cpu().numpy() + 1.0) / 2.0 * act_scale + act_min)      # [B*N, H, 2]
         act = act.reshape(B, ALIGN_N_SAMPLES, HORIZON, 2).mean(axis=1)      # [B, H, 2]

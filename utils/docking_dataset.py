@@ -82,8 +82,14 @@ class DockingDataset(Dataset):
         with h5py.File(self.h5_path, "r") as f:
             self.episode_ends = f["episode_ends"][:]
             self.with_lidar = with_lidar and ("lidar_points" in f)
-            self.with_aux = with_aux and ("dock_pose" in f)
-            if self.with_aux:
+            has_pose_source = "dock_pose" in f
+            self.with_aux = with_aux and has_pose_source
+            # AWR (adv_weight) needs the ICP dock_pose labels to compute reward
+            # components, but NOT the aux prediction head (use_aux_pose/with_aux
+            # controls only whether the network gets that head). Decoupled so
+            # "AWR without the aux/lidar/goal branches" is a valid config.
+            need_pose = (with_aux or adv_weight) and has_pose_source
+            if need_pose:
                 pose_all = f["dock_pose"][:]
                 rel_all = f["reliable"][:].astype(bool)
                 # Guard: only use rows that are BOTH reliable and non-NaN, so a
@@ -134,7 +140,7 @@ class DockingDataset(Dataset):
                 #   align = reduction of |yaw| misalignment over the horizon  [precision]
                 #   term  = -|final yaw| of the whole episode (episode-level
                 #           credit: "learn more from demos that docked straight") [precision]
-                self.adv_weight = adv_weight and with_aux
+                self.adv_weight = adv_weight and has_pose_source
                 if self.adv_weight:
                     # nan_to_num FIRST: unreliable rows hold NaN poses, and a NaN
                     # reaching dock_d survives even where the advantage is 0

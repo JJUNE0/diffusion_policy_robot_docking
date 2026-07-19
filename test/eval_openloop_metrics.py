@@ -50,7 +50,9 @@ RUNS = {
 }
 CKPT_STEP = 4230
 EPISODES = [0, 20, 50, 80, 110, 140]
-MAX_STEPS = 500
+# 500 truncates the ~1900-step test episodes: FDE is then "error at step 500",
+# not the docking-endpoint error. EVAL_MAX_STEPS=0 -> roll to the episode end.
+MAX_STEPS = int(os.environ.get("EVAL_MAX_STEPS", "500")) or 10**9
 N_SAMPLES = 8
 SAMPLE_STEPS = int(os.environ.get("EVAL_STEPS", "20"))   # sampling-steps sweep (Phase 1)
 TRAJ_EMA_ALPHA = 0.3

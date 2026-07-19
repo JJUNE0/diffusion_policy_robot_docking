@@ -247,6 +247,10 @@ def main(run_dir):
     result["summary"] = dict(
         ade_cm=float(np.median([r["ade_cm"] for r in rolls.values()])),
         fde_cm=float(np.median([r["fde_cm"] for r in rolls.values()])),
+        # per-episode endpoint-error mean (user request 2026-07-17); median stays
+        # the headline since with ~10 episodes one bad rollout dominates the mean
+        ade_cm_mean=float(np.mean([r["ade_cm"] for r in rolls.values()])),
+        fde_cm_mean=float(np.mean([r["fde_cm"] for r in rolls.values()])),
         vel_rmse=float(np.median([r["vel_rmse"] for r in rolls.values()])),
         vel_progress_rmse=float(np.median([r["vel_progress_rmse"] for r in rolls.values()])),
         speedup_frac=float(np.median([r["speedup_frac"] for r in rolls.values()])),
@@ -262,7 +266,7 @@ def main(run_dir):
     json.dump(result, open(out, "w"), indent=1)
     s = result["summary"]
     print(f"[{exp}] SUMMARY: near {s['near_mm']} mm | ADE {s['ade_cm']:.1f} cm | "
-          f"FDE {s['fde_cm']:.1f} cm -> {out}", flush=True)
+          f"FDE med {s['fde_cm']:.1f} / mean {s['fde_cm_mean']:.1f} cm -> {out}", flush=True)
 
 
 if __name__ == "__main__":

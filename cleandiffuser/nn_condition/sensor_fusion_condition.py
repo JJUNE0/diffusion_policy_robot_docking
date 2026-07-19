@@ -218,7 +218,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 # fallback (no lidar): pooled-readout MLP head
                 self.aux_head = nn.Sequential(
                     nn.Linear(d_model, 128), nn.GELU(), nn.Linear(128, 4))
-            self._aux_pred = None
+        self._aux_pred = None
         self._point_tokens = None        # per-point tokens for the cross-attn head
         self._point_mask = None
 

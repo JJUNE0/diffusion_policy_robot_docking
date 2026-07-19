@@ -344,7 +344,18 @@ held-out 3개, MAX_STEPS 250).
 | flow_goal_glidar | from-scratch 20ep | 6.9 / 3.1 / 4.7 / 19.2 | **9.7** / 5.9 / 11.4 / 27.6 |
 | flow_goal_glidar_abs | from-scratch 20ep | 5.6 / 2.7 / 5.4 / **18.9** | 5.0 / 6.5 / 10.0 / 28.3 |
 | **구 baseline (100k)** | 배치16, 100k step | 측정불가 / **1.0** / **2.8** / 14.5 | 측정불가 / 4.9 / 9.6 / 26.4 |
+| `graft_g5_full` | graft, 구 baseline+풀스택 | 5.9 / 2.6 / 2.9 / 15.9 | 5.6 / 4.9 / 8.9 / 21.6 |
+| `graft_goalimg_lidar` | graft, +goal-img+goal-lidar | 측정불가 / 0.7 / 2.0 / 7.7 | 측정불가 / 2.1 / 3.6 / 9.9 |
+| `graft_goalimg` | graft, +goal-img만 | 측정불가 / 0.9 / 1.7 / 11.0 | 측정불가 / 1.9 / 4.0 / 10.9 |
+| `graft_g0_awr` | graft, +AWR(precision)만 | 측정불가 / 1.2 / 2.4 / 16.4 | 측정불가 / 3.8 / 6.2 / 22.9 |
+| `graft_g0_control` | graft, 구 baseline 배치/에폭만 변경 | 측정불가 / 1.5 / 4.3 / 8.4 | 측정불가 / 2.4 / 4.5 / 10.4 |
+| `graft_goallidar` | graft, +lidar+goal-lidar만 | 측정불가 / 2.4 / 6.8 / 7.4 | 측정불가 / 2.1 / 3.9 / 9.1 |
 
+> **graft6 행(07-17) 상세는 §9 참고** — 배치 128, 10 epoch, 구 baseline(100k)에서 warm-start.
+> `graft_g5_full` 외 5개는 aux head가 없어(`use_aux_pose=false`) mm 열 측정불가는 §2.7/§2.8의
+> nolidar/nogoal과 같은 이유(빈칸 아님, "다른 지표"). `speedup_frac` 등 AWR 전용 비대칭 지표는
+> 이 표에 포함하지 않음(위 §4 서두 원칙과 동일) — §9 표에서 확인.
+>
 > 구 baseline은 아키텍처가 달라(2카메라, aux head 없음) 표의 다른 행과 직접 비교 시 §2.12를
 > 반드시 함께 읽을 것 — mm 열은 aux head 부재로 측정 자체가 불가능(빈칸 아님, "다른 지표"），
 > ADE/FDE는 표기상 낮아 보이지만 실기(07-15)에서는 이 모델만 도킹에 성공했다.
@@ -622,3 +633,65 @@ total_loss = denoise_loss + aux_weight · aux_loss
 - 왜 <0.6m만? 정밀 도킹에서 중요한 건 마지막 구간이다. 접근 전 구간을 평균 내면
   멀리 있는 프레임의 큰 오차가 섞여 지표가 흐려진다(07-10에 "29mm"로 보이던 게 실은 이 착시).
 - 수천 프레임 기준이라 **FDE(에피소드 10개)보다 통계적으로 훨씬 신뢰도가 높다**(§4.1).
+
+---
+
+## 9. Graft6 — 구 baseline(100k) 접붙이기 ablation (2026-07-17)
+
+> `test/queue_graft6.sh` 기준. 전부 `outputs/checkpoint_step_100000.pt`(§2.12 구 baseline, 2-camera
+> DDPM, 실기 유일 성공작)에서 warm-start, 10 epoch, batch_size=128, live 2-camera DINO
+> (`use_dino_cache=false`). 목적: 구 baseline에 신규 기능(goal 조건화 / LiDAR+aux / AWR)을 하나씩
+> 접붙였을 때 held-out 지표가 어떻게 움직이는지 확인 — §2.12가 실기 성공의 원인 후보로 지목한
+> "카메라 대수" 외에, "신규 기능 자체가 실기 실패의 원인이었는지"를 구 baseline 위에서 직접 검증.
+> 학습 로그는 `outputs/train_graft_*.log`, 평가 원본은 `test/out/weekend/graft_*.json`.
+
+> 07-18: `speedup_frac`(시연보다 같은 방향으로 빠르거나 같은 프레임 비율, §7.6) 열 추가.
+
+| 실험 | 추가된 것 | train (mm/ADE/FDE/velRMSE/speedup) | held-out (mm/ADE/FDE/velRMSE/speedup) |
+|---|---|---|---|
+| `graft_g5_full` | 풀스택: goal-image + lidar + aux + goal-lidar + AWR(precision) | 5.9 / 2.6 / 2.9 / 15.9 / 41% | 5.6 / 4.9 / 8.9 / 21.6 / 44% |
+| `graft_goalimg_lidar` | + goal-image + goal-lidar 함께 추가 (aux 없음, AWR 없음) | - / 0.7 / 2.0 / 7.7 / 33% | - / 2.1 / 3.6 / 9.9 / 30% |
+| `graft_goalimg` | + goal-image 조건화만 추가 | - / 0.9 / 1.7 / 11.0 / 26% | - / 1.9 / 4.0 / 10.9 / 28% |
+| `graft_g0_awr` | + AWR(precision)만 추가 — AWR 자체 효과만 분리 | - / 1.2 / 2.4 / 16.4 / 42% | - / 3.8 / 6.2 / 22.9 / 41% |
+| `graft_g0_control` | control: 새 브랜치 없음, AWR 없음 (구 baseline + 배치/에폭만 변경) | - / 1.5 / 4.3 / 8.4 / 34% | - / 2.4 / 4.5 / 10.4 / 26% |
+| `graft_goallidar` | + LiDAR 브랜치 + goal-lidar 조건화 추가 (goal-image 없음) | - / 2.4 / 6.8 / 7.4 / 51% | - / 2.1 / 3.9 / 9.1 / 33% |
+
+<!-- GRAFT6:graft_goallidar -->
+
+<!-- GRAFT6:graft_g0_control -->
+
+<!-- GRAFT6:graft_g0_awr -->
+
+<!-- GRAFT6:graft_goalimg -->
+
+<!-- GRAFT6:graft_goalimg_lidar -->
+
+<!-- GRAFT6:graft_g5_full -->
+
+### 9.1 해석 (07-18, 6개 전부 완료 후)
+
+**held-out FDE로 정렬**(goal-reaching, cm, 낮을수록 좋음):
+`goalimg_lidar`(3.6) ≈ `goallidar`(3.9) ≈ `goalimg`(4.0) < `g0_control`(4.5) < `g0_awr`(6.2) < `g5_full`(8.9).
+
+- **goal-image / lidar+goal-lidar 단독 그래프트는 control보다 나쁘지 않다** — 오히려 근소하게
+  낫다(3.6~4.0 vs 4.5). 단, §4.1 기준 이 정도(1cm 미만) 차이는 통계력 밖(잡음)이라 "확실히
+  개선"이라 단정하긴 이르다. 적어도 **이 두 기능이 단독으로는 실기 실패의 원인이 아니라는** 방향의
+  증거.
+- **AWR이 가장 뚜렷한 부정적 신호다.** `g0_awr`(AWR만 추가)은 control 대비 held-out FDE가
+  4.5→6.2cm로 악화되고, 비대칭 속도 지표 `progRMSE`(demo보다 빠른 건 페널티 안 주는 지표)도
+  10.1→22.5로 **2배 이상** 나빠진다 — `speedup_frac`(41% vs 26%)이 오른 건 AWR이 의도대로
+  "빠른 시연 쪽으로" 재가중은 하고 있다는 뜻이지만, 그 대가로 궤적 자체가 더 노이즈해진다는 뜻.
+  이 차이는 FDE 1~2cm대 잡음 수준을 넘어서는(§4.1 기준 ~4cm급 근접) 편이라 신뢰도가 더 높다.
+- **`g5_full`(전체 스택)이 6개 중 최악**(held FDE 8.9, progRMSE 20.6)인데, 구성 요소별 결과를
+  보면 이 악화의 주범은 goal/lidar 조건화가 아니라 **AWR로 보인다** — `g0_awr` 단독으로도 이미
+  같은 방향(속도 노이즈↑, FDE↑)의 악화가 나타나고, `goalimg`/`goallidar`/`goalimg_lidar`는
+  AWR 없이도 문제가 없었기 때문.
+- **정밀도(mm)는 `g5_full`만 측정 가능**(aux head가 있는 유일한 셀) — held-out 5.6mm로, 다른
+  스터디에서 반복 관측된 ICP 라벨 노이즈 바닥(~5.7mm, §8.2)에 붙어 있다. 포화, 특이사항 없음.
+- **아직 열려 있는 질문**: 이 표는 전부 open-loop 오프라인 지표다. §2.12에서 이미 이 지표 체계가
+  실기 성능을 예측하지 못한 전례가 있으므로("held-out 상위권 신규 모델 전부 실기 실패, 구
+  baseline만 성공"), 여기서 AWR이 나쁘게 나온 것도 **실기와 반드시 일치한다는 보장은 없다.**
+  다만 07-15 실기에서 `flow_goal_adv`(AWR 포함)가 "정면 도킹조차 못 함"으로 최악이었던 것과
+  방향이 일치하긴 한다 — 두 개의 독립적인 관측(이전 실기 실패 + 이번 오프라인 열화)이 같은 곳을
+  가리키므로, **AWR을 다음 실기 검증의 최우선 용의자로 삼는 것을 권장**. `g0_control` vs
+  `g0_awr` 두 체크포인트만 골라 closed-loop로 재검증하면 저비용으로 확증 가능.

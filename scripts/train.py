@@ -200,8 +200,11 @@ def main(args):
     adv_beta = float(args.get("adv_beta", 1.0))
     adv_clip = float(args.get("adv_clip", 2.0))
     # adv_mode:
-    #   "speed"     -> A = progress            (approach speed only; the 07-14 v1)
-    #   "precision" -> A = w_align*align + w_term*term + w_speed*progress*gate(d)
+    #   "speed"        -> A = progress         (approach speed only; the 07-14 v1)
+    #   "precision"    -> A = w_align*align + w_term*term + w_speed*progress*gate(d)
+    #   "precision_v2" -> A = w_align*align*(1-gate(d)) + w_term*term
+    #                     (07-18: no speed term, align reward only near the dock
+    #                      — v1 doubled wz noise on graft_g0_awr, see ablation §9)
     # Precision mode encodes the stated priority (precision >> speed):
     #   * align/term are HEADING-alignment signals — measured on the demos, yaw is
     #     the only precision axis with real spread (7.1x the ICP noise floor);
@@ -312,17 +315,29 @@ def main(args):
         loss_kwargs = {}
         if adv_weight:
             prog = batch["adv_prog"].to(device, non_blocking=True)
-            if adv_mode == "precision":
+            if adv_mode in ("precision", "precision_v2"):
                 align = batch["adv_align"].to(device, non_blocking=True)
                 pos = batch["adv_pos"].to(device, non_blocking=True)
                 term = batch["adv_term"].to(device, non_blocking=True)
                 d = batch["adv_dock_d"].to(device, non_blocking=True)
                 # speed gate: 0 inside the precision zone, ramps to 1 in the approach zone
                 gate = ((d - adv_gate_near) / max(adv_gate_far - adv_gate_near, 1e-6)).clamp(0.0, 1.0)
-                # align (yaw) + pos (forward-x) are both precision, ungated;
-                # speed is gated off near the dock. adv_w_pos=0 -> angle-only.
-                a = (adv_w_align * align + adv_w_pos * pos
-                     + adv_w_term * term + adv_w_speed * prog * gate)
+                if adv_mode == "precision_v2":
+                    # v2 (07-18, graft6 결과 반영): the graft_g0_awr cell showed v1
+                    # doubles the policy's wz (turning) noise on held-out rollouts.
+                    # Two suspected causes, both removed here: (1) the residual
+                    # speed term kept pushing fast-tail imitation far from the
+                    # dock; (2) the UNGATED align term rewards yaw change
+                    # anywhere, i.e. far-field steering — a much noisier signal
+                    # than docking alignment. v2 = per-frame align reward only
+                    # INSIDE the precision zone (1-gate), plus the episode-level
+                    # terminal-alignment credit. No speed reward at all.
+                    a = adv_w_align * align * (1.0 - gate) + adv_w_term * term
+                else:
+                    # v1: align (yaw) + pos (forward-x) are both precision, ungated;
+                    # speed is gated off near the dock. adv_w_pos=0 -> angle-only.
+                    a = (adv_w_align * align + adv_w_pos * pos
+                         + adv_w_term * term + adv_w_speed * prog * gate)
             else:
                 a = prog
             w = torch.exp((a / adv_beta).clamp(-adv_clip, adv_clip))

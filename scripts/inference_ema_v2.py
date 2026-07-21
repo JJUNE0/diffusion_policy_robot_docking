@@ -32,6 +32,7 @@ from omegaconf import OmegaConf
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from cleandiffuser.nn_condition.modular_fusion_condition import ModularSensorFusionCondition
 from cleandiffuser.nn_diffusion import DiT1d
+from cleandiffuser.rollout_core import RolloutController
 from utils.setups import _select_backbone
 from utils.docking_dataset import DockingDataset, denormalize
 from utils.modular_dataset import ModularDockingDataset
@@ -191,8 +192,24 @@ def main(args):
         dataset.root["encoder"][ep_start:ep_start + ep_steps] if use_modular
         else dataset.z_encoder[ep_start:ep_start + ep_steps], dtype=np.float32)
 
-    prev_ema, selected, v_samp, w_samp = None, [], [], []
-    for step in range(ep_steps):
+    # Action chunking / temporal-consistency (2026-07-21) -- same knobs and
+    # same no-op-by-default contract as test/eval_openloop_metrics.py.rollout().
+    # Both now share the sampling/aggregation/EMA/warm-start core via
+    # cleandiffuser.rollout_core.RolloutController; this loop only builds the
+    # per-frame context (data source differs) and owns the chunk cadence.
+    exec_chunk_k = int(os.environ.get("EVAL_CHUNK_K", "1"))
+    warm_start = os.environ.get("EVAL_WARM_START", "0") == "1"
+    warm_level = float(os.environ.get("EVAL_WARM_LEVEL", "0.3"))
+    legacy_rollout = (exec_chunk_k == 1 and not warm_start)
+
+    ctrl = RolloutController(
+        nn_diffusion, solver=args.solver, sample_steps=args.inference_sampling_steps,
+        use_ema=bool(args.get("use_ema", True)), n_samples=n_samples, horizon=horizon,
+        w_cfg=args.w_cfg, agg="mean", traj_ema_alpha=traj_ema_alpha,
+        warm_start=warm_start, warm_level=warm_level, device=device)
+    selected, v_samp, w_samp = [], [], []
+    step = 0
+    while step < ep_steps:
         batch = dataset[base + step]
         obs = batch["obs"]
 
@@ -214,26 +231,28 @@ def main(args):
                 context["lidar_npoints"] = obs["lidar_npoints"].view(1).to(device).repeat(n_samples)
             context.update(goal_ctx)
 
-        with torch.no_grad():
-            prior = torch.randn(n_samples, horizon, 2, device=device)
-            out = nn_diffusion.sample(
-                solver=args.solver, w_cfg=args.w_cfg, prior=prior,
-                condition_cfg=context, n_samples=n_samples,
-                sample_steps=args.inference_sampling_steps,
-                use_ema=bool(args.get("use_ema", True)))
-            out = out[0] if isinstance(out, tuple) else out
-            res = denormalize(out.cpu().numpy(), act_scale, act_min)
+        k = 1 if legacy_rollout else min(exec_chunk_k, ep_steps - step, horizon)
+        plan = ctrl.plan(context, act_min, act_scale, chunk_shift=k)
+        res = plan.samples                        # [N,H,2] denorm, for spread plot
 
-        v_samp.append(res[:, 0, 0].copy())
-        w_samp.append(res[:, 0, 1].copy())
+        if legacy_rollout:
+            v_samp.append(res[:, 0, 0].copy())
+            w_samp.append(res[:, 0, 1].copy())
+            selected.append(plan.ema[0, :])
+            step += 1
+        else:
+            # v_samp/w_samp feed the per-step sample-spread plot below, which is
+            # indexed 1:1 against gt_actions (always full ep_steps) -- repeat
+            # this resample's per-sample column across the k steps it covers so
+            # lengths stay aligned when chunking reduces resample frequency.
+            for j in range(k):
+                v_samp.append(res[:, j, 0].copy())
+                w_samp.append(res[:, j, 1].copy())
+            selected.extend(list(plan.current[0:k]))
+            step += k
 
-        current = res[0] if n_samples == 1 else res.mean(axis=0)
-        ema = current if prev_ema is None else traj_ema_alpha * current + (1 - traj_ema_alpha) * prev_ema
-        prev_ema = ema.copy()
-        selected.append(ema[0, :])
-
-        if (step + 1) % 50 == 0 or (step + 1) == ep_steps:
-            print(f"progress: {step + 1}/{ep_steps}")
+        if step % 50 == 0 or step == ep_steps:
+            print(f"progress: {step}/{ep_steps}")
 
     ai_actions = np.array(selected)
     gt_path = reconstruct_pose_rk4(gt_actions[:, 0], gt_actions[:, 1], dt=dt)

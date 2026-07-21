@@ -39,6 +39,7 @@ from omegaconf import OmegaConf  # noqa: E402
 
 from scripts.inference_ema_v2 import build_model_from_cfg, reconstruct_pose_rk4  # noqa: E402
 from utils.docking_dataset import denormalize  # noqa: E402
+from cleandiffuser.rollout_core import RolloutController  # noqa: E402
 
 # Env-overridable (same convention as dist_binned_error.py) so the identical
 # tooling scores held-out data: EVAL_H5 / EVAL_CACHE.
@@ -79,6 +80,33 @@ def load_episode(ep_idx):
     return enc, lid, nlid, dino, dino1
 
 
+# Action chunking / temporal-consistency (2026-07-21, user-requested).
+# Defaults reproduce the exact legacy per-frame-resample behavior byte-for-
+# byte -- every previously published eval number in ablation_study_2026-07.md
+# stays reproducible. Opt in via env vars for a NEW eval variant (see
+# EVAL_CHUNK_K/EVAL_WARM_START docstring note below); results get their own
+# EVAL_TAG so they land in separate JSON files, never overwriting old ones.
+#   EVAL_CHUNK_K=1        (default) resample every frame, exactly like before.
+#   EVAL_CHUNK_K=K>1       resample every K frames, execute that plan's [0:K]
+#                          raw steps verbatim (no cross-time blending needed --
+#                          one coherent sampled trajectory is already smooth).
+#   EVAL_WARM_START=1      instead of pure-noise prior, warm-start the next
+#                          sample from the PREVIOUS plan shifted by K steps
+#                          (its actual continuation) via cleandiffuser's native
+#                          SDEdit-style warm_start_reference/forward_level --
+#                          this is the "real" temporal-consistency fix; the
+#                          legacy per-index TRAJ_EMA blend (kept below,
+#                          unchanged) mixes DIFFERENT absolute timesteps and is
+#                          not a substitute for it.
+#   EVAL_WARM_LEVEL=0.3    fraction of the full noise schedule to re-add to the
+#                          warm-started reference before re-denoising (same
+#                          knob as cleandiffuser's own default).
+EXEC_CHUNK_K = int(os.environ.get("EVAL_CHUNK_K", "1"))
+WARM_START = os.environ.get("EVAL_WARM_START", "0") == "1"
+WARM_LEVEL = float(os.environ.get("EVAL_WARM_LEVEL", "0.3"))
+_LEGACY_ROLLOUT = (EXEC_CHUNK_K == 1 and not WARM_START)
+
+
 def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
     """scripts/inference_ema_v2.py open-loop protocol, cache-fed."""
     enc, lid, nlid, dino, dino1 = ep
@@ -99,8 +127,14 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
     goal_lidar_npts = torch.tensor([nlid[-1]], device=DEVICE).repeat(N_SAMPLES)
 
     torch.manual_seed(0)
-    prev_ema, selected = None, []
-    for t in range(ep_steps):
+    ctrl = RolloutController(
+        nn_diffusion, solver=solver, sample_steps=SAMPLE_STEPS, use_ema=use_ema,
+        n_samples=N_SAMPLES, horizon=HORIZON, w_cfg=1, agg="mean",
+        traj_ema_alpha=TRAJ_EMA_ALPHA, warm_start=WARM_START, warm_level=WARM_LEVEL,
+        device=DEVICE)
+    selected = []
+    t = 0
+    while t < ep_steps:
         rows = np.clip(np.arange(t - OBS_HORIZON + 1, t + 1), 0, None)
         vel = (2.0 * (torch.as_tensor(enc[rows]) - a_min) / a_scale - 1.0).float()
         feats = torch.from_numpy(dino[rows[::VISION_STRIDE]].astype(np.float32)).to(DEVICE)
@@ -118,17 +152,14 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
             feats1 = torch.from_numpy(dino1[rows[::VISION_STRIDE]].astype(np.float32)).to(DEVICE)
             context["dino_feat1"] = feats1.unsqueeze(0).repeat(N_SAMPLES, 1, 1, 1, 1).view(N_SAMPLES, -1, 196, 768)
             context["goal_feat1"] = goal1
-        with torch.no_grad():
-            prior = torch.randn(N_SAMPLES, HORIZON, 2, device=DEVICE)
-            out = nn_diffusion.sample(
-                solver=solver, w_cfg=1, prior=prior, condition_cfg=context,
-                n_samples=N_SAMPLES, sample_steps=SAMPLE_STEPS, use_ema=use_ema)
-            out = out[0] if isinstance(out, tuple) else out
-            res = denormalize(out.cpu().numpy(), act_scale, act_min)
-        current = res.mean(axis=0)
-        ema = current if prev_ema is None else TRAJ_EMA_ALPHA * current + (1 - TRAJ_EMA_ALPHA) * prev_ema
-        prev_ema = ema.copy()
-        selected.append(ema[0, :])
+
+        k = 1 if _LEGACY_ROLLOUT else min(EXEC_CHUNK_K, ep_steps - t, HORIZON)
+        plan = ctrl.plan(context, act_min, act_scale, chunk_shift=k)
+        if _LEGACY_ROLLOUT:
+            selected.append(plan.ema[0, :])                    # EMA on, step 0 only
+        else:
+            selected.extend(list(plan.current[0:k]))           # raw chunk, no EMA
+        t += k
 
     ai = np.array(selected)
     gt = enc[:ep_steps]
@@ -156,6 +187,7 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema):
         ade_cm=float(disp.mean() * 100), fde_cm=float(disp[-1] * 100),
         path_len_cm=path_len * 100,
         fde_over_path=float(disp[-1] / max(path_len, 1e-9)),
+        exec_chunk_k=EXEC_CHUNK_K, warm_start=WARM_START, warm_level=WARM_LEVEL if WARM_START else None,
         gt_path=gt_path.tolist(), ai_path=ai_path.tolist(), steps=int(ep_steps))
 
 

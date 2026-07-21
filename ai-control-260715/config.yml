@@ -17,6 +17,11 @@ demo_steps: 20             # denoising 스텝 (구 baseline은 100=느리지만 
 demo_use_ema: true          # EMA 가중치 (이 번들 모델은 true)
 demo_video: video2          # room2(image_bottom) 카메라 스트림
 # demo_goal_lidar: ""       # glidar 체크포인트용 docked-pose scan .npy (빈값=기본경로)
+# 궤적 temporal-consistency warm-start (2026-07-21, rollout_core 공유). 기본 꺼짐
+# — 오프라인 K 스윕(§13)에서 최적값 정한 뒤 켤 것. warm_start=true면 이전 계획을
+# 다음 샘플링의 prior로 재사용해 프레임 간 궤적을 잇는다.
+# demo_warm_start: false     # true=이전 계획 warm-start (SDEdit식 부분 재노이즈)
+# demo_warm_level: 0.3       # 재노이즈 강도 (0=이전계획 그대로, 1=순수 노이즈=끔과 동일)
 
 # ── 윈도우 / 동기화 ──
 window_size: 60

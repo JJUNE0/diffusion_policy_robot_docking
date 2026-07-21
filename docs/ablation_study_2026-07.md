@@ -352,7 +352,7 @@ held-out 3개, MAX_STEPS 250).
 | flow_goal_glidar_abs | from-scratch 20ep | 5.6 / 2.7 / 5.4 / 18.9 | 5.0 / 6.5 / 10.0 / 28.3 |
 | 구 baseline (100k) | 배치16, 100k step | - / 1.0 / 2.8 / 14.5 | - / 4.9 / 9.6 / 26.4 |
 | `graft_g5_full` | graft, +풀스택(aux+AWR) | 5.9 / 2.6 / 2.9 / 15.9 | 5.6 / 4.9 / 8.9 / 21.6 |
-| `graft_goalimg_lidar` | graft, +goal-img+goal-lidar | - / **0.7** / 2.0 / 7.7 | - / 2.1 / **3.6** / 9.9 |
+| `graft_goalimg_lidar` | graft, +goal-img+**lidar**+goal-lidar | - / **0.7** / 2.0 / 7.7 | - / 2.1 / **3.6** / 9.9 |
 | `graft_goalimg` | graft, +goal-img만 | - / 0.9 / 1.7 / 11.0 | - / **1.9** / 4.0 / 10.9 |
 | `graft_g0_awr` | graft, +AWR(v1)만 | - / 1.2 / 2.4 / 16.4 | - / 3.8 / 6.2 / 22.9 |
 | `graft_g0_control` | graft, control(구 baseline 재학습) | - / 1.5 / 4.3 / 8.4 | - / 2.4 / 4.5 / 10.4 |
@@ -665,15 +665,19 @@ total_loss = denoise_loss + aux_weight · aux_loss
 > 학습 로그는 `outputs/train_graft_*.log`, 평가 원본은 `test/out/weekend/graft_*.json`.
 
 > 07-18: `speedup_frac`(시연보다 같은 방향으로 빠르거나 같은 프레임 비율, §7.6) 열 추가.
+> 07-21: "추가된 것" 열을 lidar/goal-image/goal-lidar 유무가 항상 명시되도록 정정 — 이전 판본은
+> "생략하면 다른 셀에 이미 있으니 안 적는다"는 관례였는데, `graft_goalimg_lidar`처럼 **그 셀에서
+> lidar가 처음 켜지는 경우** 오해를 샀다("lidar 입력 자체가 없는 줄 알았다"). 아래는 각 config.yaml
+> 실측 기준(`use_goal`/`use_lidar_points`/`use_goal_lidar`/`use_aux_pose`/`adv_weight`).
 
-| 실험 | 추가된 것 | train (mm/ADE/FDE/velRMSE/speedup) | held-out (mm/ADE/FDE/velRMSE/speedup) |
+| 실험 | 추가된 것 (goal-image / lidar / goal-lidar / aux / AWR) | train (mm/ADE/FDE/velRMSE/speedup) | held-out (mm/ADE/FDE/velRMSE/speedup) |
 |---|---|---|---|
-| `graft_g5_full` | 풀스택: goal-image + lidar + aux + goal-lidar + AWR(precision) | 5.9 / 2.6 / 2.9 / 15.9 / 41% | 5.6 / 4.9 / 8.9 / 21.6 / 44% |
-| `graft_goalimg_lidar` | + goal-image + goal-lidar 함께 추가 (aux 없음, AWR 없음) | - / 0.7 / 2.0 / 7.7 / 33% | - / 2.1 / 3.6 / 9.9 / 30% |
-| `graft_goalimg` | + goal-image 조건화만 추가 | - / 0.9 / 1.7 / 11.0 / 26% | - / 1.9 / 4.0 / 10.9 / 28% |
-| `graft_g0_awr` | + AWR(precision)만 추가 — AWR 자체 효과만 분리 | - / 1.2 / 2.4 / 16.4 / 42% | - / 3.8 / 6.2 / 22.9 / 41% |
-| `graft_g0_control` | control: 새 브랜치 없음, AWR 없음 (구 baseline + 배치/에폭만 변경) | - / 1.5 / 4.3 / 8.4 / 34% | - / 2.4 / 4.5 / 10.4 / 26% |
-| `graft_goallidar` | + LiDAR 브랜치 + goal-lidar 조건화 추가 (goal-image 없음) | - / 2.4 / 6.8 / 7.4 / 51% | - / 2.1 / 3.9 / 9.1 / 33% |
+| `graft_g5_full` | goal-image ✓ / lidar ✓ / goal-lidar ✓ / aux ✓ / AWR(precision) ✓ — 풀스택 | 5.9 / 2.6 / 2.9 / 15.9 / 41% | 5.6 / 4.9 / 8.9 / 21.6 / 44% |
+| `graft_goalimg_lidar` | goal-image ✓ / **lidar ✓** / goal-lidar ✓ / aux ✗ / AWR ✗ | - / 0.7 / 2.0 / 7.7 / 33% | - / 2.1 / 3.6 / 9.9 / 30% |
+| `graft_goalimg` | goal-image ✓ / lidar ✗ / goal-lidar ✗ / aux ✗ / AWR ✗ — goal-image 단독 | - / 0.9 / 1.7 / 11.0 / 26% | - / 1.9 / 4.0 / 10.9 / 28% |
+| `graft_g0_awr` | goal-image ✗ / lidar ✗ / goal-lidar ✗ / aux ✗ / AWR(precision) ✓ — AWR 단독 | - / 1.2 / 2.4 / 16.4 / 42% | - / 3.8 / 6.2 / 22.9 / 41% |
+| `graft_g0_control` | 전부 ✗ — control(구 baseline 배치/에폭만 변경, 신규 브랜치 없음) | - / 1.5 / 4.3 / 8.4 / 34% | - / 2.4 / 4.5 / 10.4 / 26% |
+| `graft_goallidar` | goal-image ✗ / **lidar ✓** / goal-lidar ✓ / aux ✗ / AWR ✗ | - / 2.4 / 6.8 / 7.4 / 51% | - / 2.1 / 3.9 / 9.1 / 33% |
 
 <!-- GRAFT6:graft_goallidar -->
 
@@ -827,7 +831,7 @@ GPU 슬롯 필요). 진단 스크립트: `probe_condvec.py`(스크래치, repo �
    가장 믿을 만한 신호인데, 이건 **flow 정책의 매 스텝 행동이 훨씬 더 떨린다(fluctuation)**는 뜻이다.
    원인 후보: flow는 euler 20-step으로 샘플링하고 ddpm은 dpmsolver++_2M 100-step으로 샘플링한다 —
    같은 20-step로 맞춰 재평가하기 전엔 "flow objective가 나쁜 것"과 "20-step ODE 적분이 거친 것"이
-   섞여 있다. (§12의 fluctuation 논의와 직접 연결.)
+   섞여 있다. (§13의 action-chunking/warm-start 진단과 직접 연결 — 결과는 예상과 달랐다.)
 3. **warm-start(6.5cm)가 scratch(12.1cm)보다 뚜렷이 낫다** — loss 스파이크(step 90 ~1.0)에도
    불구하고, DDPM 목적함수로 학습된 가중치 속 표현(조건 융합, "dock 접근" 일반 지식)이 랜덤 초기화보다
    훨씬 나은 출발점이었다. objective mismatch가 "전혀 못 쓸 정도"는 아니었다.
@@ -841,3 +845,143 @@ GPU 슬롯 필요). 진단 스크립트: `probe_condvec.py`(스크래치, repo �
 <!-- WAVE3:graft_flow_control -->
 
 <!-- WAVE3:graft_flow_scratch_control -->
+
+---
+
+## 13. Action chunking + temporal-consistency warm-start (2026-07-21, 추론 전용 진단)
+
+**동기**: §11.1에서 flow의 velRMSE가 ddpm보다 ~3배 나쁜 게 관찰됐고, 매 프레임 독립적으로
+순수 노이즈에서 재샘플링하는 게 fluctuation의 원인 후보로 지목됐다(사용자 제안). 재학습 없이
+**이미 학습된 체크포인트에 그대로 적용 가능한 추론 기법**이라 바로 검증했다.
+
+**구현** (2026-07-21 리팩터: rollout 코어를 `cleandiffuser/rollout_core.py`
+`RolloutController`로 통합 — 아래 "13.1 rollout 통합" 참고. 3개 사본이 모두 이 한 곳을 공유):
+- `EVAL_CHUNK_K`: K프레임마다 한 번만 재샘플링하고 그 계획의 `[0:K]`를 그대로 실행(Diffusion
+  Policy 표준 action chunking). 기본값 1 = 기존과 완전 동일(레거시 경로 보존, 아래로 검증됨).
+- `EVAL_WARM_START` + `EVAL_WARM_LEVEL`: 순수 노이즈 대신 **이전 계획을 K칸 shift한 것**을
+  `warm_start_reference`로 cleandiffuser의 기존 SDEdit식 API(`warm_start_reference`,
+  `warm_start_forward_level`)에 넘겨 부분 재노이즈 후 재적분 — DDPM/rectified-flow 양쪽
+  backbone에 이미 구현돼 있던 기능을 재사용했다(직접 노이즈 블렌딩을 새로 짤 필요 없었음).
+- **레거시 경로 무결성 검증**: `EVAL_CHUNK_K=1, EVAL_WARM_START=0`(기본값)일 때
+  `graft_g0_control` held-out ep0을 재실행해 정확히 기존 기록치(ADE 7.0 / FDE 9.3 / velRMSE
+  0.0156)와 동일함을 확인 — 기존 §4/§9/§10/§11의 모든 결과는 이 변경으로 전혀 손상되지 않는다.
+
+**테스트 설정**: `EVAL_CHUNK_K=4`(≈0.13초 청크), `EVAL_WARM_START=1`, `EVAL_WARM_LEVEL=0.3`
+(라이브러리 기본값). 3개 체크포인트, held-out 10 episode:
+
+| 체크포인트 | 방식 | ADE | FDE | velRMSE | speedup |
+|---|---|---|---|---|---|
+| `graft_g0_control` (ddpm) | 기존(K=1) | 2.4 | 4.5 | 10.4 | 26% |
+| `graft_g0_control` (ddpm) | K=4+warm | 2.1 | 4.3 | **12.0** | 28% |
+| `graft_gil_aux` (ddpm+aux) | 기존(K=1) | 1.9 | 5.0 | 12.2 | 30% |
+| `graft_gil_aux` (ddpm+aux) | K=4+warm | 2.9 | 4.5 | **15.2** | 33% |
+| `graft_flow_control` (flow) | 기존(K=1) | 6.0 | 6.5 | 27.0 | 32% |
+| `graft_flow_control` (flow) | K=4+warm | 6.1 | 6.3 | **28.1** | 33% |
+
+**결과 — 가설과 반대 방향, 솔직하게 기록한다**: FDE는 세 체크포인트 전부 근소하게 개선됐지만
+(4.5→4.3, 5.0→4.5, 6.5→6.3), **velRMSE는 셋 다 오히려 악화됐다**(10.4→12.0, 12.2→15.2,
+27.0→28.1) — flow의 velRMSE 문제를 청킹/warm-start가 줄여줄 거라는 가설이 이 설정(K=4)에서는
+**기각**된다.
+
+**왜 그런가 (사후 분석)**: velRMSE는 "출력이 프레임마다 얼마나 흔들리나"가 아니라 **"매 프레임
+시연과 얼마나 다른가"를 재는 지표**다 — 이 둘은 다르다. 청킹은 재샘플링 노이즈로 인한 "흔들림"은
+줄이지만, 그 대가로 K프레임 동안 **관측을 갱신하지 않고 옛 계획을 그대로 실행**하므로, 시연의
+순간 속도가 그 사이 빠르게 바뀌면 "정확하지만 한 박자 늦은" 궤적이 된다 — 부드럽지만 시연과는
+더 어긋나는 결과. FDE(경로 전체 관점)는 이 지연을 덜 벌하는 반면, velRMSE(프레임별 정확도)는
+그대로 반영한다. 즉 **"흔들림 감소"와 "시연 대비 정확도"는 이 실험에서 트레이드오프 관계였다.**
+
+**한계 — 결론을 내리기엔 이르다**:
+1. K=4·warm_level=0.3 **한 조합만** 테스트했다. 더 작은 K(2)나 다른 warm_level에서는 결과가
+   다를 수 있다 — 특히 flow의 20-step 샘플링처럼 스텝이 적은 backbone은 K를 키우는 대가가 더
+   클 수도, 작을 수도 있다.
+2. FDE가 일관되게 개선된 건 무시할 신호가 아니다 — "매 프레임 정확도는 손해 보되 전체 경로
+   형태는 나아진다"는 것도 실기에서 의미 있을 수 있다(폐루프에서는 어차피 재계획이 걸리므로).
+3. 이건 여전히 open-loop 오프라인 지표다(§4.1/§2.12 한계 동일 적용) — 실제 반응성 저하(도킹
+   직전 갑작스러운 변화에 K프레임 동안 못 반응)는 이 지표 체계로는 안 잡힌다.
+
+**다음 검증 후보**: K를 2로 낮춰 재시도, 또는 거리 기반 가변 K(원거리에서만 청킹, 근거리는
+K=1)로 반응성 손실 없이 velRMSE 개선을 노려보는 것 — 사용자 제안대로 `adv_gate_near/far`
+패턴 재사용 가능.
+
+### 13.1 rollout 3-사본 통합 리팩터 (2026-07-21)
+
+**문제**: "샘플 N개 → 집계(mean/medoid) → EMA → chunk/warm-start" 로직이 **세 곳에 복붙**돼
+계속 어긋나고 있었다:
+- `test/eval_openloop_metrics.py` (h5+DINO캐시, 오프라인 평가)
+- `scripts/inference_ema_v2.py` (dataset, 오프라인 단일 에피소드 시각화)
+- `ai-control-260715/ai_models/plugins/run_postech_docking_demo.py` (실시간 스트림 배포)
+
+세 곳의 차이는 **context를 만드는 부분(데이터 소스)과 몇 개 노브(mean vs medoid, 실시간 노드의
+wall-clock EMA reset)뿐**이고 핵심 샘플링 로직은 동일했다.
+
+**해결**: 핵심을 `cleandiffuser/rollout_core.py`의 `RolloutController`로 추출. 각 호출부는 자기
+context-building 루프만 유지하고 `ctrl.plan(context, ...)`에 위임한다. 위치를 `cleandiffuser/`로
+잡은 이유: 배포 번들이 `cleandiffuser/`를 통째 복사하므로 재동기화 시 자동 반영된다(번들에도
+같은 파일을 복사해 둠). 집계는 `agg="mean"|"medoid"` 파라미터로 각 호출부의 기존 동작을 보존.
+
+**⚠️ 배포 인터페이스 정정**: "`run_postech_docking_demo.py` 대신 `inference_ema_v2.py`로 바꿔
+돌린다"는 문자 그대로는 불가능하다 — 전자는 노드 프레임워크가 실시간 스트림을 넘겨주는
+**플러그인**(`inference_fn(window_snapshot, ...)`)이고, 후자는 h5를 읽는 **Hydra CLI**라
+실시간 데이터를 못 받는다. 그래서 "파일 교체"가 아니라 **rollout 코어 공유**로 같은 목적(코드
+변경이 배포에도 반영·테스트됨)을 달성했다.
+
+**무결성 검증** (수치로 확인, 회귀 방지):
+- **오프라인 eval**: 리팩터 후 `graft_g0_control` held ep0이 레거시(ADE 7.0/FDE 9.3/velRMSE
+  0.0156)·chunk4+warm(ADE 5.9/FDE 8.1/velRMSE 0.0197) **양쪽 다 바이트 동일** 재현.
+- **배포 플러그인**: 집계+EMA(+gap reset) 로직을 old 인라인 공식과 고정 샘플·3연속 호출(정상
+  2회 + 0.5초 갭 reset 1회)로 비교 → medoid·mean 둘 다 **max|new−old| = 0.00e+00**. 실시간
+  스트림 없이 검증 가능한 부분(샘플링 호출 자체는 안 바꿈)은 전부 동일 확인.
+
+**남은 배포 작업(별도)**: 번들은 7/15 스냅샷이라 repo와 이미 diverge(aux_feedback 없음). 이번
+`rollout_core.py` 추가는 additive(새 파일)라 안전하지만, 실제 현장 배포 전엔 번들 전체를 최신
+repo로 **재동기화**해야 한다. `config.yml`에 `demo_warm_start`/`demo_warm_level` 노브도
+추가해 뒀다(기본 꺼짐 — §13 K 스윕으로 최적값 정한 뒤 켤 것).
+
+---
+
+## 14. Inference hyperparameter test — action-chunking K × warm-start 스윕 (2026-07-21)
+
+**목적**: §13에서 K=4 **한 점**만 봤을 때 velRMSE가 오히려 나빠졌다 — 그 결과가 "청킹은
+근본적으로 해롭다"는 뜻인지, 아니면 "이 특정 K가 너무 컸다"는 뜻인지 구분이 안 됐다. §9/§10
+held-out 성능 상위 3개 모델에 K∈{2,8,16} × warm-start{off,on} 전수 스윕(18 run)으로 확인했다.
+
+**대상 모델** (§9/§10 기준 최상위권): `graft_goallidar`, `graft_goalimg_lidar`,
+`graft_lidar_goalimg`. **방식**: §13.1에서 통합한 `cleandiffuser/rollout_core.py`
+(`RolloutController`)를 그대로 사용 — 이 스윕 자체가 리팩터의 실사용 검증이기도 하다.
+held-out 10 episode, `EVAL_WARM_LEVEL=0.3` 고정.
+
+![K x warm-start sweep](img/ksweep.png)
+
+| 모델 | 지표 | K=1(기존) | K=2 off | K=2 on | K=8 off | K=8 on | K=16 off | K=16 on |
+|---|---|---|---|---|---|---|---|---|
+| goallidar | ADE | 2.1 | **1.7** | **1.3** | 2.6 | 2.6 | 3.2 | 3.3 |
+| goallidar | FDE | 3.9 | 3.4 | **3.0** | 5.3 | 5.1 | 6.5 | 6.9 |
+| goallidar | velRMSE | 9.1 | 7.2 | **7.3** | 21.0 | 18.9 | 27.9 | 24.4 |
+| goalimg_lidar | ADE | 2.1 | 1.7 | **1.5** | 2.8 | 2.7 | 3.9 | 4.3 |
+| goalimg_lidar | FDE | 3.6 | 3.5 | **3.2** | 6.3 | 7.1 | 8.7 | 9.4 |
+| goalimg_lidar | velRMSE | 9.9 | 8.1 | **7.1** | 20.5 | 20.6 | 27.1 | 26.5 |
+| lidar_goalimg | ADE | 1.9 | 1.8 | **1.6** | 2.3 | 2.9 | 3.7 | 4.6 |
+| lidar_goalimg | FDE | 3.8 | 3.9 | **3.4** | 4.6 | 5.9 | 6.1 | 9.2 |
+| lidar_goalimg | velRMSE | 10.4 | 8.3 | **7.9** | 33.9 | 18.4 | 37.2 | 23.4 |
+
+**결과 — §13의 답이 나왔다: "청킹 자체가 나쁜 게 아니라 K=4가 이미 임계점을 넘었던 것"**
+
+1. **K=2는 3개 모델·3개 지표 전부에서 K=1(기존)보다 개선** — ADE/FDE/velRMSE 모두 예외 없이
+   낮다. 특히 velRMSE는 §13에서 "청킹이 악화시킨다"고 봤던 바로 그 지표인데, 여기선 오히려
+   **9~10 → 7대**로 뚜렷이 좋아진다. §13의 K=4 결과(다른 모델 3개로 테스트)와 방향이 반대인 게
+   아니라, **K=2와 K=4~8 사이 어딘가에 "임계점"이 있고 K=4가 이미 그 너머였다**는 게 정확한
+   해석이다.
+2. **K=8부터 급격히 나빠지고, K=16은 전 지표 최악** — velRMSE가 K=16에서 24~37로, K=1 대비
+   **2.5~3.6배** 악화된다. §13에서 설명한 메커니즘(청크가 길수록 관측 갱신 없이 옛 계획을 오래
+   실행 → 시연의 빠른 변화를 놓침)이 K가 커질수록 누적된다는 걸 정량적으로 확인.
+3. **warm-start는 K=2에서 대체로 도움, K가 커지면 모델마다 갈림** — K=2에서는 3개 모델 전부
+   warm ON이 ADE/FDE를 개선(예: goallidar ADE 1.7→1.3). K=8/16에서는 velRMSE는 warm ON이 종종
+   더 나은데(goallidar/lidar_goalimg), ADE/FDE는 오히려 warm ON이 더 나쁜 경우가 있다
+   (goalimg_lidar/lidar_goalimg) — "오래된 계획을 억지로 이어 붙이는" warm-start가 K가 커질수록
+   과거에 갇히는 위험도 커지는 것으로 보인다.
+
+**결론**: **K=2 + warm-start ON**이 이 3개 모델 모두에서 K=1 기본값을 지표 전반에서 능가하는
+유일한 조합이다. 다음 단계로 K=3~4 사이를 더 세분해서 정확한 임계점을 좁히는 것도 가능하지만,
+지금 데이터만으로도 **"청킹은 작은 K에서만 이득, K는 절대 크게 잡지 말 것"**이라는 실용적
+결론은 충분히 신뢰할 만하다(3개 모델에서 일관됨). 배포 반영 전 이 결과도 여전히 open-loop
+오프라인 지표라는 한계(§4.1/§2.12)는 동일하게 적용된다.

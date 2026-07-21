@@ -123,6 +123,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         use_aux_pose: bool = False,
         use_room1: bool = True,
         use_goal_lidar: bool = False,
+        use_aux_feedback: bool = False,
     ):
         super().__init__()
         # Single-camera mode: use_room1=False drops the room1 (image_top) branch
@@ -218,6 +219,18 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 # fallback (no lidar): pooled-readout MLP head
                 self.aux_head = nn.Sequential(
                     nn.Linear(d_model, 128), nn.GELU(), nn.Linear(128, 4))
+        # Aux-pose FEEDBACK (2026-07-21): fold the ICP-distilled dock-pose
+        # estimate [x,y,sin,cos] back into the readout the diffusion trunk is
+        # conditioned on, so the LAST-approach trajectory has an explicit dock
+        # target to converge toward (instead of aux only shaping representation
+        # via its loss). Requires use_aux_pose (needs _aux_pred). The projection
+        # is zero-initialized so training starts as an identity no-op and only
+        # departs from the aux-only baseline if the feedback actually helps.
+        self.use_aux_feedback = use_aux_feedback and use_aux_pose
+        if self.use_aux_feedback:
+            self.aux_feedback_proj = nn.Linear(4, d_model)
+            nn.init.zeros_(self.aux_feedback_proj.weight)
+            nn.init.zeros_(self.aux_feedback_proj.bias)
         self._aux_pred = None
         self._point_tokens = None        # per-point tokens for the cross-attn head
         self._point_mask = None
@@ -436,6 +449,12 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 self._aux_pred = self.aux_pose_head(self._point_tokens, self._point_mask, out)
             else:
                 self._aux_pred = self.aux_head(out)
+
+        # Fold the dock-pose estimate back into the conditioning readout so the
+        # trajectory generator gets an explicit "converge here" target. Zero-init
+        # proj => starts as a no-op identical to the aux-only baseline.
+        if self.use_aux_feedback and self._aux_pred is not None:
+            out = out + self.aux_feedback_proj(self._aux_pred)
 
         if mask is not None:
             out = out * mask.view(b, 1).float()

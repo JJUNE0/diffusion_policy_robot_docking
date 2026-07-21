@@ -330,35 +330,54 @@ held-out 3개, MAX_STEPS 250).
 `vel_progress_rmse`(vx 비대칭)·`speedup_frac`은 §4.2 참고 — AWR 실험 전용이라 이 표에는 아직
 포함하지 않음(재현/암기 성적표에 시연-초과 지표를 섞으면 해석이 꼬인다, [[offline_metrics]] §3).
 
-| 실험 | 학습 방식 | train (mm/ADE/FDE/velRMSE) | **held-out (mm/ADE/FDE/velRMSE)** |
+**07-21: 모든 실험(§2 주말큐 + 구 baseline + §9 graft6 + §10 wave2 + §11 wave3)을 한 표로 통합.**
+각 열의 **최고값(=최소, 4지표 모두 낮을수록 좋음)을 bold** 처리했다. ⚠️ 세대·아키텍처가 다른
+행들이 섞여 있으므로(2카메라 vs 1카메라, aux head 유무, aux_relative vs 절대 타깃, warm-start
+계보) bold는 "표 전체 최솟값"일 뿐 **공정한 우열이 아니다** — 특히 mm 열은 측정 공간이 달라
+(§2.9-2.10) 세대 간 직접 비교 금지. 해석은 반드시 각 절(§2/§9/§10/§11) 및 §4.1 통계력 주의와
+함께 볼 것.
+
+| 실험 | 학습 방식 | train (mm/ADE/FDE/velRMSE) | held-out (mm/ADE/FDE/velRMSE) |
 |---|---|---|---|
 | ddpm_goal_auxw | warm-start(ddpm) | 6.0 / 4.3 / 7.1 / 34.7 | 5.3 / 8.3 / 15.3 / 46.2 |
 | flow_goal_auxw | warm-start(base) | 5.9 / 4.5 / 4.8 / 21.0 | 5.2 / 5.7 / 11.3 / 25.1 |
-| flow_goal_auxw2 | warm-start +10ep | 5.4 / 2.7 / **4.0** / 22.6 | 4.6 / 7.7 / 15.0 / 29.3 (과적합) |
+| flow_goal_auxw2 | warm-start +10ep | 5.4 / 2.7 / 4.0 / 22.6 | **4.6** / 7.7 / 15.0 / 29.3 (과적합) |
 | flow_goal_cfg07 | warm-start | 5.6 / 2.6 / 5.8 / 21.1 | 4.8 / 8.3 / 12.3 / 26.6 |
 | flow_goal_auxw_w2 | warm-start | 5.7 / 3.2 / 5.6 / 21.1 | 4.8 / 7.3 / 12.4 / 25.8 |
-| flow_goal_p4 | warm-start | 5.3 / 2.8 / 6.3 / 21.3 | 4.9 / 8.6 / 12.8 / 26.4 |
-| **flow_goal_scratch20** | **from-scratch 20ep** | 5.7 / 2.3 / 6.7 / **19.1** | **5.2 / 5.2 / 11.1** / 25.5 ⭐ |
-| flow_goal_nolidar | from-scratch 10ep | **7.3** / 4.3 / 9.6 / 21.0 | **6.9** / 5.0 / 8.6 / 28.4 |
-| flow_goal_nogoal | from-scratch 10ep | 6.6 / 6.3 / 11.0 / 27.3 | 6.2 / **6.9** / **15.0** / 29.2 |
-| flow_goal_glidar | from-scratch 20ep | 6.9 / 3.1 / 4.7 / 19.2 | **9.7** / 5.9 / 11.4 / 27.6 |
-| flow_goal_glidar_abs | from-scratch 20ep | 5.6 / 2.7 / 5.4 / **18.9** | 5.0 / 6.5 / 10.0 / 28.3 |
-| **구 baseline (100k)** | 배치16, 100k step | 측정불가 / **1.0** / **2.8** / 14.5 | 측정불가 / 4.9 / 9.6 / 26.4 |
-| `graft_g5_full` | graft, 구 baseline+풀스택 | 5.9 / 2.6 / 2.9 / 15.9 | 5.6 / 4.9 / 8.9 / 21.6 |
-| `graft_goalimg_lidar` | graft, +goal-img+goal-lidar | 측정불가 / 0.7 / 2.0 / 7.7 | 측정불가 / 2.1 / 3.6 / 9.9 |
-| `graft_goalimg` | graft, +goal-img만 | 측정불가 / 0.9 / 1.7 / 11.0 | 측정불가 / 1.9 / 4.0 / 10.9 |
-| `graft_g0_awr` | graft, +AWR(precision)만 | 측정불가 / 1.2 / 2.4 / 16.4 | 측정불가 / 3.8 / 6.2 / 22.9 |
-| `graft_g0_control` | graft, 구 baseline 배치/에폭만 변경 | 측정불가 / 1.5 / 4.3 / 8.4 | 측정불가 / 2.4 / 4.5 / 10.4 |
-| `graft_goallidar` | graft, +lidar+goal-lidar만 | 측정불가 / 2.4 / 6.8 / 7.4 | 측정불가 / 2.1 / 3.9 / 9.1 |
+| flow_goal_p4 | warm-start | **5.3** / 2.8 / 6.3 / 21.3 | 4.9 / 8.6 / 12.8 / 26.4 |
+| flow_goal_scratch20 | from-scratch 20ep | 5.7 / 2.3 / 6.7 / 19.1 | 5.2 / 5.2 / 11.1 / 25.5 |
+| flow_goal_nolidar | from-scratch 10ep | 7.3 / 4.3 / 9.6 / 21.0 | 6.9 / 5.0 / 8.6 / 28.4 |
+| flow_goal_nogoal | from-scratch 10ep | 6.6 / 6.3 / 11.0 / 27.3 | 6.2 / 6.9 / 15.0 / 29.2 |
+| flow_goal_glidar | from-scratch 20ep | 6.9 / 3.1 / 4.7 / 19.2 | 9.7 / 5.9 / 11.4 / 27.6 |
+| flow_goal_glidar_abs | from-scratch 20ep | 5.6 / 2.7 / 5.4 / 18.9 | 5.0 / 6.5 / 10.0 / 28.3 |
+| 구 baseline (100k) | 배치16, 100k step | - / 1.0 / 2.8 / 14.5 | - / 4.9 / 9.6 / 26.4 |
+| `graft_g5_full` | graft, +풀스택(aux+AWR) | 5.9 / 2.6 / 2.9 / 15.9 | 5.6 / 4.9 / 8.9 / 21.6 |
+| `graft_goalimg_lidar` | graft, +goal-img+goal-lidar | - / **0.7** / 2.0 / 7.7 | - / 2.1 / **3.6** / 9.9 |
+| `graft_goalimg` | graft, +goal-img만 | - / 0.9 / 1.7 / 11.0 | - / **1.9** / 4.0 / 10.9 |
+| `graft_g0_awr` | graft, +AWR(v1)만 | - / 1.2 / 2.4 / 16.4 | - / 3.8 / 6.2 / 22.9 |
+| `graft_g0_control` | graft, control(구 baseline 재학습) | - / 1.5 / 4.3 / 8.4 | - / 2.4 / 4.5 / 10.4 |
+| `graft_goallidar` | graft, +lidar+goal-lidar | - / 2.4 / 6.8 / **7.4** | - / 2.1 / 3.9 / **9.1** |
+| `graft_lidar` | wave2, +lidar 단독 | - / 1.1 / 1.4 / 8.4 | - / 2.5 / 3.9 / 10.0 |
+| `graft_goallidar_aux` | wave2, +lidar+goal-lidar+aux | 14.1 / 2.1 / 8.4 / 10.1 | 13.2 / 2.4 / 5.0 / 12.4 |
+| `graft_gil_aux` | wave2, +풀조건+aux (g5−AWR) | 5.8 / 0.9 / 1.5 / 8.0 | 5.1 / **1.9** / 5.0 / 12.2 |
+| `graft_lidar_goalimg` | wave2, +goal-img+lidar | - / 1.7 / 1.7 / 9.0 | - / **1.9** / 3.8 / 10.4 |
+| `graft_gil_awr_p2` | wave2, +AWR(v2) | - / 2.6 / 2.5 / 15.5 | - / 3.6 / 3.7 / 22.0 |
+| `graft_gil_awr_p1` | wave2, +AWR(v1) | - / 2.0 / **1.3** / 13.8 | - / 4.1 / 5.3 / 20.7 |
+| `graft_flow_control` | wave3, control의 rectified-flow | - / 2.0 / 3.0 / 22.4 | - / 6.0 / 6.5 / 27.0 |
+| `graft_flow_scratch_control` | wave3, flow scratch(lr 1e-4) | - / 2.4 / 3.1 / 22.5 | - / 7.1 / 12.1 / 33.1 |
+| `graft_flow_goalimg_lidar` | wave3, goalimg_lidar의 flow | - / 3.6 / 3.2 / 22.4 | - / 5.3 / 7.7 / 28.1 |
 
-> **graft6 행(07-17) 상세는 §9 참고** — 배치 128, 10 epoch, 구 baseline(100k)에서 warm-start.
-> `graft_g5_full` 외 5개는 aux head가 없어(`use_aux_pose=false`) mm 열 측정불가는 §2.7/§2.8의
-> nolidar/nogoal과 같은 이유(빈칸 아님, "다른 지표"). `speedup_frac` 등 AWR 전용 비대칭 지표는
-> 이 표에 포함하지 않음(위 §4 서두 원칙과 동일) — §9 표에서 확인.
+> **열별 최고값(bold)**: train mm **5.3**(p4) / ADE **0.7**(goalimg_lidar) / FDE **1.3**(awr_p1) /
+> velRMSE **7.4**(goallidar) · held mm **4.6**(auxw2) / ADE **1.9**(goalimg·gil_aux·lidar_goalimg) /
+> FDE **3.6**(goalimg_lidar) / velRMSE **9.1**(goallidar).
 >
-> 구 baseline은 아키텍처가 달라(2카메라, aux head 없음) 표의 다른 행과 직접 비교 시 §2.12를
-> 반드시 함께 읽을 것 — mm 열은 aux head 부재로 측정 자체가 불가능(빈칸 아님, "다른 지표"），
-> ADE/FDE는 표기상 낮아 보이지만 실기(07-15)에서는 이 모델만 도킹에 성공했다.
+> ⚠️ **mm 열 주의**: `-`는 aux head 부재(`use_aux_pose=false`)로 측정 자체 불가(§2.7/§2.8), 빈칸이
+> 아니라 "다른 지표". `graft_goallidar_aux`의 13.2mm는 결함이 아니라 goal-image 없이 학습된 효과
+> (§10.1 진단 참고). 세대 간 mm 직접 비교는 측정 공간 차이(§2.9-2.10)로 무의미.
+>
+> ⚠️ **구 baseline / graft 행 주의**: 아키텍처가 달라(2카메라, aux 유무) §2.12를 함께 볼 것 —
+> 오프라인 지표는 낮아도 실기(07-15)에서는 구 baseline만 성공했다. graft6=§9, wave2=§10,
+> wave3=§11 각 절의 해석·통계력 주의(§4.1)와 반드시 함께 읽을 것.
 
 **velRMSE로 본 추가 통찰**: scratch20과 glidar_abs가 train velRMSE 최저(18.9~19.1)인데, 이 둘이
 FDE 기준으로도 상위권이던 것과 방향이 일치 — velRMSE는 누적이 없어(§4.1) FDE보다 믿을 만한
@@ -695,3 +714,130 @@ total_loss = denoise_loss + aux_weight · aux_loss
   방향이 일치하긴 한다 — 두 개의 독립적인 관측(이전 실기 실패 + 이번 오프라인 열화)이 같은 곳을
   가리키므로, **AWR을 다음 실기 검증의 최우선 용의자로 삼는 것을 권장**. `g0_control` vs
   `g0_awr` 두 체크포인트만 골라 closed-loop로 재검증하면 저비용으로 확증 가능.
+
+---
+
+## 10. Wave2 — lidar/aux 단독분리 + AWR v2 (2026-07-18)
+
+> `test/queue_wave2.sh` 기준. 전부 `outputs/checkpoint_step_100000.pt`에서 warm-start, 10 epoch,
+> batch_size=128, num_workers=4, live 2-camera DINO. §9의 두 빈틈을 메운다: (1) lidar 입력과
+> goal-lidar 조건화가 항상 같이 묶여 있어서 각각의 단독 효과가 분리 안 됐음, (2) aux head가
+> `g5_full`에만 있어서(AWR과 뒤섞임) aux 단독 효과와 near_mm이 다른 셀에서 측정 불가였음.
+> `graft_gil_aux` = g5_full − AWR로, §9.1에서 지목된 "g5_full 악화는 AWR 탓" 가설을 직접 확증.
+> `graft_gil_awr_p2`는 새 `adv_mode=precision_v2`(속도항 제거 + 근거리 align만 게이트 해제)로 AWR
+> 자체를 재설계해 정밀도 지향 reward가 여전히 궤적을 해치는지 재검증.
+> 학습 로그는 `outputs/train_graft_*.log`, 평가 원본은 `test/out/weekend/graft_*.json`.
+
+| 실험 | 추가된 것 | train (mm/ADE/FDE/velRMSE/speedup) | held-out (mm/ADE/FDE/velRMSE/speedup) |
+|---|---|---|---|
+| `graft_gil_awr_p1` | goalimg_lidar + AWR(precision v1) — v1 식이 좋은 base도 해치는지 | - / 2.0 / 1.3 / 13.8 / 44% | - / 4.1 / 5.3 / 20.7 / 40% |
+| `graft_gil_awr_p2` | goalimg_lidar + AWR(precision_v2) — 속도항 제거+근거리 align 게이트 | - / 2.6 / 2.5 / 15.5 / 39% | - / 3.6 / 3.7 / 22.0 / 38% |
+| `graft_lidar_goalimg` | goal-image + lidar (goal-lidar 없음) — goal-lidar 한계 기여 분리 | - / 1.7 / 1.7 / 9.0 / 29% | - / 1.9 / 3.8 / 10.4 / 36% |
+| `graft_gil_aux` | goalimg+lidar+goal-lidar+aux = g5_full−AWR — g5 악화의 AWR 책임 확증 | 5.8 / 0.9 / 1.5 / 8.0 / 49% | 5.1 / 1.9 / 5.0 / 12.2 / 30% |
+| `graft_goallidar_aux` | lidar+goal-lidar+aux — goallidar 위 aux 효과 (near_mm 측정 가능) | 14.1 / 2.1 / 8.4 / 10.1 / 52% | 13.2 / 2.4 / 5.0 / 12.4 / 56% |
+| `graft_lidar` | lidar 입력 단독 (goal-lidar/aux 없음) — lidar 자체 효과 분리 | - / 1.1 / 1.4 / 8.4 / 29% | - / 2.5 / 3.9 / 10.0 / 28% |
+
+<!-- WAVE2:_header -->
+
+<!-- WAVE2:graft_lidar -->
+
+<!-- WAVE2:graft_goallidar_aux -->
+
+<!-- WAVE2:graft_gil_aux -->
+
+<!-- WAVE2:graft_lidar_goalimg -->
+
+<!-- WAVE2:graft_gil_awr_p2 -->
+
+<!-- WAVE2:graft_gil_awr_p1 -->
+
+### 10.1 정밀도 격차(`graft_gil_aux` 5.1mm vs `graft_goallidar_aux` 13.2mm) 원인 진단 (07-21)
+
+**질문**: 같은 aux head 설계(`CrossAttnPoseHead`, LiDAR 포인트에 cross-attend)인데 `use_goal`
+유무에 따라 near_mm이 2.5배 벌어진다 — goal-image 조건화가 정밀도를 간접적으로 돕는가?
+
+**진단 1 — cond_vec 자체를 0으로**: `CrossAttnPoseHead.forward(point_tokens, key_padding_mask,
+cond_vec)`에서 `q = pose_query + cond_vec`로 pose 쿼리가 만들어진다(전체 융합 표현이 쿼리에
+더해짐). `cond_vec`을 강제로 `None`(=0)으로 만들면:
+
+| | 정상 | cond_vec=0 |
+|---|---|---|
+| `graft_gil_aux` (use_goal=T) | 5.76mm | 365mm (붕괴) |
+| `graft_goallidar_aux` (use_goal=F) | 14.10mm | 559mm (붕괴) |
+
+→ cond_vec은 aux head에 필수지만, 여기엔 카메라·lidar·속도가 다 섞여 있어 goal 기여만 분리 못 함.
+
+**진단 2 (결정적) — goal-image "내용"만 제거**: `graft_gil_aux` 체크포인트에서 아키텍처는 그대로
+두고 `goal_mask=0`(NoMaD식 null 토큰으로 대체, goal-image 정보만 제거)으로 추론:
+
+| | 정상 (goal_mask=1) | goal_mask=0 |
+|---|---|---|
+| `graft_gil_aux` | 5.76mm | **5.75mm (변화 없음)** |
+
+**결론**: 이미 학습된 모델은 **추론 시점에 goal-image 정보를 실제로 안 쓰고 있다** — 그런데도
+`use_goal=True`로 학습된 모델이 정밀도가 좋다. 즉 격차는 **추론 시점 정보 효과가 아니라
+학습 시점(training-time) 효과**다: goal 브랜치가 학습 중 존재했다는 사실 자체(추가 파라미터
+용량, 또는 NoMaD `goal_mask` 확률적 드롭아웃의 정규화 효과)가 point encoder/fusion 가중치를
+다르게 조각했을 가능성이 높다. 두 후보(용량 vs 정규화)를 가르려면 goal 이미지를 노이즈/무작위
+프레임으로 바꿔치되 브랜치·드롭아웃 스케줄은 유지하는 학습을 하나 더 돌려야 한다(미실행,
+GPU 슬롯 필요). 진단 스크립트: `probe_condvec.py`(스크래치, repo 미포함).
+
+---
+
+## 11. Wave3 — rectified-flow backbone 그래프트 (2026-07-19)
+
+> `test/queue_wave3.sh` 기준. §9(graft6)의 `graft_g0_control`/`graft_goalimg_lidar`와 조건이 완전히
+> 동일하되 `diffusion_backbone=rectified_flow`만 다르다(나머지 ddpm 버전과 대조 가능). 여전히
+> `outputs/checkpoint_step_100000.pt`(DDPM으로 학습된 체크포인트)에서 warm-start — backbone은
+> `nn_diffusion_model`/`nn_condition`을 감싸는 디퓨전 프로세스 wrapper만 바꾸는 직교 플래그이므로
+> (`utils/setups.py` `_select_backbone` 주석: "flow vs ddpm ablation = one config flag, orthogonal
+> to the sensors") 가중치 자체는 backbone 무관하게 구조적으로 호환된다. GPU 슬롯은 3개/GPU 상한을
+> 지키기 위해 wave2 셀(`graft_lidar`/`graft_goallidar_aux`)이 끝난 자리를 이어받아 시작했다.
+> 학습 로그는 `outputs/train_graft_flow_*.log`, 평가 원본은 `test/out/weekend/graft_flow_*.json`.
+
+| 실험 | 추가된 것 | train (mm/ADE/FDE/velRMSE/speedup) | held-out (mm/ADE/FDE/velRMSE/speedup) |
+|---|---|---|---|
+| `graft_flow_scratch_control` | control의 rectified-flow, from-scratch(lr=1e-4) — warm-start 전이 confound 제거 대조군 | - / 2.4 / 3.1 / 22.5 / 41% | - / 7.1 / 12.1 / 33.1 / 28% |
+| `graft_flow_control` | control의 rectified-flow 버전 (backbone만 교체, 나머지 동일) | - / 2.0 / 3.0 / 22.4 / 36% | - / 6.0 / 6.5 / 27.0 / 32% |
+| `graft_flow_goalimg_lidar` | goalimg_lidar의 rectified-flow 버전 (backbone만 교체) | - / 3.6 / 3.2 / 22.4 / 34% | - / 5.3 / 7.7 / 28.1 / 35% |
+| `graft_flow_scratch_control` | control의 rectified-flow, from-scratch(lr=1e-4) — warm-start 전이 confound 제거 대조군 | - / 2.4 / 3.1 / 22.5 / 41% | - / 7.1 / 12.1 / 33.1 / 28% |
+| `graft_flow_control` | control의 rectified-flow 버전 (backbone만 교체, 나머지 동일) | - / 2.0 / 3.0 / 22.4 / 36% | - / 6.0 / 6.5 / 27.0 / 32% |
+
+<!-- WAVE3:_header -->
+
+
+### 11.1 해석 (07-21, wave3 3셀 전부 완료)
+
+**각 flow 셀을 조건이 동일한 ddpm 쌍(§9)과 나란히 놓으면 — 전부 flow가 나쁘다:**
+
+| 쌍 | ddpm (held ADE/FDE/velRMSE) | flow (held ADE/FDE/velRMSE) |
+|---|---|---|
+| control | **2.4 / 4.5 / 10.4** (`graft_g0_control`) | 6.0 / 6.5 / 27.0 (`graft_flow_control`) |
+| goalimg_lidar | **2.1 / 3.6 / 9.9** (`graft_goalimg_lidar`) | 5.3 / 7.7 / 28.1 (`graft_flow_goalimg_lidar`) |
+| control(scratch) | — | 7.1 / 12.1 / 33.1 (`graft_flow_scratch_control`) |
+
+**세 가지 관찰:**
+
+1. **이 그래프트 레시피(10ep, batch 128, 구 baseline 위)에서는 flow가 ddpm보다 전부 나쁘다** — 두
+   쌍 모두에서 일관적. §4의 `ddpm_goal_auxw` vs `flow_goal_auxw`(같은 세대 warm-start끼리, flow가
+   ADE/FDE/velRMSE 전부 압도)와 **정반대 방향.** §4 비교는 flow↔flow 계보의 동일 조건 대조였고,
+   지금은 (a) DDPM 체크포인트에서 넘어온 backbone 전이, (b) 10epoch라는 짧은 예산이 겹친다 — "이
+   레시피에서는 flow가 아직 덜 여물었다"고 읽는 게 정직하다.
+2. **velRMSE 격차가 유독 크다 — flow ~27~33 vs ddpm ~10** (거의 3배). velRMSE는 누적이 없어(§4.1)
+   가장 믿을 만한 신호인데, 이건 **flow 정책의 매 스텝 행동이 훨씬 더 떨린다(fluctuation)**는 뜻이다.
+   원인 후보: flow는 euler 20-step으로 샘플링하고 ddpm은 dpmsolver++_2M 100-step으로 샘플링한다 —
+   같은 20-step로 맞춰 재평가하기 전엔 "flow objective가 나쁜 것"과 "20-step ODE 적분이 거친 것"이
+   섞여 있다. (§12의 fluctuation 논의와 직접 연결.)
+3. **warm-start(6.5cm)가 scratch(12.1cm)보다 뚜렷이 낫다** — loss 스파이크(step 90 ~1.0)에도
+   불구하고, DDPM 목적함수로 학습된 가중치 속 표현(조건 융합, "dock 접근" 일반 지식)이 랜덤 초기화보다
+   훨씬 나은 출발점이었다. objective mismatch가 "전혀 못 쓸 정도"는 아니었다.
+
+**해석에 신중해야 할 이유**: 이미 §4.1/§2.12에서 반복 확인됐듯 이 오프라인 지표(특히 FDE, n이
+작음)는 실기 성능과의 상관이 약하다 — "flow가 이 레시피에서 나쁘다"는 오프라인 결론이지 실기
+결론이 아니다. 다만 velRMSE(#2)는 통계력이 있어(수천 프레임) 이 신호만은 신뢰할 만하다.
+
+<!-- WAVE3:graft_flow_goalimg_lidar -->
+
+<!-- WAVE3:graft_flow_control -->
+
+<!-- WAVE3:graft_flow_scratch_control -->

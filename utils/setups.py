@@ -182,6 +182,7 @@ def model_setups(args):
         use_aux_pose=use_aux,
         use_room1=use_room1,
         use_goal_lidar=use_goal_lidar,
+        use_aux_feedback=args.get("use_aux_feedback", False),
     ).to(args.device)
 
     nn_diffusion_model = DiT1d(

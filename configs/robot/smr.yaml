@@ -79,6 +79,10 @@ use_lidar_points: true
 num_lidar_latents: 16
 use_aux_pose: true     # aux head predicts ICP dock pose (precision/arrival judge)
 aux_weight: 1.0        # weight of the masked aux pose loss vs the denoising loss
+# Aux-pose FEEDBACK (2026-07-21): fold the aux dock-pose estimate back into the
+# conditioning readout (zero-init projection => no-op at start) so the trajectory
+# generator gets an explicit dock target to converge toward. Requires use_aux_pose.
+use_aux_feedback: false
 
 # Distance-shaped aux supervision (test/icp_noise_floor.py, 2026-07-10):
 # ICP 라벨은 ~1.0m까지는 mm급이지만 1.1m 밖에서는 라벨 자체가 cm급으로 틀림 ->

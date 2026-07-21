@@ -1,0 +1,73 @@
+{
+ "run_dir": "outputs/train/graft_flow_goalimg_lidar/2026-07-19_20-36-23",
+ "ckpt": "checkpoint_step_16940.pt",
+ "use_ema": true,
+ "bin_edges": [
+  0.5,
+  0.6,
+  0.7,
+  0.8,
+  0.9,
+  1.0,
+  1.15,
+  1.3,
+  1.65
+ ],
+ "aux": null,
+ "align": {
+  "policy_median_deg": 1.4982905387878418,
+  "policy_p90_deg": 10.973299217224122,
+  "demo_median_deg": 1.4466775999561683,
+  "demo_p25_deg": 0.5774988149816354,
+  "demo_p90_deg": 12.525998066578738,
+  "n_frames": 1059,
+  "x_policy_median_mm": 22.006112680545506,
+  "x_policy_p90_mm": 111.24437272241782,
+  "x_demo_median_mm": 19.006871273822384,
+  "x_demo_p25_mm": 7.92726708111921
+ },
+ "openloop": {
+  "0": {
+   "vel_rmse": 0.012701478786766529,
+   "vel_progress_rmse": 0.01254334021359682,
+   "speedup_frac": 0.472,
+   "ade_cm": 0.47274094571211744,
+   "fde_cm": 0.6795977376631555,
+   "path_len_cm": 13.750169939107526,
+   "steps": 500
+  },
+  "50": {
+   "vel_rmse": 0.03178062289953232,
+   "vel_progress_rmse": 0.03100053034722805,
+   "speedup_frac": 0.342,
+   "ade_cm": 4.336776522572442,
+   "fde_cm": 5.490387274889663,
+   "path_len_cm": 59.97855345708311,
+   "steps": 500
+  },
+  "110": {
+   "vel_rmse": 0.022351089864969254,
+   "vel_progress_rmse": 0.021973012015223503,
+   "speedup_frac": 0.182,
+   "ade_cm": 3.6094519977037995,
+   "fde_cm": 3.150386530336439,
+   "path_len_cm": 49.43537490590706,
+   "steps": 500
+  }
+ },
+ "summary": {
+  "ade_cm": 3.6094519977037995,
+  "fde_cm": 3.150386530336439,
+  "ade_cm_mean": 2.8063231553294528,
+  "fde_cm_mean": 3.1067905142964194,
+  "vel_rmse": 0.022351089864969254,
+  "vel_progress_rmse": 0.021973012015223503,
+  "speedup_frac": 0.342,
+  "near_mm": null,
+  "align_deg": 1.4982905387878418,
+  "align_demo_deg": 1.4466775999561683,
+  "align_demo_p25_deg": 0.5774988149816354,
+  "xpos_mm": 22.006112680545506,
+  "xpos_demo_mm": 19.006871273822384
+ }
+}

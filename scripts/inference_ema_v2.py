@@ -88,6 +88,7 @@ def build_model_from_cfg(cfg, device):
             use_aux_pose=cfg.get("use_aux_pose", False),
             use_room1=cfg.get("use_room1", True),
             use_goal_lidar=cfg.get("use_goal_lidar", False),
+            use_aux_feedback=cfg.get("use_aux_feedback", False),
         ).to(device)
 
     nn_diffusion_model = DiT1d(

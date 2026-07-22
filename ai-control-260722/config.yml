@@ -1,0 +1,245 @@
+# 식별자/연결/ENABLE_SEND는 compose env로 오버라이드.
+
+# ── 식별자 ──
+plugin_id: ai-control
+run_plugin: run_postech_docking_demo
+
+# demo_ckpt: 학습된 diffusion policy 가중치 파일 경로.
+#   무엇을 - 모델 가중치(state_dict, 필요시 ema_state_dict)를 담은 .pt 체크포인트.
+#   언제  - 플러그인(run_postech_docking_demo.py) 기동 시 1회 torch.load로 로드됨.
+#   누가  - run_postech_docking_demo.py의 초기화 코드가 로드하고 RolloutController를 구성.
+#   어떻게 - ai_models/ 디렉터리 기준 상대경로. 로드 직후 state_dict의 키 구성을 검사해
+#           use_room1(usb0 카메라 사용여부), use_goal, use_lidar_points, use_aux_pose,
+#           use_goal_lidar, use_aux_feedback 등 아키텍처 플래그를 자동 감지함.
+#   왜   - 체크포인트마다 입력 센서 구성(카메라 1대/2대, lidar 유무, aux-pose 유무 등)이
+#           달라서, 이 값 하나를 바꾸면 모델 전체 입력 배선이 함께 바뀜.
+#           단, demo_backbone(아래)은 가중치 이름만으로는 구분이 안 되므로 자동 감지되지 않음.
+demo_ckpt: demo_20260722/graft_goalimage_lidar_step_16940.pt # ai_models/ 기준 상대경로
+
+# demo_agg: nsamples(>1)로 뽑은 여러 궤적 샘플을 하나로 합치는 방법.
+#   무엇을 - "medoid" | "mean" 중 선택.
+#           medoid: 나머지 샘플들과의 합산 거리가 가장 작은 샘플 1개를 그대로 채택(결단적,
+#                   급회전을 뭉개지 않고 보존).
+#           mean:   전 샘플의 요소별(element-wise) 평균(부드럽지만 급회전 구간이 무뎌짐).
+#   언제  - 매 추론(inference) 호출마다, demo_nsamples > 1일 때만 실제로 의미가 있음
+#           (nsamples=1이면 집계 없이 그 샘플을 그대로 씀).
+#   어디  - ai_models/cleandiffuser/rollout_core.py의 _aggregate()에서 수행.
+demo_agg: medoid            # "medoid"(결단적) | "mean"(부드럽지만 급회전 뭉갬)
+
+# demo_ema: 프레임 간(=매 추론 tick마다) 궤적을 지수이동평균(EMA)으로 스무딩하는 alpha.
+#   무엇을 - alpha=1.0이면 EMA 끔(직전 값 100% 무시, 현재 값만 사용).
+#   왜/현재상태 - ★OLD(구버전) 코드에는 이 궤적-EMA가 없었고, plugin이 실행 시 plan.current
+#           (EMA 적용 전 원본)를 그대로 사용하므로, 이 값은 계산은 되지만 실행 경로에는
+#           반영되지 않는 사실상 미사용 값. OLD와 동일 동작을 보장하기 위해 일부러 1.0(끔)으로
+#           명시해 둔 것 — 실제 프레임간 스무딩이 필요하면 demo_continuity_blend를 볼 것.
+demo_ema: 1.0              # 궤적 프레임간 EMA 알파 (1.0=끔). ★OLD는 궤적EMA 없음 → plugin이 plan.current를
+                          #   실행하므로 이 값은 현재 미사용. OLD 동일성 유지 위해 끔(1.0)으로 명시.
+
+# demo_nsamples: 매 추론마다 diffusion 모델이 병렬로 뽑는 궤적 샘플 개수.
+#   무엇을/어떻게 - N개의 노이즈 prior를 배치로 만들어 N개의 후보 궤적을 동시에 샘플링한 뒤
+#           demo_agg 방식으로 하나로 합침. N=1이면 집계 과정 없이 그 샘플을 바로 사용.
+#   왜   - OLD는 항상 1개만 뽑도록 하드코딩되어 있었음(=OLD 동일성 유지 기본값).
+demo_nsamples: 1           # 샘플 수 (OLD 하드코딩=1)
+
+# demo_steps: diffusion denoising(역확산) 반복 스텝 수.
+#   무엇을 - solver가 노이즈에서 궤적을 복원하기 위해 반복하는 iteration 횟수
+#           (demo_backbone=rectified_flow면 euler solver, ddpm이면 dpmsolver++_2M solver).
+#   왜   - 스텝이 많을수록 품질/안정성은 올라가지만 추론 시간이 늘어남. OLD는 30으로 하드코딩.
+demo_steps: 30             # denoising 스텝 (OLD 하드코딩=30)
+
+# demo_use_ema: 추론 시 원본 가중치(model) 대신 EMA로 평균낸 가중치(model_ema)를 쓸지 여부.
+#   무엇을 - true면 체크포인트의 ema_state_dict로 만든 model_ema를 사용, false면 원본 model 사용.
+#   왜   - 학습 중 EMA 가중치는 보통 더 안정적인 정책을 내므로 배포 시 기본 true 권장.
+demo_use_ema: true
+
+# demo_continuity_blend: 실제 실행 경로에 적용되는 "연속성 스무딩" 계수 γ.
+#   무엇을 - 이전 프레임 계획(shift된 prev plan)과 이번 프레임 계획(current plan)을 블렌딩.
+#   어떻게 - beta[i] = 1 - exp(-γ·i)를 horizon 끝에서 1이 되도록 정규화해서 사용:
+#           호라이즌 앞쪽(가까운 미래)일수록 이전 계획 비중이 크고, 뒤로 갈수록 현재 계획
+#           비중이 커짐 → 프레임이 바뀌어도 궤적이 튀지 않고 부드럽게 이어짐.
+#   왜   - ★OLD의 blend_gamma=0.5와 정확히 동일한 값(D2 수정으로 일치시킴). demo_ema와
+#           달리 이 값은 실제로 실행되는 궤적(plan.current 이후 최종 출력)에 적용됨.
+#   γ=0 - 블렌딩 끔(이전 프레임 상태도 리셋됨).
+demo_continuity_blend: 0.5  # ★continuity 스무딩 γ — OLD blend_gamma=0.5 와 정확히 일치(D2 수정). 0=끔
+
+# ── 카메라 (2026-07-22: room1/room2 명칭 폐기, 실제 장치 식별자로 통일) ──
+#   usb0    = livekit_tracks_video1 (2번째 카메라, 일부 체크포인트만 사용)
+#   orbbec0 = livekit_tracks_video2 (기본 카메라, 전 체크포인트 공통 필수)
+# demo_video1: usb0 카메라 스트림의 윈도우 스냅샷 키 이름.
+#   무엇을/누가 - run_postech_docking_demo.py가 window snapshot(snap) 딕셔너리에서
+#           이 키로 usb0 프레임을 조회.
+#   언제  - 체크포인트 로드 시 자동 감지된 use_room1(=구 use_usb0) 플래그가 true인
+#           체크포인트에서만 실제로 조회/사용됨. false인 체크포인트에서는 무시.
+demo_video1: video1         # usb0 스트림 — use_usb0(=옛 use_room1)=True 체크포인트에서만 쓰임
+# demo_video2: orbbec0 카메라 스트림의 윈도우 스냅샷 키 이름. 모든 체크포인트가 항상 사용.
+demo_video2: video2         # orbbec0 스트림 — 항상 필요
+# demo_backbone: 사용할 diffusion 알고리즘/솔버 종류.
+#   무엇을 - "rectified_flow"(euler solver) | "ddpm"(dpmsolver++_2M solver) 중 선택,
+#           둘 다 파라미터 이름 구조가 동일해 체크포인트 가중치만으로는 자동 구분 불가능.
+#   왜   - 학습 때 쓴 backbone과 다르면 로드는 되지만(에러 없이!) 출력이 조용히
+#           틀리거나 불안정해짐. 그래서 자동 감지되는 다른 아키텍처 플래그들과 달리
+#           이 값만은 사람이 체크포인트와 반드시 일치시켜 명시해야 함.
+demo_backbone: ddpm   # "rectified_flow" | "ddpm" — 체크포인트와 반드시 일치시킬 것
+                            # (graft6/wave2/wave3/auxfb 전부 usb0 카메라도 씀). 자동 감지되어
+# ── goal 참조 파일 경로 ──
+# demo_goal_image_usb0: 도킹 완료 상태를 usb0 카메라로 찍은 목표 이미지.
+#   언제  - use_room1이 true로 감지된 체크포인트에서만 로드(cv2.imread)됨. 없으면
+#           FileNotFoundError로 기동 실패. DINO로 heatmap을 뽑아 goal_feat1로 모델에 입력됨.
+demo_goal_image_usb0: "ai_models/goal_image_usb0.jpg"          # usb0 도킹 완료 사진 (기본값과 동일 경로)
+# demo_goal_image_orbbec0: 도킹 완료 상태를 orbbec0 카메라로 찍은 목표 이미지.
+#   왜   - orbbec0는 전 체크포인트 공통 필수 카메라이므로 이 이미지는 항상 로드/필수이며,
+#           없으면 기동이 실패함. DINO heatmap → goal_feat2로 모델에 입력됨.
+demo_goal_image_orbbec0: "ai_models/goal_image_orbbec0.jpg"    # orbbec0 도킹 완료 사진 (기본값과 동일 경로)
+# demo_goal_lidar: 도킹 완료 상태의 lidar 스캔(.npy). use_goal_lidar로 감지된
+#   ("glidar" 계열) 체크포인트에서만 로드됨. 로드 후 로봇 주변 반경(LIDAR_CROP_R=0.8m,
+#   최대 LIDAR_MAX_POINTS=256점)으로 크롭되어 goal_lidar_points/goal_lidar_npoints로 입력됨.
+demo_goal_lidar: "ai_models/goal_lidar_scan.npy"               # glidar 체크포인트용
+
+#-----aux-pose feedback 런타임 on/off (2026-07-22, graft_auxfb_* 체크포인트 전용).
+# demo_aux_feedback: aux-pose 예측을 다음 스텝 조건으로 되먹임(feedback)할지 여부.
+#   무엇을 - 기본값 true(주석 처리 시에도 코드 기본값은 true). false로 켜면 같은
+#           체크포인트를 쓰되 aux 피드백 루프만 끔.
+#   언제/왜 - use_aux_feedback이 가중치에서 감지된(=graft_auxfb_* 계열) 체크포인트에서만
+#           의미가 있고, 다른 체크포인트에서는 이 값이 있어도 아무 효과가 없음(no-op).
+# demo_aux_feedback: true    # false=같은 체크포인트, aux 피드백만 끔
+# 궤적 temporal-consistency warm-start (2026-07-21, rollout_core 공유). 기본 꺼짐
+# — 오프라인 K 스윕(§13)에서 최적값 정한 뒤 켤 것. warm_start=true면 이전 계획을
+# 다음 샘플링의 prior로 재사용해 프레임 간 궤적을 잇는다.
+# demo_warm_start: 매 추론마다 노이즈에서 새로 시작하지 않고, 직전 프레임의 계획을
+#   "prior"로 재사용해 부분적으로만 재노이즈(SDEdit 방식)한 뒤 denoise하는 warm-start 여부.
+#   왜   - 순수 랜덤 노이즈에서 매번 새로 샘플링하면 프레임마다 궤적이 미세하게 튈 수 있는데,
+#           이전 계획을 출발점으로 삼으면 프레임 간 연속성이 좋아짐. 기본 false(꺼짐).
+# demo_warm_start: false     # true=이전 계획 warm-start (SDEdit식 부분 재노이즈)
+# demo_warm_level: warm_start=true일 때 재노이즈 강도(0~1).
+#   무엇을 - 0=이전 계획을 거의 그대로 사용(재노이즈 거의 없음), 1=순수 노이즈로 완전히
+#           덮어씀(사실상 warm_start=false와 동일한 결과). 값이 작을수록 이전 계획에 더 가깝고,
+#           클수록 매 프레임 새로 뽑는 것에 가까워짐.
+# demo_warm_level: 0.3       # 재노이즈 강도 (0=이전계획 그대로, 1=순수 노이즈=끔과 동일)
+
+# ── 윈도우 / 동기화 ──
+# ※ 아래 window_*, require_* 값들은 이 리포에 소스가 없는 외부 패키지 node_sdk(런타임에
+#   ../node_sdk에서 마운트됨, BasePluginConfig)가 실제 버퍼링/동기화 로직을 구현함.
+#   이 리포에서는 config_schema.py에 UI 노출용 스키마로만 선언되어 있어, 아래 설명은
+#   필드명과 스키마 docstring, plugin 쪽에서 참조하는 방식을 근거로 함.
+# window_size: 센서 스트림들을 정렬해 담아두는 슬라이딩 윈도우의 길이(프레임 수).
+#   왜   - config_schema.py상 USER_MANAGEMENT 권한의 read_only 필드로, "AI 입출력 계약"에
+#           영향을 주기 때문에 운영자가 함부로 못 바꾸도록 보호되어 있음.
+window_size: 60
+# data_latency_threshold_sec: 센서 데이터가 이 값(초)보다 늦게 도착하면 "지연"으로 간주.
+data_latency_threshold_sec: 0.2
+# data_unreliable_slow_tail_size: 느리게 들어오는 데이터 중 신뢰할 수 없다고 버릴 tail 개수.
+data_unreliable_slow_tail_size: 0
+# window_sync_mode: 여러 센서 스트림을 어떤 기준으로 정렬할지 모드("track"=특정 트랙 기준).
+window_sync_mode: track
+# window_sync_fps: 동기화 시 목표로 하는 프레임레이트(Hz).
+window_sync_fps: 30.0
+# window_sync_reference_track: 동기화 기준이 되는 트랙 이름.
+#   livekit_tracks_video1(=usb-0)와 이름이 같아 usb0 카메라 트랙을 기준 시계로 삼는
+#   것으로 보이나, 이 리포 안에서 그 연결을 확정하는 코드는 찾지 못함(이름 일치로 추정).
+window_sync_reference_track: usb-0
+# window_sync_max_age_sec: 기준 트랙 대비 다른 스트림 데이터가 이보다 오래되면 무효 처리.
+window_sync_max_age_sec: 0.1
+# require_lidar: true면 lidar 데이터가 없으면 노드가 동작하지 않음(하드 요구사항).
+#   왜   - run_postech_docking_demo.py 플러그인 docstring이 명시적으로 "config.yml must
+#           have require_lidar: true"라고 요구함 — 이 플러그인은 lidar 없이 동작 불가.
+require_lidar: true
+# require_encoder: true면 휠 엔코더 데이터가 없으면 노드가 동작하지 않음.
+require_encoder: true
+# require_marker_pose: true면 마커 기반 pose 데이터가 없으면 노드가 동작하지 않음(현재 false).
+require_marker_pose: false
+# require_video: true면 비디오 스트림이 없으면 노드가 동작하지 않음.
+require_video: true
+
+# ── 보간 ──
+# ※ interpolation_* 4개 값도 이 리포에는 사용처가 없고(config_schema.py에도 미노출),
+#   외부 node_sdk가 소비하는 것으로 추정됨(리포 내 근거는 못 찾음).
+# interpolation_enabled: 누락/저주기 스트림을 보간해서 채울지 여부.
+interpolation_enabled: true
+# interpolation_streams: 보간을 적용할 스트림 이름(들). 현재 encoder만 지정.
+interpolation_streams: encoder
+# interpolation_target_fps: 보간 후 맞출 목표 프레임레이트(Hz).
+interpolation_target_fps: 30.0
+# interpolation_buffer_padding: 보간 계산에 여유로 두는 버퍼 프레임 수.
+interpolation_buffer_padding: 20
+
+# ── 추론 / 전송 (트레젝토리 보정) ──
+# 아래 inference_*/send_*/action_horizon 값들은 ai_control_node/runner.py가 직접 소비함
+# (MQTT로 로봇에 실제 명령을 내보내는 "send tick" 경로).
+
+# inference_size: 모델이 예측한 horizon 중 실제로 사용할 스텝 개수(잘라내는 길이).
+#   무엇을/어디 - run_postech_docking_demo.py에서 최종 실행 배열 ema를 min(inference_size,
+#           HORIZON)까지 자르고, runner.py도 P2 추론 결과의 horizon 리스트를
+#           res["horizon"][:inference_size]로 잘라 버퍼(_steps_buffer)에 채움.
+inference_size: 16
+# inference_fps: 추론 결과(step)를 몇 Hz짜리 시계열로 해석할지.
+#   어떻게 - runner.py에서 step_dt=1/inference_fps로 두어, UI 오버레이 궤적의 스텝당
+#           시간 간격과 action_horizon 자동 계산(아래)에 쓰임.
+inference_fps: 30
+# prediction_delay_sec: 로봇에 보낼 궤적의 시간 기준("now" anchor)을 이만큼 밀어주는 보정값.
+#   왜   - 추론에 걸리는 지연(prediction lag)을 미리 보상해, 로봇이 받는 시점 기준으로
+#           궤적 타이밍이 맞도록 함. 0.0이면 보정 없음.
+prediction_delay_sec: 0.0
+# send_interval_sec: 로봇에 MQTT 명령을 보내는 주기(초).
+#   왜   - action_horizon이 명시적으로 설정 안 됐을 때 round(send_interval*fps)로
+#           자동 계산되는 데도 쓰이고, 지연 padding 계산의 기준 단위로도 쓰임.
+send_interval_sec: 0.1
+# action_horizon: 매 전송 tick마다 실제로 로봇에 실어보내는 velocity step 개수.
+#   비워두면(None/<1) send_interval_sec * inference_fps로 자동 계산됨.
+action_horizon: 32
+# send_padding_cap_interval_multiplier: 관측된 지연(latency)이 아무리 커도, 전송
+#   시작 인덱스를 밀어넣는 padding을 send_interval_sec * 이 배수까지만 허용(상한 캡).
+#   왜   - 큰 지연 스파이크 한 번 때문에 전송 인덱스가 horizon 끝까지 튀어버리는 것을 방지.
+send_padding_cap_interval_multiplier: 8.0
+# send_padding_reflect_small_latency: true면 send_interval보다 작은 미세 지연도
+#   padding_steps에 반영(0이 아닌 값)하고, false면 그런 작은 지연은 무시(0으로 처리).
+send_padding_reflect_small_latency: true
+# initial_send_padding_sec: 노드가 막 기동된 직후 이 시간(초)만큼은 실제 명령 대신
+#   0속도 스텝을 앞에 채워 넣어 천천히 램프업시킴(급발진 방지용 시작 지연).
+initial_send_padding_sec: 0.0
+# no_send_when_no_horizon: 추론 버퍼가 비어 보낼 horizon이 없을 때의 동작.
+#   true  - 아무것도 보내지 않음(전송 생략).
+#   false - 0속도로 채운 전체 horizon을 보내 로봇에 명시적 정지 명령을 내림(기본값).
+no_send_when_no_horizon: false
+
+# ── 영상 (LiveKit) ──
+# num_video_channels, video_height, video_width: 이 리포 코드에는 사용처가 없고
+#   (config.yml 외 참조 없음), LiveKit 영상 수신을 담당하는 외부 node_sdk가 소비하는
+#   것으로 추정됨. 채널 수/해상도 설정값으로 보임.
+num_video_channels: 2
+video_height: 480
+video_width: 640
+# livekit_tracks_video1 / livekit_tracks_video2: 구독할 LiveKit 트랙 이름.
+#   어디  - runner.py의 register 페이로드(get_register_payload)에서 livekit_tracks
+#           리스트를 구성할 때 사용되며, 각 트랙 label도 동일 이름으로 설정됨.
+#   어떻게 - 여기서 정한 트랙 이름(usb-0/orbbec-0)이 실제 수신되는 스트림이 되고,
+#           플러그인 쪽 demo_video1/demo_video2(윈도우 스냅샷 키 이름)와 매핑되어 쓰임.
+livekit_tracks_video1: usb-0
+livekit_tracks_video2: orbbec-0
+
+# ── 출력 ──
+# 상시 도킹 — MQTT 궤적 발행 + 제어권 점유. (compose ENABLE_SEND env가 최종 우선; 기본 true)
+# enable_send: 로봇에 실제로 명령을 보낼지(제어권을 점유할지) 여부.
+#   무엇을 - false면 register 시 managed_resources에 "robot_control"을 포함하지 않아
+#           애초에 제어권을 점유하지 않고, true여도 velocity_steps가 있을 때만 실제
+#           MQTT 발행 및 seq_num/robot_send_count 증가가 일어남.
+#   왜   - 시뮬레이션/관찰 전용으로 노드를 띄우고 싶을 때 false로 두면 로봇에 아무
+#           명령도 나가지 않음. compose의 ENABLE_SEND 환경변수가 이 값보다 최종 우선됨.
+enable_send: true
+# trajectory_color: UI 지도 오버레이에 그릴 궤적 선의 색상(hex). 로봇 제어에는 영향 없음,
+#   순수 시각화용이며 build_pointcloud_trajectory_data() 결과에 그대로 담겨 나감.
+trajectory_color: "#00cfff"
+# v_max: UI 오버레이에서 각 waypoint의 추정 속도를 [0,1]로 정규화할 때 쓰는 기준 최대 속도.
+#   실제 로봇 명령 속도 계산에는 쓰이지 않고, 오버레이 색상/애니메이션 강도 표시용.
+v_max: 1.0
+# trajectory_ttl_ms: UI/허브가 이 궤적 오버레이를 화면에 유지하는 시간(ms). 지나면 만료 처리.
+trajectory_ttl_ms: 400
+
+# ── 로깅 ──
+# log_snapshot: config_schema.py에 ROBOT_MONITORING 권한 항목으로만 선언되어 있고
+#   이 리포 코드에서 직접 읽는 곳은 없음 — 외부 node_sdk의 로깅 계층이 소비하는 것으로 추정.
+log_snapshot: false
+# log_level: config_schema.py에 DEBUG/INFO/WARNING/ERROR 선택 스키마로만 선언되어 있고
+#   이 리포 파이썬 코드에서 직접 읽는 곳은 없음(추정: node_sdk 소비).
+#   ⚠주의: docker-compose.yml에는 이름이 같은 별개의 LOG_LEVEL 환경변수가 따로 있어
+#   (기본값 INFO) 이 config.yml의 log_level과는 서로 다른 값일 수 있으니 혼동 주의.
+log_level: INFO

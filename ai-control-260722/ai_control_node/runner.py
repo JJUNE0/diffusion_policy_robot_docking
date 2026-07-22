@@ -22,6 +22,11 @@ from .config import AIControlConfig
 from .config_schema import ai_control_config_schema
 from .trajectory_overlay import build_pointcloud_trajectory_data
 from .trajectory_payload import ai_command_velocity_steps_dict, steps_to_velocity_steps
+from .csv_debug import CsvLogger
+
+# MQTT 전송값 진단 CSV (로봇시간 매핑). AI_CONTROL_CSV_LOG=1 일 때만 기록.
+_MQTT_CSV = CsvLogger("mqtt_sent.csv",
+                      ["seq", "anchor_robot_t", "step", "step_robot_t", "vx", "wz", "dt"])
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +105,17 @@ class AIControlRunner(RunnerBase):
     ) -> List[dict]:
         cfg = self.config
         outs: List[dict] = []
-        if cfg.enable_send and velocity_steps:
+        # 진단 CSV: 전송 여부와 무관하게 "MQTT로 보낼 값"을 로봇시간(anchor + 누적 dt)에 매핑해 기록.
+        # → ENABLE_SEND=false 로 실로봇엔 안 보내면서 CSV로 검증 가능(mqtt_sent.csv = 보낼 값).
+        if velocity_steps:
+            _t = ts
+            for _i, _s in enumerate(velocity_steps):
+                _dt = float(_s.get("dt", 0.0))
+                _MQTT_CSV.write([seq_num, round(ts, 4), _i, round(_t, 4),
+                                 round(float(_s.get("vx", 0.0)), 5),
+                                 round(float(_s.get("wz", 0.0)), 5), round(_dt, 5)])
+                _t += _dt
+        if cfg.enable_send and velocity_steps:  # 실제 전송은 enable_send일 때만
             outs.append({
                 "delivery": "mqtt",
                 "topic": cfg.ai_command_topic,

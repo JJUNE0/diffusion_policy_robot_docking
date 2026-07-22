@@ -4,18 +4,17 @@
 # 전제: rc 스택(nats/livekit/connection)이 떠 있어야 함 (cd ../../rc_server && ./scripts/local.sh up).
 # 외부 네트워크 rc-kernel_rc-kernel-network에 붙어 nats/livekit에 접속.
 # 이미지(ai-node-base)는 plugin 의존 없는 deps-only — ai-world와 공유.
-# ENABLE_SEND=true면 상시 도킹(멀티스텝 궤적 → MQTT robot/{id}/ai-command). false면 추론만.
 name: ai-control
 
 services:
   ai-control:
     image: ai-node-base
     build:
-      context: ..                 # additional-nodes/ (Dockerfile 위치)
+      context: .. # additional-nodes/ (Dockerfile 위치)
       dockerfile: Dockerfile
     pull_policy: never
     working_dir: /app/ai-control
-    command: ["python3", "-m", "ai_control_node"]
+    command: [ "python3", "-m", "ai_control_node" ]
     # LiveKit은 host 네트워크라 host.docker.internal로 접근 (rc record 노드와 동일)
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -31,7 +30,11 @@ services:
       ROBOT_ID: "${ROBOT_ID:-7023}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       # 상시 도킹 — 멀티스텝 궤적을 MQTT robot/{id}/ai-command 로 발행
-      ENABLE_SEND: "${ENABLE_SEND:-true}"
+      # ★검증/대조 모드: false=실로봇 명령 안 보냄(+제어권 미점유), CSV만 기록.
+      #   old-0722와 동시 구동해 두 샘플러 CSV를 안전하게 대조하기 위해 false 고정. 실전송하려면 true.
+      ENABLE_SEND: "true"
+      # 진단 CSV on/off — "1"=켬(모델 raw 출력 + MQTT 전송값을 csv_out/에 기록, 시작 시 갱신), "0"=끔.
+      AI_CONTROL_CSV_LOG: "1"
       PYTHONPATH: "/opt/rcpkg:/opt/nodes:/app/ai-control"
       # GPU / HF
       NVIDIA_VISIBLE_DEVICES: "all"
@@ -48,6 +51,8 @@ services:
       - ./ai_control_node:/app/ai-control/ai_control_node:ro
       - ./ai_models:/app/ai-control/ai_models:ro
       - ./config.yml:/app/ai-control/config.yml:ro
+      # 진단 CSV 출력 (쓰기가능) — 호스트 ./csv_out/ 에 model_output.csv, mqtt_sent.csv
+      - ./csv_out:/app/ai-control/csv_out
       # 모델 가중치 + HF 캐시
       - ${MODELS_DIR_CONTROL:-../../models/ai-control}:/models:ro
       - ${HF_CACHE_DIR:-../../models/hf-cache}:/root/.cache/huggingface
@@ -60,7 +65,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     restart: unless-stopped
     networks:
       - rc-kernel-network

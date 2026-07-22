@@ -310,6 +310,27 @@ def main(args):
                 context["goal_lidar_points"] = obs_dict["goal_lidar_points"].to(device, non_blocking=True)
                 context["goal_lidar_npoints"] = obs_dict["goal_lidar_npoints"].to(device, non_blocking=True)
 
+        # Aux-feedback gating (2026-07-22): the SAME reliable+distance weight
+        # aux_loss uses below must reach the condition net's forward() BEFORE
+        # nn_diffusion.loss() runs it, since that's where use_aux_feedback folds
+        # aux_pred back into the conditioning readout -- gating it after the
+        # fact would be too late. dock_target/reliable come straight from the
+        # batch (no dependency on the network's own forward pass), so computing
+        # this weight early is safe.
+        if use_aux and args.get("use_aux_feedback", False):
+            dock_target_for_gate = batch["dock_target"].to(device, non_blocking=True)
+            fb_w = batch["reliable"].to(device, non_blocking=True).float()
+            if aux_dist_max is not None or aux_dist_power > 0:
+                std_g = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
+                mean_g = torch.as_tensor(getattr(dataset, "aux_xy_mean", dataset.dock_xy_mean), device=device)
+                xy_g = dock_target_for_gate[:, :2] * std_g + mean_g
+                dock_d_g = torch.hypot(xy_g[:, 0], xy_g[:, 1]).clamp(min=0.3)
+                if aux_dist_max is not None:
+                    fb_w = fb_w * (dock_d_g <= float(aux_dist_max)).float()
+                if aux_dist_power > 0:
+                    fb_w = fb_w * (aux_dist_ref / dock_d_g) ** aux_dist_power
+            context["aux_feedback_weight"] = fb_w
+
         # Combined loss = denoising (main) + ICP-distilled aux pose (precision).
         # nn_diffusion.loss() runs the condition net once and caches its aux pred.
         loss_kwargs = {}

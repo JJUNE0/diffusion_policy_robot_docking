@@ -1,4 +1,3 @@
-# ai-control 노드 설정 (plugins/ai-control/config.yml 동등 — 검증된 값).
 # 식별자/연결/ENABLE_SEND는 compose env로 오버라이드.
 
 # ── 식별자 ──
@@ -13,10 +12,25 @@ demo_ckpt: demo_20260715/flow_goal_scratch20.pt  # ai_models/ 기준 상대경�
 demo_agg: medoid            # "medoid"(결단적) | "mean"(부드럽지만 급회전 뭉갬)
 demo_ema: 0.6               # 궤적 EMA 알파 (높을수록 덜 평활/결단적; 1.0=끔)
 demo_nsamples: 8            # 샘플 수 (추론 느리면 4)
-demo_steps: 20             # denoising 스텝 (구 baseline은 100=느리지만 잘 됨)
-demo_use_ema: true          # EMA 가중치 (이 번들 모델은 true)
-demo_video: video2          # room2(image_bottom) 카메라 스트림
-# demo_goal_lidar: ""       # glidar 체크포인트용 docked-pose scan .npy (빈값=기본경로)
+demo_steps: 100             # denoising 스텝 (구 baseline은 100=느리지만 잘 됨)
+demo_use_ema: true
+# ── 카메라 (2026-07-22: room1/room2 명칭 폐기, 실제 장치 식별자로 통일) ──
+#   usb0    = livekit_tracks_video1 (2번째 카메라, 일부 체크포인트만 사용)
+#   orbbec0 = livekit_tracks_video2 (기본 카메라, 전 체크포인트 공통 필수)
+demo_video1: video1         # usb0 스트림 — use_usb0(=옛 use_room1)=True 체크포인트에서만 쓰임
+demo_video2: video2         # orbbec0 스트림 — 항상 필요
+demo_backbone: ddpm   # "rectified_flow" | "ddpm" — 체크포인트와 반드시 일치시킬 것
+                            # (graft6/wave2/wave3/auxfb 전부 usb0 카메라도 씀). 자동 감지되어
+                            # 켜지며, 이때 goal_image_usb0(아래)가 반드시 있어야 함
+                            # (없으면 명확한 에러로 즉시 실패 — 아래 "시연 전 체크리스트" 참고).
+
+# ── goal 참조 파일 경로 (전부 config로 오버라이드 가능, 하드코딩 아님) ──
+demo_goal_image_usb0: "ai_models/goal_image_usb0.jpg"          # usb0 도킹 완료 사진 (기본값과 동일 경로)
+demo_goal_image_orbbec0: "ai_models/goal_image_orbbec0.jpg"    # orbbec0 도킹 완료 사진 (기본값과 동일 경로)
+demo_goal_lidar: "ai_models/goal_lidar_scan.npy"               # glidar 체크포인트용 docked-pose scan .npy (기본값과 동일 경로)
+
+#-----aux-pose feedback 런타임 on/off (2026-07-22, graft_auxfb_* 체크포인트 전용).
+# demo_aux_feedback: true    # false=같은 체크포인트, aux 피드백만 끔
 # 궤적 temporal-consistency warm-start (2026-07-21, rollout_core 공유). 기본 꺼짐
 # — 오프라인 K 스윕(§13)에서 최적값 정한 뒤 켤 것. warm_start=true면 이전 계획을
 # 다음 샘플링의 prior로 재사용해 프레임 간 궤적을 잇는다.

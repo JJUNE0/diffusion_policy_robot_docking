@@ -123,6 +123,7 @@ class SensorFusionConditionNetwork(BaseNNCondition):
         use_aux_pose: bool = False,
         use_room1: bool = True,
         use_goal_lidar: bool = False,
+        use_aux_feedback: bool = False,
     ):
         super().__init__()
         # Single-camera mode: use_room1=False drops the room1 (image_top) branch
@@ -218,7 +219,26 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 # fallback (no lidar): pooled-readout MLP head
                 self.aux_head = nn.Sequential(
                     nn.Linear(d_model, 128), nn.GELU(), nn.Linear(128, 4))
-            self._aux_pred = None
+        # Aux-pose FEEDBACK (2026-07-21): fold the ICP-distilled dock-pose
+        # estimate [x,y,sin,cos] back into the readout the diffusion trunk is
+        # conditioned on, so the LAST-approach trajectory has an explicit dock
+        # target to converge toward (instead of aux only shaping representation
+        # via its loss). Requires use_aux_pose (needs _aux_pred). The projection
+        # is zero-initialized so training starts as an identity no-op and only
+        # departs from the aux-only baseline if the feedback actually helps.
+        self.use_aux_feedback = use_aux_feedback and use_aux_pose
+        # Runtime on/off switch, separate from use_aux_feedback (which decides
+        # whether aux_feedback_proj EXISTS -- an architecture/checkpoint fact
+        # that can't change post-hoc). This one CAN be flipped after loading a
+        # checkpoint (e.g. `nn_condition.aux_feedback_enabled = False`) to A/B
+        # the same trained weights with feedback on vs off at inference,
+        # without retraining. 2026-07-22, user-requested.
+        self.aux_feedback_enabled = True
+        if self.use_aux_feedback:
+            self.aux_feedback_proj = nn.Linear(4, d_model)
+            nn.init.zeros_(self.aux_feedback_proj.weight)
+            nn.init.zeros_(self.aux_feedback_proj.bias)
+        self._aux_pred = None
         self._point_tokens = None        # per-point tokens for the cross-attn head
         self._point_mask = None
 
@@ -436,6 +456,31 @@ class SensorFusionConditionNetwork(BaseNNCondition):
                 self._aux_pred = self.aux_pose_head(self._point_tokens, self._point_mask, out)
             else:
                 self._aux_pred = self.aux_head(out)
+
+        # Fold the dock-pose estimate back into the conditioning readout so the
+        # trajectory generator gets an explicit "converge here" target. Zero-init
+        # proj => starts as a no-op identical to the aux-only baseline.
+        #
+        # Gating (2026-07-22, user-requested): unlike aux_loss -- which is
+        # already masked to reliable, <=aux_dist_max frames -- this injection
+        # used to run UNCONDITIONALLY every frame, including ones aux_head was
+        # never supervised to be accurate on. Training now passes the SAME
+        # per-sample reliability/distance weight used for aux_loss as
+        # condition["aux_feedback_weight"] (see scripts/train.py), so gradient
+        # only meaningfully flows through aux_feedback_proj on frames the label
+        # itself trusts -- an unreliable/far frame contributes ~0, same as it
+        # already does for aux_loss. At inference there is no ground-truth
+        # reliability to gate on (this is an unavoidable limitation, not fixed
+        # by this change -- see docs/ablation_study_2026-07.md "12.x 일반화
+        # 리스크"), so the weight defaults to 1 (unconditional) unless the
+        # caller supplies one; `aux_feedback_enabled=False` remains the way to
+        # disable the path entirely at inference for an A/B test.
+        if self.use_aux_feedback and self.aux_feedback_enabled and self._aux_pred is not None:
+            fb_w = condition.get("aux_feedback_weight")
+            fb = self.aux_feedback_proj(self._aux_pred)
+            if fb_w is not None:
+                fb = fb * fb_w.view(-1, 1)
+            out = out + fb
 
         if mask is not None:
             out = out * mask.view(b, 1).float()

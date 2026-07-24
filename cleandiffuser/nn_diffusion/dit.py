@@ -132,6 +132,145 @@ class DiT1d(BaseNNDiffusion):
         return x
 
 
+class DiTCrossAttnBlock(nn.Module):
+    """Self-attn (among action tokens, non-causal) + cross-attn (to a
+    condition TOKEN SEQUENCE) + MLP, AdaLN-Zero modulated on ALL THREE
+    sublayers by the diffusion timestep embedding only -- the condition
+    enters exclusively via cross-attention, not via AdaLN (docs/
+    0725_reloc3r_test/reloc3r/reloc3r_0725.md). Mirrors DiTBlock's exact
+    modulate-then-gated-residual idiom, extended with one extra sublayer.
+    """
+
+    def __init__(self, hidden_size: int, n_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.self_attn = nn.MultiheadAttention(hidden_size, n_heads, dropout, batch_first=True)
+        self.norm_ca = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.cross_attn = nn.MultiheadAttention(hidden_size, n_heads, dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+
+        def approx_gelu(): return nn.GELU(approximate="tanh")
+
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4), approx_gelu(), nn.Dropout(dropout),
+            nn.Linear(hidden_size * 4, hidden_size))
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, hidden_size * 9))
+
+    def forward(self, x: torch.Tensor, cond_tokens: torch.Tensor, t: torch.Tensor,
+                key_padding_mask: Optional[torch.Tensor] = None):
+        (shift_sa, scale_sa, gate_sa, shift_ca, scale_ca, gate_ca,
+         shift_mlp, scale_mlp, gate_mlp) = self.adaLN_modulation(t).chunk(9, dim=1)
+
+        x = modulate(self.norm1(x), shift_sa, scale_sa)
+        x = x + gate_sa.unsqueeze(1) * self.self_attn(x, x, x)[0]
+
+        x = modulate(self.norm_ca(x), shift_ca, scale_ca)
+        x = x + gate_ca.unsqueeze(1) * self.cross_attn(
+            x, cond_tokens, cond_tokens, key_padding_mask=key_padding_mask)[0]
+
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return x
+
+
+class DiTCrossAttn1d(BaseNNDiffusion):
+    """DiT variant whose noisy action tokens CROSS-ATTEND to a condition TOKEN
+    SEQUENCE [B, N_condition, D] (e.g. from TokenSequenceFusionCondition)
+    instead of consuming a single pooled AdaLN vector (contrast: DiT1d, whose
+    `condition` must be `(b, emb_dim)`). Action-token self-attention has NO
+    causal mask -- the whole future action trajectory is denoised jointly, per
+    docs/0725_reloc3r_test/reloc3r/reloc3r_0725.md.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        emb_dim: int,
+        d_model: int = 384,
+        n_heads: int = 6,
+        depth: int = 12,
+        dropout: float = 0.0,
+        timestep_emb_type: str = "positional",
+        timestep_emb_params: Optional[dict] = None,
+    ):
+        super().__init__(emb_dim, timestep_emb_type, timestep_emb_params)
+        self.in_dim, self.emb_dim, self.d_model = in_dim, emb_dim, d_model
+
+        self.x_proj = nn.Linear(in_dim, d_model)
+        self.map_emb = nn.Sequential(
+            nn.Linear(emb_dim, d_model), nn.Mish(), nn.Linear(d_model, d_model), nn.Mish())
+
+        self.pos_emb = SinusoidalEmbedding(d_model)
+        self.pos_emb_cache = None
+
+        self.blocks = nn.ModuleList([
+            DiTCrossAttnBlock(d_model, n_heads, dropout) for _ in range(depth)])
+        self.final_layer = FinalLayer1d(d_model, in_dim)
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+
+        nn.init.normal_(self.map_emb[0].weight, std=0.02)
+        nn.init.normal_(self.map_emb[2].weight, std=0.02)
+
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
+
+    def forward(
+        self,
+        x: torch.Tensor, noise: torch.Tensor,
+        condition: Optional[torch.Tensor] = None,
+        condition_valid_mask: Optional[torch.Tensor] = None,
+    ):
+        """
+        Input:
+            x:          (b, horizon, in_dim) noisy actions
+            noise:      (b,) diffusion timestep
+            condition:  (b, N_condition, d_model) token sequence (REQUIRED --
+                this variant has no pooled-vector fallback and no CFG
+                zero-condition special case beyond whatever the caller feeds
+                as `condition`; the backbone wrapper's CFG path already
+                supplies a same-shape zero tensor when needed, see
+                cleandiffuser/diffusion/rectifiedflow.py)
+            condition_valid_mask: (b, N_condition) bool, True=real/attend.
+                None = attend to all (matches: no padding tracked upstream).
+
+        Output:
+            y:          (b, horizon, in_dim)
+        """
+        if condition is None:
+            raise ValueError(
+                "DiTCrossAttn1d requires a condition TOKEN SEQUENCE (b, N, d_model); "
+                "got None. Pair with TokenSequenceFusionCondition, not a pooled condition net.")
+        if self.pos_emb_cache is None or self.pos_emb_cache.shape[0] != x.shape[1]:
+            self.pos_emb_cache = self.pos_emb(torch.arange(x.shape[1], device=x.device))
+
+        x = self.x_proj(x) + self.pos_emb_cache[None,]
+        t_emb = self.map_emb(self.map_noise(noise))
+
+        key_padding_mask = None
+        if condition_valid_mask is not None and not bool(condition_valid_mask.all()):
+            key_padding_mask = ~condition_valid_mask  # nn.MultiheadAttention: True=ignore
+
+        for block in self.blocks:
+            x = block(x, condition, t_emb, key_padding_mask=key_padding_mask)
+        x = self.final_layer(x, t_emb)
+        return x
+
+
 class DiT1Ref(DiT1d):
     def __init__(
             self,

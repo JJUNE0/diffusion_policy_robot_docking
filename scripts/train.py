@@ -173,7 +173,10 @@ def main(args):
     # keyed exactly as ModularSensorFusionCondition expects (sensor names from
     # the YAML `sensors:` block), so the batch is forwarded as-is. DINO features
     # are precomputed (in-h5 or sidecar `file:`) -> no live backbone here.
-    use_modular = args.get("use_modular_fusion", False)
+    # use_token_sequence_fusion (R-NoGoal/R-Goal/R-Geo, docs/0725_reloc3r_test)
+    # reuses ModularDockingDataset too -> same obs-dict-is-the-condition-dict
+    # forwarding applies.
+    use_modular = args.get("use_modular_fusion", False) or args.get("use_token_sequence_fusion", False)
 
     # Vision uses sparse temporal sampling from 30-step history.
     vision_stride = args.get("vision_stride", 6)

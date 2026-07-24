@@ -168,6 +168,18 @@ class ModularDockingDataset(Dataset):
             return np.concatenate([pad, valid], axis=0)
         return data[start_t:t + 1]
 
+    def _history_valid_mask(self, t, ep_start):
+        """bool[obs_horizon], True = real frame, False = repeated episode-start
+        padding (same fill rule as _history: pad = repeat(earliest valid, ...),
+        prepended). 2026-07-25: acceptance criterion #5 -- padding must reach
+        attention, not be silently treated as extra real observations."""
+        start_t = t - self.obs_horizon + 1
+        valid_len = min(self.obs_horizon, t - ep_start + 1)
+        pad_len = self.obs_horizon - valid_len
+        mask = np.ones(self.obs_horizon, dtype=bool)
+        mask[:pad_len] = False
+        return mask
+
     def __getitem__(self, idx):
         self._ensure_open()
         t = self.index_map[idx]
@@ -179,9 +191,11 @@ class ModularDockingDataset(Dataset):
             mode = spec.get("mode", "history")
             if mode == "history":
                 arr = self._history(ds, t, ep_start)
+                valid_mask = self._history_valid_mask(t, ep_start)
                 stride = int(spec.get("stride", 1))
                 if stride > 1:
                     arr = arr[::stride]
+                    valid_mask = valid_mask[::stride]
                 arr = self._select_channels(arr, spec)
                 arr = np.ascontiguousarray(arr).astype(np.float32)
                 norm = spec.get("normalize")
@@ -191,6 +205,7 @@ class ModularDockingDataset(Dataset):
                     mean, std = self.norm_stats[name]
                     arr = ((arr - mean) / std).astype(np.float32)
                 obs[name] = torch.from_numpy(arr)
+                obs[f"{name}_valid_mask"] = torch.from_numpy(np.ascontiguousarray(valid_mask))
             elif mode == "current":
                 arr = self._select_channels(np.ascontiguousarray(ds[t]), spec).astype(np.float32)
                 obs[name] = torch.from_numpy(np.ascontiguousarray(arr))

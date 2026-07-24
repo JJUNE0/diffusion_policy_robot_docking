@@ -17,6 +17,17 @@ from cleandiffuser.nn_condition.sensor_fusion_condition import PerceiverResample
 ENCODER_REGISTRY: Dict[str, type] = {}
 
 
+def _unpack(obs):
+    """History-mode encoders may receive either a raw tensor (legacy call
+    sites, e.g. ModularSensorFusionCondition) or {"data":..., "valid_mask":
+    [B,T] bool, True=real frame} (TokenSequenceFusionCondition, which needs
+    per-token padding masks to reach attention -- 2026-07-25 acceptance
+    criterion). Returns (data, valid_mask_or_None)."""
+    if isinstance(obs, dict) and "data" in obs:
+        return obs["data"], obs.get("valid_mask")
+    return obs, None
+
+
 def register_encoder(name: str) -> Callable[[type], type]:
     def deco(cls: type) -> type:
         if name in ENCODER_REGISTRY:
@@ -52,6 +63,10 @@ class BaseModalityEncoder(nn.Module):
         self.d_model = d_model
         self.nhead = nhead
         self.dropout_prob = float(spec.get("dropout_prob", 0.0))
+        self._token_valid_mask = None  # [B, N_tokens] bool, True=real; set by
+        # encode() when the caller supplies a per-frame valid_mask (see
+        # _unpack above). None means "caller doesn't track padding" -> treat
+        # as fully valid (matches every pre-2026-07-25 call site).
 
     def obs_keys(self):
         """Condition-dict keys this encoder consumes (for documentation/validation)."""
@@ -89,12 +104,14 @@ class MotionEncoder(BaseModalityEncoder):
         self.n_tokens = self.horizon
 
     def encode(self, obs):
-        x = obs.float()
+        x, valid_mask = _unpack(obs)
+        x = x.float()
         b, t, dim = x.shape
         if dim != self.dim:
             raise ValueError(f"[{self.name}] expected dim={self.dim}, got {dim}.")
         if t != self.horizon:
             raise ValueError(f"[{self.name}] expected horizon={self.horizon}, got {t}.")
+        self._token_valid_mask = valid_mask  # 1 token/step -> mask is already token-shaped
         return self.proj(x) + self.time_emb.view(1, t, self.d_model)
 
 
@@ -158,7 +175,8 @@ class DinoImageEncoder(BaseModalityEncoder):
         self.n_tokens = self.horizon * self.num_latents
 
     def encode(self, obs):
-        feat = obs.float()
+        feat, valid_mask = _unpack(obs)
+        feat = feat.float()
         b, t, n_patch, feat_dim = feat.shape
         if t != self.horizon:
             raise ValueError(f"[{self.name}] expected vision horizon={self.horizon}, got {t}.")
@@ -171,6 +189,12 @@ class DinoImageEncoder(BaseModalityEncoder):
         lat = (lat
                + self.time_emb.view(1, t, 1, self.d_model)
                + self.slot_emb.view(1, 1, self.num_latents, self.d_model))
+        if valid_mask is not None:
+            # one frame-level flag -> num_latents identical token-level flags
+            self._token_valid_mask = valid_mask.unsqueeze(-1).expand(b, t, self.num_latents).reshape(
+                b, t * self.num_latents)
+        else:
+            self._token_valid_mask = None
         return lat.reshape(b, t * self.num_latents, self.d_model)
 
 
@@ -187,6 +211,69 @@ class Reloc3rImageEncoder(DinoImageEncoder):
         spec = dict(spec)
         spec.setdefault("feat_dim", 1024)
         super().__init__(spec, d_model, nhead)
+
+
+@register_encoder("goal_image")
+class GoalImageEncoder(BaseModalityEncoder):
+    """STATIC goal frame as DINO/Reloc3r patch features -> Perceiver latents,
+    ONE token set (no time dimension -- a goal is a single frame, not a
+    history). obs: [B, n_patch, feat_dim] (mode="current" in the dataset spec,
+    e.g. source: dino_bottom, or reloc3r_bottom for the R-Geo arm's appearance
+    branch). No NoMaD-style masking (docs/0725_reloc3r_test/reloc3r/
+    reloc3r_0725.md: "Nomad-style goal mask 제거해야함 (goal이 항상 제공되도록 할
+    것)") -- the goal is always attended to; there is no goal_mask input here
+    at all, unlike the legacy SensorFusionConditionNetwork's NoMaD branch.
+    Always fully valid (a static goal frame is never "missing/padded").
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        super().__init__(spec, d_model, nhead)
+        self.num_latents = int(spec.get("num_latents", 16))
+        self.n_patch = int(spec.get("n_patch", 196))
+        self.feat_dim = int(spec.get("feat_dim", 768))
+        self.proj = nn.Linear(self.feat_dim, d_model)
+        self.resampler = PerceiverResampler(d_model, num_latents=self.num_latents, nhead=nhead)
+        self.slot_emb = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
+        self.n_tokens = self.num_latents
+
+    def encode(self, obs):
+        feat, _ = _unpack(obs)
+        feat = feat.float()
+        b, n_patch, feat_dim = feat.shape
+        if n_patch != self.n_patch or feat_dim != self.feat_dim:
+            raise ValueError(
+                f"[{self.name}] expected [*,{self.n_patch},{self.feat_dim}], got [*,{n_patch},{feat_dim}].")
+        lat = self.resampler(self.proj(feat))  # [B, n_lat, d]
+        self._token_valid_mask = None  # static goal frame: always fully valid
+        return lat + self.slot_emb.view(1, self.num_latents, self.d_model)
+
+
+@register_encoder("geometry")
+class GeometryTokenEncoder(BaseModalityEncoder):
+    """Cached Reloc3r body-frame geometry vector -> ONE token (docs/
+    0725_reloc3r_test/reloc3r/reloc3r_0725.md: "Reloc3r geometry는 하나의
+    geometry token으로 사용한다"). obs: [B, 4] = [dx_body, dy_body,
+    sin(relative_yaw_body), cos(relative_yaw_body)] (mode="current", source:
+    geometry_bottom, see scripts/build_reloc3r_geometry_cache.py). Frozen
+    Reloc3r never runs in the training loop -- this is a plain small-MLP
+    lookup of an offline-cached vector, same spirit as MotionEncoder but for a
+    single static value (no time dimension) rather than a history.
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        super().__init__(spec, d_model, nhead)
+        self.dim = int(spec.get("dim", 4))
+        self.proj = nn.Sequential(
+            nn.Linear(self.dim, d_model), nn.GELU(), nn.Linear(d_model, d_model))
+        self.n_tokens = 1
+
+    def encode(self, obs):
+        x, _ = _unpack(obs)
+        x = x.float()
+        if x.shape[-1] != self.dim:
+            raise ValueError(f"[{self.name}] expected dim={self.dim}, got {x.shape[-1]}.")
+        self._token_valid_mask = None  # always present (goal_appearance_geometry arm only)
+        return self.proj(x).unsqueeze(1)  # [B, 1, D]
 
 
 @register_encoder("pointcloud")

@@ -6,9 +6,10 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from cleandiffuser.diffusion import ContinuousRectifiedFlow, ContinuousDiffusionSDE
-from cleandiffuser.nn_diffusion import DiT1d
+from cleandiffuser.nn_diffusion import DiT1d, DiTCrossAttn1d
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from cleandiffuser.nn_condition.modular_fusion_condition import ModularSensorFusionCondition
+from cleandiffuser.nn_condition.token_sequence_condition import TokenSequenceFusionCondition
 from utils.modular_dataset import ModularDockingDataset
 from utils.docking_dataset import DockingDataset
 
@@ -110,7 +111,67 @@ def _modular_setups(args):
     return dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion
 
 
+def _token_sequence_setups(args):
+    """R-NoGoal / R-Goal / R-Geo path (docs/0725_reloc3r_test/reloc3r/
+    reloc3r_0725.md): TokenSequenceFusionCondition (unpooled [B,N,D]) +
+    DiTCrossAttn1d (action tokens cross-attend to it, no causal mask, no
+    AdaLN-vector conditioning). Same `sensors:`-dict-is-the-only-ablation-knob
+    pattern as _modular_setups; the three named variants differ ONLY in which
+    sensors are listed (no_goal drops `goal`/`geometry`, goal_appearance drops
+    `geometry`, goal_appearance_geometry has all three RGB/goal/geometry
+    sensors) -- enforced identical elsewhere by
+    test/test_reloc3r_acceptance_criteria.py's param/config-equality check.
+    No aux head, no NoMaD goal masking (not implemented, per spec)."""
+    from omegaconf import OmegaConf, open_dict
+    obs_horizon = args.get("obs_horizon", 30)
+    sensors = OmegaConf.to_container(args.sensors, resolve=True)
+    with open_dict(args):
+        args.use_aux_pose = False  # not implemented for this path (per spec)
+
+    dataset = ModularDockingDataset(
+        h5_path=args.train_data_path,
+        sensors=sensors,
+        horizon=args.horizon,
+        obs_horizon=obs_horizon,
+        action_key=args.get("action_key", "encoder"),
+        train_h5_path=args.train_data_path,
+    )
+    num_workers = args.get("num_workers", 4)
+    loader_kwargs = dict(
+        batch_size=args.batch_size, shuffle=True, num_workers=num_workers,
+        pin_memory=args.get("pin_memory", True), drop_last=True)
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = args.get("prefetch_factor", 2)
+    dataloader = DataLoader(dataset, **loader_kwargs)
+
+    nn_condition = TokenSequenceFusionCondition(
+        sensors=sensors,
+        d_model=args.d_model,
+        nhead=args.n_heads,
+        num_layers=args.get("condition_num_layers", 4),
+        dropout=args.dropout,
+    ).to(args.device)
+
+    nn_diffusion_model = DiTCrossAttn1d(
+        in_dim=2, emb_dim=args.d_model, d_model=args.d_model,
+        n_heads=args.n_heads, depth=args.depth, dropout=0.0).to(args.device)
+
+    Backbone = _select_backbone(args)
+    nn_diffusion = Backbone(
+        nn_diffusion=nn_diffusion_model, nn_condition=nn_condition,
+        ema_rate=args.ema_rate, device=args.device)
+
+    return dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion
+
+
 def model_setups(args):
+    # --- R-NoGoal/R-Goal/R-Geo cross-attention path (opt-in). Checked before
+    # use_modular_fusion so both flags can coexist in a saved config without
+    # ambiguity (this one wins).
+    if args.get("use_token_sequence_fusion", False):
+        return _token_sequence_setups(args)
+
     # --- Modular sensor-fusion path (opt-in via config). Spec-driven: the
     # `sensors` dict in the YAML defines the dataset reads AND the fusion net
     # branches, so ablations are config-only. See configs/robot/smr_new.yaml

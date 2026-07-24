@@ -7,3 +7,4 @@ from .early_conv_vit import EarlyConvViTMultiViewImageCondition
 from .resnets import ResNet18ImageCondition, ResNet18MultiViewImageCondition
 from .modality_encoders import ENCODER_REGISTRY, build_encoder, register_encoder
 from .modular_fusion_condition import ModularSensorFusionCondition
+from .token_sequence_condition import TokenSequenceFusionCondition

@@ -121,12 +121,13 @@ class ModularDockingDataset(Dataset):
         self.action_max = act.max(axis=0).astype(np.float32)
         self.action_scale = np.clip(self.action_max - self.action_min, 1e-5, None).astype(np.float32)
 
-        self.index_map, self.ep_start_map = [], []
+        self.index_map, self.ep_start_map, self.ep_end_map = [], [], []
         start = 0
         for end in self.episode_ends:
             for t in range(start, end - self.horizon + 1):
                 self.index_map.append(t)
                 self.ep_start_map.append(start)
+                self.ep_end_map.append(int(end))
             start = end
         self.root = None
         self.roots = None
@@ -184,6 +185,9 @@ class ModularDockingDataset(Dataset):
         self._ensure_open()
         t = self.index_map[idx]
         ep_start = self.ep_start_map[idx]
+        ep_end = self.ep_end_map[idx]
+        goal_row = ep_end - 1  # episode's static goal/docked frame (last row),
+        # same convention as utils/docking_dataset.py and endgame/se2.py.
         obs = {}
         for name, spec in self.sensors.items():
             sensor_root = self.roots[self._sensor_path(spec)]
@@ -212,6 +216,15 @@ class ModularDockingDataset(Dataset):
                 nsrc = spec.get("npoints_source")
                 if nsrc is not None:
                     obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][t]), dtype=torch.long)
+            elif mode == "goal":
+                # STATIC episode goal frame (docs/0725_reloc3r_test/reloc3r/
+                # reloc3r_0725.md: goal_image / geometry sensors read the
+                # episode's docked frame, not the current timestep t).
+                arr = self._select_channels(np.ascontiguousarray(ds[goal_row]), spec).astype(np.float32)
+                obs[name] = torch.from_numpy(np.ascontiguousarray(arr))
+                nsrc = spec.get("npoints_source")
+                if nsrc is not None:
+                    obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][goal_row]), dtype=torch.long)
             else:
                 raise ValueError(f"sensor '{name}': unknown mode '{mode}'.")
 

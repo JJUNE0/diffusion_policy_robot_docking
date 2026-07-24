@@ -985,3 +985,27 @@ held-out 10 episode, `EVAL_WARM_LEVEL=0.3` 고정.
 지금 데이터만으로도 **"청킹은 작은 K에서만 이득, K는 절대 크게 잡지 말 것"**이라는 실용적
 결론은 충분히 신뢰할 만하다(3개 모델에서 일관됨). 배포 반영 전 이 결과도 여전히 open-loop
 오프라인 지표라는 한계(§4.1/§2.12)는 동일하게 적용된다.
+
+---
+
+## 12. Aux-pose feedback — dock pose를 궤적 조건에 되먹임 (2026-07-21)
+
+> `test/queue_auxfb.sh` 기준. 새 메커니즘(`sensor_fusion_condition.py`의 `use_aux_feedback`):
+> aux head가 낸 ICP 증류 dock pose `[x,y,sin,cos]`를 zero-init Linear로 투영해 diffusion trunk가
+> 보는 조건 readout에 **더한다**(시작은 no-op) — 마지막 접근 궤적이 수렴할 명시적 dock 타깃을
+> 준다. §9/§10과 같은 graft 레시피(구 baseline warm-start, 10ep, batch 128, aux_relative=false).
+> 세 셀 전부 lidar+aux+feedback을 갖고 goal 브랜치만 다르다. **가설(사용자)**: aux-pose feedback이
+> "goal-lidar의 진짜 형태"일 수 있다 — 둘 다 dock 기하를 주입하는데, §2.10에서 goal-lidar 조건화는
+> 무효과였다(aux_pred가 그 정보를 이미 더 정밀하게 담고 있었을 가능성). `graft_auxfb_lidar`(goal
+> 없음)가 goal-lidar 셀들과 맞먹으면 이 가설 지지. 학습 로그 `outputs/train_graft_auxfb_*.log`.
+
+| 실험 | 추가된 것 | train (mm/ADE/FDE/velRMSE/speedup) | held-out (mm/ADE/FDE/velRMSE/speedup) |
+|---|---|---|---|
+| `graft_auxfb_full` | +goal-image+goal-lidar — feedback==goal-lidar 가설 검증 | 5.7 / 1.3 / 1.0 / 11.6 / 43% | 5.6 / 2.3 / 4.6 / 14.8 / 44% |
+| `graft_auxfb_lidar` | baseline+lidar+aux+FEEDBACK (goal 없음) — aux pose를 궤적 조건에 되먹임 | 5.8 / 1.0 / 1.1 / 9.8 / 35% | 5.5 / 2.2 / 5.8 / 13.7 / 36% |
+
+<!-- AUXFB:_header -->
+
+<!-- AUXFB:graft_auxfb_lidar -->
+
+<!-- AUXFB:graft_auxfb_full -->

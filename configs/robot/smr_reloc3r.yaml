@@ -1,0 +1,112 @@
+# ==========================================
+# Reloc3r hybrid vision encoder (modular fusion, after_0328 dataset).
+# Arm "R+rot" of the clean 3-arm ablation in docs/reloc3r.md:
+#   A      = modular DINO baseline        -> configs/robot/smr.yaml + use_modular_fusion=true
+#   A+rot  = modular DINO + rotation      -> configs/robot/smr_dino_rot.yaml
+#   R+rot  = modular Reloc3r + rotation   -> THIS FILE
+#
+# Swaps the DINO patch backbone for Reloc3r's ViT-L encoder features (feat_dim
+# 1024) and adds the validated Reloc3r rotation-to-goal signal as its own
+# modality (docs/reloc3r.md: heading r=0.93, strong at close range). The
+# translation/direction channel is deliberately excluded (lidar owns metric
+# position). Requires the precomputed cache from
+# scripts/precompute_reloc3r_cache.py.
+#
+# Run:  python scripts/train.py --config-name smr_reloc3r
+# ==========================================
+experiment_name: reloc3r_rot
+seed: 0
+device: cuda:0
+
+train_data_path: ${hydra:runtime.cwd}/dataset/after_0328_train.h5
+horizon: 60
+obs_horizon: 30
+vision_stride: 6
+batch_size: 512
+num_workers: 4
+prefetch_factor: 2
+
+state_dim: 2
+velocity_dim: 2
+image_width: 320
+image_height: 240
+
+use_modular_fusion: true
+
+# ABLATION = edit this dict. reloc3r_bottom + rotation both read the same sidecar
+# cache produced by scripts/precompute_reloc3r_cache.py (two datasets in one h5).
+sensors:
+  encoder:
+    encoder: motion
+    source: encoder              # wheel odometry [vx, wz]
+    mode: history
+    dim: 2
+    horizon: 30
+    normalize: action
+    dropout_prob: 0.1
+  reloc3r_bottom:
+    encoder: reloc3r_image
+    source: reloc3r_bottom       # Reloc3r ViT-L encoder patch features (1024-dim)
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5                   # obs_horizon(30) / stride(6)
+    stride: 6
+    num_latents: 16
+    feat_dim: 1024
+  rotation:
+    encoder: rotation
+    source: reloc3r_rot_bottom   # [R[:,0], R[:,1], geodesic_angle] to goal, 7-dim
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    dim: 7
+    horizon: 5
+    stride: 6
+    dropout_prob: 0.1
+  lidar:
+    encoder: pointcloud
+    source: lidar_points
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16
+    head: aux_pose               # ICP-distilled precision head (drop to ablate)
+
+# ---- Network ----
+diffusion_backbone: rectified_flow
+d_model: 384
+n_heads: 6
+depth: 12
+dropout: 0.1
+condition_num_layers: 4
+
+# ---- Aux precision loss shaping (mirrors smr.yaml; read by scripts/train.py) ----
+aux_weight: 1.0
+aux_dist_max: 1.1
+aux_dist_power: 2.0
+aux_dist_ref: 0.6
+
+# ---- Diffusion / training (matched to flow_goal_scratch20 for a fair A/B) ----
+ema_rate: 0.999
+num_epochs: 20
+diffusion_gradient_steps: null
+learning_rate: 1e-4
+weight_decay: 1e-5
+log_interval: 10
+save_interval: 1000
+resume_path: null
+init_from: null
+
+# ---- Inference defaults (unused during train) ----
+use_ema: false
+solver: Euler
+w_cfg: 1
+inference_sampling_steps: 20
+num_samples: 8
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: outputs/
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}

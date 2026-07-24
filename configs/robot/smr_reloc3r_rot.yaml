@@ -1,0 +1,102 @@
+# ==========================================
+# Reloc3r full-replacement vision encoder, ROTATION ONLY (no direction, no aux
+# head), raw lidar. Arm "rot" of the rot-vs-rot+dir ablation (user request
+# 2026-07-22, docs/reloc3r.md). Supersedes the earlier 3-arm plan (A/A+rot/R+rot)
+# -- DINO is dropped entirely per user decision, not just for this experiment.
+#
+# vs smr_reloc3r.yaml: identical sensors EXCEPT `head: aux_pose` is removed
+# from the lidar sensor (use_aux_pose stays false -> zero aux loss, zero
+# CrossAttnPoseHead compute) so lidar contributes only raw geometry, no
+# ICP-distilled precision supervision. Isolates: does the Reloc3r rotation
+# signal alone (no direction, no aux teacher) carry the policy?
+#
+# Run:  python scripts/train.py --config-name smr_reloc3r_rot
+# ==========================================
+experiment_name: reloc3r_rot_noaux
+seed: 0
+device: cuda:0
+
+train_data_path: ${hydra:runtime.cwd}/dataset/after_0328_train.h5
+horizon: 60
+obs_horizon: 30
+vision_stride: 6
+batch_size: 512
+num_workers: 4
+prefetch_factor: 2
+
+state_dim: 2
+velocity_dim: 2
+image_width: 320
+image_height: 240
+
+use_modular_fusion: true
+use_aux_pose: false     # no aux head configured below either -- explicit for clarity
+
+sensors:
+  encoder:
+    encoder: motion
+    source: encoder              # wheel odometry [vx, wz]
+    mode: history
+    dim: 2
+    horizon: 30
+    normalize: action
+    dropout_prob: 0.1
+  reloc3r_bottom:
+    encoder: reloc3r_image
+    source: reloc3r_bottom       # Reloc3r ViT-L encoder patch features (1024-dim)
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5                   # obs_horizon(30) / stride(6)
+    stride: 6
+    num_latents: 16
+    feat_dim: 1024
+  rotation:
+    encoder: rotation
+    source: reloc3r_rot_bottom   # [R[:,0], R[:,1], geodesic_angle] to goal, 7-dim
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    dim: 7
+    horizon: 5
+    stride: 6
+    dropout_prob: 0.1
+  lidar:
+    encoder: pointcloud
+    source: lidar_points         # raw 2D points, NO aux_pose head (removed)
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16
+
+# ---- Network ----
+diffusion_backbone: rectified_flow
+d_model: 384
+n_heads: 6
+depth: 12
+dropout: 0.1
+condition_num_layers: 4
+
+# ---- Diffusion / training (matched to flow_goal_scratch20 for a fair A/B) ----
+ema_rate: 0.999
+num_epochs: 20
+diffusion_gradient_steps: null
+learning_rate: 1e-4
+weight_decay: 1e-5
+log_interval: 10
+save_interval: 1000
+resume_path: null
+init_from: null
+
+# ---- Inference defaults (unused during train) ----
+use_ema: false
+solver: Euler
+w_cfg: 1
+inference_sampling_steps: 20
+num_samples: 8
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: outputs/
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}

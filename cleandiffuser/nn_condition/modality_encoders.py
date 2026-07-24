@@ -110,6 +110,34 @@ class ImuEncoder(MotionEncoder):
     pass
 
 
+@register_encoder("rotation")
+class RotationEncoder(MotionEncoder):
+    """Reloc3r rotation-to-goal signal as a low-dim time series. obs: [B, T, 7]
+    where the 7 dims are [R[:,0] (3), R[:,1] (3), geodesic_angle (1)] per frame
+    (see scripts/precompute_reloc3r_cache.py). Validated as the reliable Reloc3r
+    channel in docs/reloc3r.md (heading r=0.93, strong at close range); the
+    translation/direction channel is deliberately excluded (lidar owns it).
+    Identical mechanics to MotionEncoder (per-step MLP + temporal embedding);
+    kept as its own registry name so a smarter rotation encoding can be swapped
+    in later without touching any config that says `encoder: rotation`.
+    """
+    pass
+
+
+@register_encoder("direction")
+class DirectionEncoder(MotionEncoder):
+    """Reloc3r translation-DIRECTION-to-goal signal as a low-dim time series.
+    obs: [B, T, 3], the unit translation vector (scale-ambiguous by construction
+    -- see docs/reloc3r.md) per frame (scripts/precompute_reloc3r_direction.py).
+    docs/reloc3r.md found this channel degrades sharply at close range (median
+    16.9deg error at 0-0.3m vs 2.6deg at 0.9-1.1m) -- excluded from the R+rot
+    arm by default; this encoder exists so the rot-vs-rot+dir ablation can add
+    it back in without touching any other code, per user request 2026-07-22.
+    Identical mechanics to MotionEncoder (per-step MLP + temporal embedding).
+    """
+    pass
+
+
 @register_encoder("dino_image")
 class DinoImageEncoder(BaseModalityEncoder):
     """Camera view as DINO patch features -> Perceiver latents.
@@ -144,6 +172,21 @@ class DinoImageEncoder(BaseModalityEncoder):
                + self.time_emb.view(1, t, 1, self.d_model)
                + self.slot_emb.view(1, 1, self.num_latents, self.d_model))
         return lat.reshape(b, t * self.num_latents, self.d_model)
+
+
+@register_encoder("reloc3r_image")
+class Reloc3rImageEncoder(DinoImageEncoder):
+    """Camera view as Reloc3r ViT-L encoder patch features -> Perceiver latents.
+    Identical to DinoImageEncoder but defaults feat_dim to 1024 (ViT-L) instead
+    of 768 (DINOv3 ViT-B). obs: [B, Tv, 196, 1024] (precomputed, see
+    scripts/precompute_reloc3r_cache.py). Kept as its own registry name so the
+    DINO-vs-Reloc3r backbone swap is a one-word config change.
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        spec = dict(spec)
+        spec.setdefault("feat_dim", 1024)
+        super().__init__(spec, d_model, nhead)
 
 
 @register_encoder("pointcloud")

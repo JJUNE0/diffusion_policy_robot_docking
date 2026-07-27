@@ -1,0 +1,28 @@
+# @package _global_
+# R-NoGoal: C = [Z_rgb, Z_lidar, Z_wheel]. No goal image, no geometry.
+# docs/0725_reloc3r_test/reloc3r/reloc3r_0725.md
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  rgb_history:
+    encoder: dino_image
+    source: dino_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+  lidar:
+    encoder: pointcloud
+    source: lidar_points
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16

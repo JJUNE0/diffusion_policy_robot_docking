@@ -31,7 +31,8 @@ from omegaconf import OmegaConf
 
 from cleandiffuser.nn_condition.sensor_fusion_condition import SensorFusionConditionNetwork
 from cleandiffuser.nn_condition.modular_fusion_condition import ModularSensorFusionCondition
-from cleandiffuser.nn_diffusion import DiT1d
+from cleandiffuser.nn_condition.token_sequence_condition import TokenSequenceFusionCondition
+from cleandiffuser.nn_diffusion import DiT1d, DiTCrossAttn1d
 from cleandiffuser.rollout_core import RolloutController
 from utils.setups import _select_backbone
 from utils.docking_dataset import DockingDataset, denormalize
@@ -63,6 +64,20 @@ def build_model_from_cfg(cfg, device):
     """Rebuild the network exactly as model_setups did at TRAIN time, from the
     checkpoint's saved config (no dataset/dataloader)."""
     obs_horizon = cfg.get("obs_horizon", 30)
+    if cfg.get("use_token_sequence_fusion", False):
+        sensors = OmegaConf.to_container(cfg.sensors, resolve=True)
+        nn_condition = TokenSequenceFusionCondition(
+            sensors=sensors, d_model=cfg.d_model, nhead=cfg.n_heads,
+            num_layers=cfg.get("condition_num_layers", 4), dropout=cfg.dropout,
+        ).to(device)
+        nn_diffusion_model = DiTCrossAttn1d(
+            in_dim=2, emb_dim=cfg.d_model, d_model=cfg.d_model,
+            n_heads=cfg.n_heads, depth=cfg.depth, dropout=0.0).to(device)
+        Backbone = _select_backbone(cfg)
+        nn_diffusion = Backbone(
+            nn_diffusion=nn_diffusion_model, nn_condition=nn_condition,
+            ema_rate=cfg.get("ema_rate", 0.999), device=device)
+        return nn_condition, nn_diffusion
     if cfg.get("use_modular_fusion", False):
         sensors = OmegaConf.to_container(cfg.sensors, resolve=True)
         nn_condition = ModularSensorFusionCondition(
@@ -143,7 +158,8 @@ def main(args):
         dataset = ModularDockingDataset(
             h5_path=args.eval_data_path, sensors=sensors, horizon=horizon,
             obs_horizon=obs_h, action_key=model_cfg.get("action_key", "encoder"),
-            train_h5_path=model_cfg.get("train_data_path", args.eval_data_path))
+            train_h5_path=model_cfg.get("train_data_path", args.eval_data_path),
+            action_norm=model_cfg.get("action_norm", "minmax"))
         dino = None
     else:
         dataset = DockingDataset(

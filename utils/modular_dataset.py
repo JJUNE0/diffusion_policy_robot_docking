@@ -37,6 +37,40 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+# Percentile used by action_norm="robust" (see _action_stats).
+ACTION_ROBUST_PCT = 1.0
+
+
+def _action_stats(act, action_norm, pct=ACTION_ROBUST_PCT):
+    """Affine action normalizer bounds -> (min, max), mapped to [-1, 1].
+
+    "minmax" (legacy) lets the extremes set the scale, and on this dataset the
+    extremes are outliers: vx spans +-0.27 m/s while p1/p99 are only
+    -0.075/+0.084, so the scale is 0.563 m/s. The docking end-game runs at
+    2-15 mm/s, which lands at 0.007-0.053 of a [-1, 1] output range -- under 3%,
+    i.e. below the noise a diffusion sampler puts on its own output. That is a
+    direct contributor to the terminal stall measured on 2026-07-23
+    (test/terminal_metric.py).
+
+    "robust" sets the bounds at p1/p99 instead, shrinking the vx scale ~3.5x and
+    the wz scale ~3.4x, so the same physical command occupies several times more
+    of the output range. The affine CONTRACT is unchanged --
+    `(x + 1) / 2 * action_scale + action_min` still inverts it -- so every
+    consumer (inference_ema_v2, rollout_core, the eval scripts, the robot node)
+    keeps working with no edit; only the numbers in the checkpoint change.
+    The 1% tail beyond the bounds is clipped by normalize_action; those frames
+    are faster than anything the docking policy needs to reproduce.
+    """
+    if action_norm == "robust":
+        lo = np.percentile(act, pct, axis=0)
+        hi = np.percentile(act, 100.0 - pct, axis=0)
+        # keep 0 representable: an asymmetric band would bias "stop"
+        m = np.maximum(np.abs(lo), np.abs(hi))
+        return -m, m
+    if action_norm == "minmax":
+        return act.min(axis=0), act.max(axis=0)
+    raise ValueError(f"unknown action_norm '{action_norm}' (expected minmax|robust)")
+
 
 class ModularDockingDataset(Dataset):
     def __init__(
@@ -49,6 +83,7 @@ class ModularDockingDataset(Dataset):
         train_h5_path: str = None,
         dock_pose_key: str = "dock_pose",
         reliable_key: str = "reliable",
+        action_norm: str = "minmax",
     ):
         super().__init__()
         self.h5_path = h5_path
@@ -59,6 +94,7 @@ class ModularDockingDataset(Dataset):
         self.train_h5_path = train_h5_path or h5_path
         self.dock_pose_key = dock_pose_key
         self.reliable_key = reliable_key
+        self.action_norm = action_norm
 
         # Aux precision head is on iff any sensor declares `head: aux_pose`. Then
         # the dataset must emit dock-pose targets (from the ICP labels in the h5).
@@ -117,8 +153,9 @@ class ModularDockingDataset(Dataset):
 
         with h5py.File(self.train_h5_path, "r") as f:
             act = f[self.action_key][:]
-        self.action_min = act.min(axis=0).astype(np.float32)
-        self.action_max = act.max(axis=0).astype(np.float32)
+        a_min, a_max = _action_stats(act, self.action_norm)
+        self.action_min = np.asarray(a_min, np.float32)
+        self.action_max = np.asarray(a_max, np.float32)
         self.action_scale = np.clip(self.action_max - self.action_min, 1e-5, None).astype(np.float32)
 
         self.index_map, self.ep_start_map, self.ep_end_map = [], [], []
@@ -151,7 +188,10 @@ class ModularDockingDataset(Dataset):
             pass
 
     def normalize_action(self, a):
-        return 2.0 * (a - self.action_min) / self.action_scale - 1.0
+        n = 2.0 * (a - self.action_min) / self.action_scale - 1.0
+        # robust bounds sit at p1/p99, so the 1% tail lands outside [-1, 1];
+        # clip it rather than let the model spend output range on outliers.
+        return np.clip(n, -1.0, 1.0) if self.action_norm == "robust" else n
 
     @staticmethod
     def _select_channels(arr, spec):

@@ -92,7 +92,8 @@ class ModularEvalSource:
         sensors = _resolve_sensor_files(sensors, eval_h5)
         self.mds = ModularDockingDataset(
             h5_path=eval_h5, sensors=sensors, horizon=HORIZON, obs_horizon=OBS_HORIZON,
-            action_key=cfg.get("action_key", "encoder"), train_h5_path=stats_h5)
+            action_key=cfg.get("action_key", "encoder"), train_h5_path=stats_h5,
+            action_norm=cfg.get("action_norm", "minmax"))
         # bijection: usable frame row t  <->  dataset index i  (index_map holds
         # exactly the frames with a full horizon ahead, == the `ok` rows below).
         self.row_to_didx = {int(t): i for i, t in enumerate(self.mds.index_map)}

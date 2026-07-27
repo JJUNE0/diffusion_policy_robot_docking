@@ -1,0 +1,50 @@
+# @package _global_
+# 2-CAMERA R-NoGoal: C = [Z_rgb_bottom, Z_rgb_top, Z_lidar, Z_wheel].
+#
+# WHY THIS EXISTS (2026-07-26, field-demo selection):
+# The ONE model that ever docked successfully in the field is
+# outputs/checkpoint_step_100000.pt, and it is the ONLY model in this project
+# with TWO cameras (room1=image_top + room2=image_bottom). Every variant that
+# failed on the robot — 07-15 (scratch20, glidar_abs, flow_goal_adv: 0/3) and
+# the single-camera R-* arms — has one camera. docs/ablation_study_2026-07.md
+# §2.12 lists camera count as one of three unseparated candidate explanations,
+# and it is the only one we can act on cheaply.
+# Additionally, on 07-23 the variants carrying a LiDAR branch scored 1/3 while
+# those injecting a learned goal estimate without LiDAR went 0/3, so this arm
+# keeps LiDAR and drops the goal branch entirely: it is the LOWEST-RISK
+# challenger to the proven baseline — same visual input as the model that
+# worked, plus LiDAR, with no goal-estimate crutch to bias steering.
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  rgb_history:
+    encoder: dino_image
+    source: dino_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+  rgb_history_top:
+    encoder: dino_image
+    source: dino_top
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_top.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+  lidar:
+    encoder: pointcloud
+    source: lidar_points
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16

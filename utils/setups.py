@@ -81,6 +81,7 @@ def _modular_setups(args):
         obs_horizon=obs_horizon,
         action_key=args.get("action_key", "encoder"),
         train_h5_path=args.train_data_path,
+        action_norm=args.get("action_norm", "minmax"),
     )
     num_workers = args.get("num_workers", 4)
     loader_kwargs = dict(
@@ -135,6 +136,7 @@ def _token_sequence_setups(args):
         obs_horizon=obs_horizon,
         action_key=args.get("action_key", "encoder"),
         train_h5_path=args.train_data_path,
+        action_norm=args.get("action_norm", "minmax"),
     )
     num_workers = args.get("num_workers", 4)
     loader_kwargs = dict(

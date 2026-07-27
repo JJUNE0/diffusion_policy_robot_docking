@@ -1,0 +1,16 @@
+{
+ "run_dir": "outputs/train/r_geo_b16s2/2026-07-26_13-48-42",
+ "ckpt": "checkpoint_step_100000.pt",
+ "align": {
+  "policy_median_deg": 1.5789952278137207,
+  "policy_p90_deg": 2.947445154190064,
+  "demo_median_deg": 1.0279325012726872,
+  "demo_p25_deg": 0.6038210264356936,
+  "demo_p90_deg": 2.335913875963583,
+  "n_frames": 480,
+  "x_policy_median_mm": 10.173995776245022,
+  "x_policy_p90_mm": 50.23631623956673,
+  "x_demo_median_mm": 8.826926747700167,
+  "x_demo_p25_mm": 3.5164641082977637
+ }
+}

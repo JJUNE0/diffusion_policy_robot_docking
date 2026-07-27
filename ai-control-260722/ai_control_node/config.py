@@ -38,6 +38,29 @@ class AIControlConfig(BasePluginConfig):
     demo_continuity_blend: float = 0.5        # exponential continuity 스무딩 γ (old 이식; 급가속 억제). 0=끔
     demo_goal_lidar: str = ""                 # glidar 체크포인트용 docked-pose scan .npy (빈값=기본경로)
 
+    # ── 종단(마지막 몇 cm) knob (2026-07-25, 07-23 실기 진단 반영) ──────────────
+    # 07-23 15회 중 5회가 도크면 474.6±5.1mm에서 멈춰 실패(성공은 450.0±3.4mm).
+    # 두 knob 모두 기본 OFF — 켜기 전에 test/viz_dock_shift.py로 현장 값 재측정할 것.
+    #
+    # (1) near-dock progress gate = 추론 시점 AWR. 도크 근처에서 샘플 평균 대신
+    #     "전진하는 샘플" 쪽으로 지수 가중. 학습 불필요.
+    demo_progress_beta: float = 0.0           # >0이면 켜짐. 0.5~1.0 권장(작을수록 공격적)
+    demo_progress_gate_far: float = 0.60      # m. 이보다 멀면 gate=0 (기존 mean 그대로)
+    demo_progress_gate_near: float = 0.47     # m. 이보다 가까우면 gate=1 (최대 가중)
+    demo_progress_max_vx: float = 0.03        # m/s. 가중 결과 속도 상한. 해당 구간 시연이
+                                              #   ~15mm/s라 2배. 과전류 위험 때문에 낮게 잡음.
+    demo_progress_lateral: float = 0.010      # m. ⚠안전 인터록: 측면 오차가 이보다 크면 부스트
+                                              #   거부(peg가 홈 턱에 걸린 상태에서 밀면 과전류).
+                                              #   07-23 실측: 성공 5.6±3.4mm / 걸림 16.9±2.8mm
+    #
+    # (2) arrival latch = 도킹 완료 감지 후 정지 래치. 00780(성공→미인지→후진→실패) 대응.
+    demo_arrive_dist: float = 0.0             # m. >0이면 켜짐. 07-23 기준 0.458 권장
+    demo_arrive_lateral: float = 0.012        # m. 도크면 중심 좌우 오차 허용치.
+                                              #   07-23 성공 |lat| 5.6±3.4mm, 최악 성공 9.0mm
+    demo_arrive_frames: int = 3               # 연속 몇 프레임 만족해야 래치
+    demo_release_dist: float = 0.52           # m. 이보다 멀어지면 래치 해제(히스테리시스)
+    demo_release_frames: int = 5              # 연속 몇 프레임 만족해야 해제
+
     # 테스트 플러그인용 (test_80cm_rotate, test_csv_replay 등) — AI 개발자 일반 모델엔 무관
     phase_sec: float = 5.0
     forward_m: float = 0.8

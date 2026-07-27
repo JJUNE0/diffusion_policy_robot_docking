@@ -28,6 +28,7 @@ from omegaconf import OmegaConf  # noqa: E402
 from scripts.inference_ema_v2 import build_model_from_cfg  # noqa: E402
 from dist_binned_error import H5Batcher, BIN_EDGES, bin_stats  # noqa: E402
 from eval_openloop_metrics import load_episode, rollout  # noqa: E402
+import terminal_metric as tm  # noqa: E402
 
 # Env-overridable: EVAL_EPISODES="0,4,8" (indices into EVAL_H5's episodes)
 EVAL_EPISODES = [int(x) for x in os.environ.get("EVAL_EPISODES", "0,50,110").split(",")]
@@ -39,6 +40,10 @@ OUT_DIR = os.path.join(REPO, "test", "out", "weekend")
 ALIGN_NEAR_M = 0.6          # only score frames inside the precision zone
 ALIGN_N_SAMPLES = 4         # policy samples averaged per frame
 HORIZON, DT = 60, 0.0333
+
+# Terminal-band metric — see test/terminal_metric.py for what it measures and why.
+TERM_N_EPISODES = int(os.environ.get("TERM_EPISODES", "15"))
+TERM_N_SAMPLES = 4          # policy samples averaged per frame
 
 
 def latest_ckpt(run_dir):
@@ -196,6 +201,43 @@ def align_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
                 x_demo_median_mm=float(np.median(xd)), x_demo_p25_mm=float(np.percentile(xd, 25)))
 
 
+@torch.no_grad()
+def terminal_eval(nn_diffusion, solver, use_ema, src, act_min, act_scale):
+    """Does the policy still MOVE in the last few centimetres? See terminal_metric.
+
+    Terminal frames are rare, so this samples the final usable block of each of
+    TERM_N_EPISODES episodes rather than uniformly at random.
+    """
+    rem = tm.remaining_mm(src.pose, src.rel_valid, src.episode_ends)
+    eps = np.linspace(0, len(src.episode_ends) - 1, TERM_N_EPISODES).astype(int)
+    rem_a, pol_a, demo_a = [], [], []
+    for ep_i in eps:
+        e = int(src.episode_ends[ep_i])
+        blk = np.arange(max(0, e - BLOCK), e)
+        blk = blk[src.ok[blk] & np.isfinite(rem[blk])]
+        if len(blk) < 8:
+            continue
+        ctx, _, _, _ = src.batch(blk)
+        B = len(blk)
+        repd = {k: v.repeat_interleave(TERM_N_SAMPLES, dim=0) for k, v in ctx.items()}
+        prior = torch.randn(B * TERM_N_SAMPLES, HORIZON, 2, device=DEVICE)
+        out = nn_diffusion.sample(solver=solver, w_cfg=1, prior=prior, condition_cfg=repd,
+                                  n_samples=B * TERM_N_SAMPLES,
+                                  sample_steps=int(os.environ.get("EVAL_STEPS", "20")),
+                                  use_ema=use_ema)
+        out = out[0] if isinstance(out, tuple) else out
+        act = ((out.cpu().numpy() + 1.0) / 2.0 * act_scale + act_min)
+        act = act.reshape(B, TERM_N_SAMPLES, HORIZON, 2).mean(axis=1)
+        # what actually reaches the wheels: the first EXEC_K steps of the plan
+        pol_a.append(np.abs(act[:, :tm.EXEC_K, 0]).mean(axis=1) * 1000.0)
+        demo_a.append(np.abs(np.stack([src.enc[r:r + tm.EXEC_K, 0] for r in blk])).mean(axis=1) * 1000.0)
+        rem_a.append(rem[blk])
+    if not pol_a:
+        return None
+    got = tm.band_table(np.concatenate(rem_a), np.concatenate(pol_a), np.concatenate(demo_a))
+    return tm.summarize(*got) if got else None
+
+
 def main(run_dir):
     os.makedirs(OUT_DIR, exist_ok=True)
     cfg = OmegaConf.load(os.path.join(run_dir, "config.yaml"))
@@ -233,6 +275,13 @@ def main(run_dir):
         print(f"[{exp}] xpos (<0.6m) policy {a['x_policy_median_mm']:.1f} mm "
               f"(p90 {a['x_policy_p90_mm']:.1f}) | demo median {a['x_demo_median_mm']:.1f} "
               f"/ p25 {a['x_demo_p25_mm']:.1f}", flush=True)
+
+    # TERMINAL BAND — the axis that actually separated success from failure on
+    # the robot (2026-07-23). Rank runs by this before ADE/FDE.
+    result["terminal"] = terminal_eval(nn_diffusion, solver, use_ema, src,
+                                       ck["action_min"], ck["action_scale"])
+    if result["terminal"]:
+        tm.report(exp, result["terminal"])
     del src
 
     rolls = {}
@@ -259,14 +308,22 @@ def main(run_dir):
         align_demo_deg=result["align"]["demo_median_deg"] if result["align"] else None,
         align_demo_p25_deg=result["align"]["demo_p25_deg"] if result["align"] else None,
         xpos_mm=result["align"]["x_policy_median_mm"] if result["align"] else None,
-        xpos_demo_mm=result["align"]["x_demo_median_mm"] if result["align"] else None)
+        xpos_demo_mm=result["align"]["x_demo_median_mm"] if result["align"] else None,
+        # Rank by these two first — they are the only offline numbers that moved
+        # with real-robot success on 2026-07-23 (see terminal_eval).
+        term_vx_ratio=result["terminal"]["term_vx_ratio"] if result["terminal"] else None,
+        term_idle_frac=result["terminal"]["term_idle_frac"] if result["terminal"] else None,
+        term_vx_mms=result["terminal"]["term_vx_mms"] if result["terminal"] else None)
 
     tag = os.environ.get("EVAL_TAG", "")
     out = os.path.join(OUT_DIR, f"{exp}{'_' + tag if tag else ''}.json")
     json.dump(result, open(out, "w"), indent=1)
     s = result["summary"]
-    print(f"[{exp}] SUMMARY: near {s['near_mm']} mm | ADE {s['ade_cm']:.1f} cm | "
-          f"FDE med {s['fde_cm']:.1f} / mean {s['fde_cm_mean']:.1f} cm -> {out}", flush=True)
+    tr = f"{s['term_vx_ratio']:.2f}" if s["term_vx_ratio"] is not None else "n/a"
+    ti = f"{s['term_idle_frac']*100:.0f}%" if s["term_idle_frac"] is not None else "n/a"
+    print(f"[{exp}] SUMMARY: termRatio {tr} / parked {ti} [primary] | near {s['near_mm']} mm | "
+          f"ADE {s['ade_cm']:.1f} cm | FDE med {s['fde_cm']:.1f} / mean "
+          f"{s['fde_cm_mean']:.1f} cm -> {out}", flush=True)
 
 
 if __name__ == "__main__":

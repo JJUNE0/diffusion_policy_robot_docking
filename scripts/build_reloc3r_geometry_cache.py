@@ -48,7 +48,14 @@ import h5py
 import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CALIB_PATH = os.path.join(REPO, "reloc3r/body_frame_calibration.json")
+# ICP-FREE calibration (user decision 2026-07-25): the earlier ICP/dock_pose-
+# fit R_cb (body_frame_calibration.json) was found to have the TRANSLATION
+# direction backwards under direct visual inspection against real odometry +
+# camera motion (docs/0725_reloc3r_test/reloc3r/odometry_calibration_check.png
+# -- 4/4 straight-driving and 4/4 turning examples matched the wheel-odometry
+# ground truth for the NEW fit and were opposite for the OLD one). Superseded
+# by scripts/calibrate_reloc3r_odometry.py, which never touches dock_pose/ICP.
+CALIB_PATH = os.path.join(REPO, "reloc3r/body_frame_calibration_odometry.json")
 
 
 def wrap(a):
@@ -68,10 +75,9 @@ def main():
     with open(CALIB_PATH) as f:
         calib = json.load(f)
     R_cb = np.array(calib["R_cb"])
-    sensor_to_body_yaw = float(calib["sensor_to_body_yaw_rad"])  # unused here: only
-    # (dx,dy) derived from dock_pose needed this; Reloc3r's OWN camera-frame
-    # output goes through R_cb directly (R_cb was fit to land in the SAME
-    # already-yaw-corrected body frame -- see calibrate script).
+    assert calib.get("uses_icp_or_dock_pose") is False, (
+        f"{CALIB_PATH} does not declare uses_icp_or_dock_pose=False; refusing to "
+        f"build the geometry cache from a possibly-ICP-derived calibration.")
 
     with h5py.File(cache_h5, "r") as f:
         n = f["reloc3r_bottom"].shape[0]
@@ -114,9 +120,9 @@ def main():
         gds = fo.create_dataset("geometry_bottom", data=geometry, dtype="float32")
         fo.create_dataset("relative_pose_bottom", data=relative_pose, dtype="float32")
         fo.create_dataset("goal_row", data=goal_row, dtype="int64")
-        gds.attrs["preprocessing_version"] = "v1_2026-07-25"
+        gds.attrs["preprocessing_version"] = "v2_odometry_2026-07-25"
         gds.attrs["reloc3r_checkpoint"] = "siyan824/reloc3r-224"
-        gds.attrs["sensor_to_body_yaw_deg"] = float(np.degrees(sensor_to_body_yaw))
+        gds.attrs["calibration_method"] = "wheel_odometry_handeye (ICP-free)"
         gds.attrs["R_cb_flat"] = R_cb.flatten().tolist()
         gds.attrs["source_rot_cache"] = "reloc3r_rot_bottom"
         gds.attrs["source_dir_cache"] = "reloc3r_dir_bottom"

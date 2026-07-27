@@ -1,0 +1,16 @@
+{
+ "run_dir": "outputs/train/r_nogoal_b16s1/2026-07-26_13-48-41",
+ "ckpt": "checkpoint_step_100000.pt",
+ "align": {
+  "policy_median_deg": 1.494866967201233,
+  "policy_p90_deg": 3.2955556154251098,
+  "demo_median_deg": 1.0279325012726872,
+  "demo_p25_deg": 0.6038210264356936,
+  "demo_p90_deg": 2.335913875963583,
+  "n_frames": 480,
+  "x_policy_median_mm": 11.37214220795527,
+  "x_policy_p90_mm": 49.49578503351463,
+  "x_demo_median_mm": 8.826926747700167,
+  "x_demo_p25_mm": 3.5164641082977637
+ }
+}

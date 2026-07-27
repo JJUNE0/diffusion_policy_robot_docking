@@ -1,0 +1,16 @@
+{
+ "run_dir": "outputs/train/r2cam_geo/2026-07-27_00-16-20",
+ "ckpt": "checkpoint_step_100000.pt",
+ "align": {
+  "policy_median_deg": 1.4760009050369263,
+  "policy_p90_deg": 2.875136709213257,
+  "demo_median_deg": 1.0279325012726872,
+  "demo_p25_deg": 0.6038210264356936,
+  "demo_p90_deg": 2.335913875963583,
+  "n_frames": 480,
+  "x_policy_median_mm": 11.639557366530482,
+  "x_policy_p90_mm": 53.35533096536581,
+  "x_demo_median_mm": 8.826926747700167,
+  "x_demo_p25_mm": 3.5164641082977637
+ }
+}

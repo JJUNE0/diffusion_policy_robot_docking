@@ -1,0 +1,62 @@
+# @package _global_
+# 2-CAMERA R-Geo: C = [Z_rgb_bottom, Z_rgb_top, Z_lidar, Z_wheel, Z_goal, Z_reloc].
+# The paper's proposed conditioning set, moved onto the two-camera visual input
+# that the only field-successful model used (see no_goal_2cam.yaml for the
+# reasoning and the field record).
+#
+# The geometry token is UNCHANGED and still derived from the bottom camera only:
+# build_reloc3r_geometry_cache.py converts Reloc3r's camera-frame estimate into
+# the BODY frame (t_body = R_cb t_cam, R_body = R_cb R_cam R_cb^T) before it is
+# ever cached, so adding a second appearance stream neither changes the token nor
+# requires re-calibration. Deriving geometry from the top camera as well WOULD
+# need its own R_cb and is not attempted — build_reloc3r_geometry_cache.py loads
+# a single bottom-camera calibration and hardcodes the *_bottom dataset keys.
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  rgb_history:
+    encoder: dino_image
+    source: dino_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+  rgb_history_top:
+    encoder: dino_image
+    source: dino_top
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_top.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+  lidar:
+    encoder: pointcloud
+    source: lidar_points
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16
+  goal:
+    encoder: goal_image
+    source: dino_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: goal
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.2
+  geometry:
+    encoder: geometry
+    source: geometry_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: current
+    dim: 4
+    dropout_prob: 0.2

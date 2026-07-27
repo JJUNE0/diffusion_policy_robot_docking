@@ -1,0 +1,140 @@
+{
+ "run_dir": "outputs/checkpoint_step_100000.pt",
+ "ckpt": "checkpoint_step_100000.pt",
+ "note": "Re-eval with architecture/backbone empirically confirmed from the checkpoint's own state_dict (2026-07-26), NOT from configs/robot/old_bassline_smr.yaml (contradicted on dataset path, checkpoint_dir, use_room1, and diffusion_backbone) nor smr.yaml (contradicted on use_room1 and diffusion_backbone). See docs/0725_reloc3r_test/ reloc3r/ chat log for the forensic trail.",
+ "openloop": {
+  "0": {
+   "vel_rmse": 0.04616786912083626,
+   "ade_cm": 24.642657361538927,
+   "fde_cm": 24.318225386243732,
+   "path_len_cm": 94.85664629215714,
+   "fde_over_path": 0.2563681759456679,
+   "steps": 500
+  },
+  "1": {
+   "vel_rmse": 0.02619454637169838,
+   "ade_cm": 4.584431092336819,
+   "fde_cm": 9.150325657477202,
+   "path_len_cm": 47.63454185082156,
+   "fde_over_path": 0.19209433536977294,
+   "steps": 500
+  },
+  "2": {
+   "vel_rmse": 0.02511604316532612,
+   "ade_cm": 7.423815150233725,
+   "fde_cm": 9.762811696936065,
+   "path_len_cm": 59.57200301065686,
+   "fde_over_path": 0.16388254890790885,
+   "steps": 500
+  },
+  "3": {
+   "vel_rmse": 0.03366108238697052,
+   "ade_cm": 4.2846503912873395,
+   "fde_cm": 10.371869558839988,
+   "path_len_cm": 74.45996021669883,
+   "fde_over_path": 0.13929458904698597,
+   "steps": 500
+  },
+  "4": {
+   "vel_rmse": 0.025490080937743187,
+   "ade_cm": 2.515561235890697,
+   "fde_cm": 5.628157937307504,
+   "path_len_cm": 71.13525359042212,
+   "fde_over_path": 0.07911910976957981,
+   "steps": 500
+  },
+  "5": {
+   "vel_rmse": 0.033224791288375854,
+   "ade_cm": 4.87421879684196,
+   "fde_cm": 13.047680023738781,
+   "path_len_cm": 59.76530192882191,
+   "fde_over_path": 0.21831530340594693,
+   "steps": 500
+  },
+  "6": {
+   "vel_rmse": 0.026016566902399063,
+   "ade_cm": 11.317886198758158,
+   "fde_cm": 17.28433034492388,
+   "path_len_cm": 76.78413744271305,
+   "fde_over_path": 0.22510287828419429,
+   "steps": 500
+  },
+  "7": {
+   "vel_rmse": 0.02237878181040287,
+   "ade_cm": 6.0742621798650696,
+   "fde_cm": 8.558228588199038,
+   "path_len_cm": 56.35568054201583,
+   "fde_over_path": 0.15186097489885644,
+   "steps": 500
+  },
+  "8": {
+   "vel_rmse": 0.020795028656721115,
+   "ade_cm": 2.0058410366084716,
+   "fde_cm": 4.054004428852311,
+   "path_len_cm": 64.68049855426983,
+   "fde_over_path": 0.0626773837472947,
+   "steps": 500
+  },
+  "9": {
+   "vel_rmse": 0.0261561069637537,
+   "ade_cm": 8.96548444406318,
+   "fde_cm": 19.082100708495197,
+   "path_len_cm": 88.23897828499516,
+   "fde_over_path": 0.21625477854994685,
+   "steps": 500
+  }
+ },
+ "terminal": {
+  "bands": [
+   {
+    "lo_mm": 100,
+    "hi_mm": 200,
+    "n": 294,
+    "policy_vx_mms": 37.95188033702422,
+    "demo_vx_mms": 33.91240881127464,
+    "vx_ratio": 1.1191148510926952,
+    "policy_idle_frac": 0.023809523809523808,
+    "demo_idle_frac": 0.13945578231292516
+   },
+   {
+    "lo_mm": 200,
+    "hi_mm": 10000,
+    "n": 2735,
+    "policy_vx_mms": 42.460002376474236,
+    "demo_vx_mms": 41.237481859311465,
+    "vx_ratio": 1.0296458576528413,
+    "policy_idle_frac": 0.015356489945155392,
+    "demo_idle_frac": 0.09250457038391224
+   }
+  ],
+  "headline_band": [
+   100,
+   200
+  ],
+  "term_vx_mms": 37.95188033702422,
+  "term_vx_ratio": 1.1191148510926952,
+  "term_idle_frac": 0.023809523809523808,
+  "demo_vx_mms": 33.91240881127464,
+  "demo_idle_frac": 0.13945578231292516,
+  "n_frames": 294
+ },
+ "symmetry": {
+  "policy_right_frac": 0.42920353982300885,
+  "policy_n_turning": 3842,
+  "se": 0.007985343504610403,
+  "demo_right_frac": 0.5355826481428977,
+  "demo_n_turning": 3527,
+  "bias": 0.10637910831988884
+ },
+ "summary": {
+  "ade_cm": 5.474240488353515,
+  "fde_cm": 10.067340627888026,
+  "ade_cm_mean": 7.668880788742435,
+  "fde_cm_mean": 12.125773433101369,
+  "vel_rmse": 0.02608633693307638,
+  "term_vx_ratio": 1.1191148510926952,
+  "term_idle_frac": 0.023809523809523808,
+  "turn_right_frac": 0.42920353982300885,
+  "turn_bias": 0.10637910831988884
+ }
+}

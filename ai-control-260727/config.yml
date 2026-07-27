@@ -1,0 +1,85 @@
+# 식별자/연결/ENABLE_SEND는 compose env로 오버라이드.
+
+# ── 식별자 ──
+plugin_id: ai-control
+run_plugin: run_postech_docking_demo
+
+demo_ckpt: demo_20260722/graft_goalimage_step_16940.pt # ai_models/ 기준 상대경로
+demo_agg: medoid            # "medoid"(결단적) | "mean"(부드럽지만 급회전 뭉갬)
+demo_ema: 1.0              # 궤적 프레임간 EMA 알파 (1.0=끔). ★OLD는 궤적EMA 없음 → plugin이 plan.current를
+                          #   실행하므로 이 값은 현재 미사용. OLD 동일성 유지 위해 끔(1.0)으로 명시.
+demo_nsamples: 1           # 샘플 수 (OLD 하드코딩=1)
+demo_steps: 30             # denoising 스텝 (OLD 하드코딩=30)
+demo_use_ema: true
+demo_continuity_blend: 0.2  # ★continuity 스무딩 γ — OLD blend_gamma=0.5 와 정확히 일치(D2 수정). 0=끔
+# ── 카메라 (2026-07-22: room1/room2 명칭 폐기, 실제 장치 식별자로 통일) ──
+#   usb0    = livekit_tracks_video1 (2번째 카메라, 일부 체크포인트만 사용)
+#   orbbec0 = livekit_tracks_video2 (기본 카메라, 전 체크포인트 공통 필수)
+demo_video1: video1         # usb0 스트림 — use_usb0(=옛 use_room1)=True 체크포인트에서만 쓰임
+demo_video2: video2         # orbbec0 스트림 — 항상 필요
+demo_backbone: ddpm   # "rectified_flow" | "ddpm" — 체크포인트와 반드시 일치시킬 것
+                            # (graft6/wave2/wave3/auxfb 전부 usb0 카메라도 씀). 자동 감지되어
+# ── goal 참조 파일 경로 ──
+demo_goal_image_usb0: "ai_models/goal_image_usb0.jpg"          # usb0 도킹 완료 사진 (기본값과 동일 경로)
+demo_goal_image_orbbec0: "ai_models/goal_image_orbbec0.jpg"    # orbbec0 도킹 완료 사진 (기본값과 동일 경로)
+demo_goal_lidar: "ai_models/goal_lidar_scan.npy"               # glidar 체크포인트용 
+
+#-----aux-pose feedback 런타임 on/off (2026-07-22, graft_auxfb_* 체크포인트 전용).
+# demo_aux_feedback: true    # false=같은 체크포인트, aux 피드백만 끔
+# 궤적 temporal-consistency warm-start (2026-07-21, rollout_core 공유). 기본 꺼짐
+# — 오프라인 K 스윕(§13)에서 최적값 정한 뒤 켤 것. warm_start=true면 이전 계획을
+# 다음 샘플링의 prior로 재사용해 프레임 간 궤적을 잇는다.
+# demo_warm_start: false     # true=이전 계획 warm-start (SDEdit식 부분 재노이즈)
+# demo_warm_level: 0.3       # 재노이즈 강도 (0=이전계획 그대로, 1=순수 노이즈=끔과 동일)
+
+# ── 윈도우 / 동기화 ──
+window_size: 60
+data_latency_threshold_sec: 0.2
+data_unreliable_slow_tail_size: 0
+window_sync_mode: track
+window_sync_fps: 30.0
+window_sync_reference_track: usb-0
+window_sync_max_age_sec: 0.1
+require_lidar: true
+require_encoder: true
+require_marker_pose: false
+require_video: true
+
+# ── 보간 ──
+interpolation_enabled: true
+interpolation_streams: encoder
+interpolation_target_fps: 30.0
+interpolation_buffer_padding: 20
+
+# ── 추론 / 전송 (트레젝토리 보정) ──
+inference_size: 32
+inference_fps: 30
+prediction_delay_sec: 0.0
+send_interval_sec: 0.1
+action_horizon: 32
+send_padding_cap_interval_multiplier: 8.0
+send_padding_reflect_small_latency: true
+initial_send_padding_sec: 0.0
+no_send_when_no_horizon: false
+# 스트라이드 보정: 측정 처리시간에 이 초를 더해 start_index를 앞당김(명령 전달 지연 보정).
+# 예) 추론 0.068초 + 이 값 0.1 = 0.168초처럼 동작. 0.0=끔(기본).
+# (단 send_padding_cap_interval_multiplier*send_interval 상한에 걸릴 수 있음.)
+send_extra_latency_sec: 0.0
+
+# ── 영상 (LiveKit) ──
+num_video_channels: 2
+video_height: 480
+video_width: 640
+livekit_tracks_video1: usb-0
+livekit_tracks_video2: orbbec-0
+
+# ── 출력 ──
+# 상시 도킹 — MQTT 궤적 발행 + 제어권 점유. (compose ENABLE_SEND env가 최종 우선; 기본 true)
+enable_send: true
+trajectory_color: "#00cfff"
+v_max: 1.0
+trajectory_ttl_ms: 400
+
+# ── 로깅 ──
+log_snapshot: false
+log_level: INFO

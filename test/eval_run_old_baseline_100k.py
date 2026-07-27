@@ -38,13 +38,23 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 CKPT_PATH = os.path.join(REPO, "outputs/checkpoint_step_100000.pt")
 TEST_H5 = os.path.join(REPO, "dataset/after_0328_test.h5")
 DINO_CACHE = os.path.join(REPO, "dataset/after_0328_test_dino_bottom.h5")  # has BOTH dino_bottom+dino_top
-OUT = os.path.join(REPO, "test/out/rgeo/old_baseline_100k_heldout_v2.json")
+EVAL_TAG = os.environ.get("EVAL_TAG", "full_k32")
+OUT = os.path.join(REPO, f"test/out/rgeo/old_baseline_100k_heldout_{EVAL_TAG}.json")
 
 OBS_HORIZON, VISION_STRIDE, HORIZON, DT = 30, 6, 60, 0.0333
 N_SAMPLES = 8
 SAMPLE_STEPS = int(os.environ.get("EVAL_STEPS", "20"))
 TRAJ_EMA_ALPHA = 0.3
-MAX_STEPS = int(os.environ.get("EVAL_MAX_STEPS", "500")) or 10 ** 9
+# Full-episode eval (2026-07-27, user request): the old MAX_STEPS=500 cap
+# silently truncated every held-out episode to 20-34% of its length. Fixed at
+# effectively "no cap" (episodes here max out at ~2600).
+MAX_STEPS = int(os.environ.get("EVAL_MAX_STEPS", "100000"))
+# Action/execution horizon (user request 2026-07-27): replan every K steps,
+# execute that plan's raw [0:K] chunk verbatim -- see test/eval_run_rgeo.py's
+# EXEC_CHUNK_K comment for the full rationale (matches eval_openloop_metrics.py's
+# k2/k8/k16 ablation pattern; also makes full-episode eval cheaper, not more
+# expensive, than the old K=1/500-cap protocol).
+EXEC_CHUNK_K = int(os.environ.get("EVAL_CHUNK_K", "32"))
 EVAL_EPISODES = [int(x) for x in os.environ.get("EVAL_EPISODES", "0,1,2,3,4,5,6,7,8,9").split(",")]
 
 
@@ -79,7 +89,8 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema, rem=None):
         traj_ema_alpha=TRAJ_EMA_ALPHA, warm_start=False, warm_level=0.3, device=DEVICE)
 
     selected = []
-    for t in range(ep_steps):
+    t = 0
+    while t < ep_steps:
         rows = np.clip(np.arange(t - OBS_HORIZON + 1, t + 1), 0, None)
         vel = (2.0 * (torch.as_tensor(enc[rows]) - act_min) / act_scale - 1.0).float()
         feats2 = torch.from_numpy(dino2[rows[::VISION_STRIDE]].astype(np.float32)).to(DEVICE)
@@ -90,11 +101,13 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema, rem=None):
         if dino1 is not None:
             feats1 = torch.from_numpy(dino1[rows[::VISION_STRIDE]].astype(np.float32)).to(DEVICE)
             context["dino_feat1"] = feats1.unsqueeze(0).repeat(N_SAMPLES, 1, 1, 1, 1).view(N_SAMPLES, -1, 196, 768)
-        plan = ctrl.plan(context, act_min, act_scale, chunk_shift=1)
-        selected.append(plan.ema[0, :])
+        k = min(EXEC_CHUNK_K, ep_steps - t, HORIZON)
+        plan = ctrl.plan(context, act_min, act_scale, chunk_shift=k)
+        selected.extend(list(plan.current[0:k]))             # raw chunk, no EMA
+        t += k
 
     ai = np.array(selected)
-    gt = enc[:ep_steps]
+    gt = enc[:len(ai)]
     gt_path = reconstruct_pose_rk4(gt[:, 0], gt[:, 1], dt=DT)
     ai_path = reconstruct_pose_rk4(ai[:, 0], ai[:, 1], dt=DT)
     disp = np.hypot(*(gt_path[:, :2] - ai_path[:, :2]).T)
@@ -103,7 +116,7 @@ def rollout(nn_diffusion, solver, ep, act_min, act_scale, use_ema, rem=None):
         vel_rmse=float(np.sqrt(((ai - gt) ** 2).mean())),
         ade_cm=float(disp.mean() * 100), fde_cm=float(disp[-1] * 100),
         path_len_cm=path_len * 100, fde_over_path=float(disp[-1] / max(path_len, 1e-9)),
-        steps=int(ep_steps))
+        exec_chunk_k=EXEC_CHUNK_K, steps=int(len(ai)))
     # Steering symmetry + terminal mobility. This checkpoint is the ONLY model
     # that ever docked successfully in the field (ablation_study_2026-07.md
     # §2.12), and steering bias is the only offline metric whose readings have

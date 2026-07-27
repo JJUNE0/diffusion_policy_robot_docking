@@ -39,7 +39,21 @@ DT = 0.0333
 N_SAMPLES = 8
 SAMPLE_STEPS = int(os.environ.get("EVAL_STEPS", "20"))
 TRAJ_EMA_ALPHA = 0.3
-MAX_STEPS = int(os.environ.get("EVAL_MAX_STEPS", "500")) or 10 ** 9
+# Full-episode eval (2026-07-27, user request): the old MAX_STEPS=500 cap
+# silently truncated every held-out episode to 20-34% of its length (episodes
+# run 1417-2616 rows), so ADE/FDE never saw the terminal 2/3 of any approach.
+# Fixed at effectively "no cap" (episodes here max out at ~2600).
+MAX_STEPS = int(os.environ.get("EVAL_MAX_STEPS", "100000"))
+# Action/execution horizon (user request 2026-07-27): replan every K steps and
+# execute that plan's raw [0:K] chunk verbatim (no cross-time EMA blend needed
+# -- one coherent sampled trajectory is already smooth internally). This is
+# the same EXEC_CHUNK_K pattern as test/eval_openloop_metrics.py's k2/k8/k16
+# ablation. K=32 also makes full-episode eval CHEAPER than the old per-step
+# (K=1) 500-cap protocol: ~611 vs ~5000 diffusion sampler calls across the
+# held-out split. The trained prediction length (`horizon`, from ds/cfg) is
+# unchanged -- only how much of each sampled plan gets executed before
+# resampling changes.
+EXEC_CHUNK_K = int(os.environ.get("EVAL_CHUNK_K", "32"))
 OUT_DIR = os.path.join(REPO, "test/out/rgeo")
 
 EVAL_H5 = os.environ.get("EVAL_H5", os.path.join(REPO, "dataset/after_0328_train.h5"))
@@ -87,14 +101,17 @@ def rollout(nn_diffusion, solver, ds, ep_idx, act_min, act_scale, use_ema, episo
 
     row_to_didx = {int(t): i for i, t in enumerate(ds.index_map) if ds.ep_start_map[i] == s}
     selected = []
-    for t in range(ep_steps):
+    t = 0
+    while t < ep_steps:
         di = row_to_didx.get(s + t)
         if di is None:
             break
         obs = ds[di]["obs"]
         context = {k: v.unsqueeze(0).to(DEVICE).repeat(N_SAMPLES, *([1] * v.dim())) for k, v in obs.items()}
-        plan = ctrl.plan(context, act_min, act_scale, chunk_shift=1)
-        selected.append(plan.ema[0, :])
+        k = min(EXEC_CHUNK_K, ep_steps - t, horizon)
+        plan = ctrl.plan(context, act_min, act_scale, chunk_shift=k)
+        selected.extend(list(plan.current[0:k]))            # raw chunk, no EMA
+        t += k
 
     ai = np.array(selected)
     gt = enc[:len(ai)]
@@ -106,7 +123,7 @@ def rollout(nn_diffusion, solver, ds, ep_idx, act_min, act_scale, use_ema, episo
         vel_rmse=float(np.sqrt(((ai - gt) ** 2).mean())),
         ade_cm=float(disp.mean() * 100), fde_cm=float(disp[-1] * 100),
         path_len_cm=path_len * 100, fde_over_path=float(disp[-1] / max(path_len, 1e-9)),
-        steps=int(len(ai)))
+        exec_chunk_k=EXEC_CHUNK_K, steps=int(len(ai)))
     if rem_all is not None:
         # Terminal band: |vx| the policy commands vs the demo's, binned by how
         # much approach is left. This is the ranking metric — see terminal_metric.

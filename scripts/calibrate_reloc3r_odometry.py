@@ -31,6 +31,7 @@ Usage:
   CUDA_VISIBLE_DEVICES=0 python scripts/calibrate_reloc3r_odometry.py
 Writes: reloc3r/body_frame_calibration_odometry.json
 """
+import argparse
 import json
 import os
 import sys
@@ -188,14 +189,20 @@ def build_correspondences(enc, feats, model, device, episode_ends, seed=0):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--h5", default=TRAIN_H5, help="training h5 (encoder + episode_ends)")
+    ap.add_argument("--cache", default=CACHE, help="reloc3r feature cache h5 (reloc3r_bottom)")
+    ap.add_argument("--out", default=OUT, help="where to write the fitted calibration json")
+    cli = ap.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = setup_reloc3r_relpose_model(model_args="224", device=device)
     model.eval()
 
-    with h5py.File(TRAIN_H5, "r") as f:
+    with h5py.File(cli.h5, "r") as f:
         enc = f["encoder"][:].astype(np.float64)
         episode_ends = f["episode_ends"][:]
-    with h5py.File(CACHE, "r") as cf:
+    with h5py.File(cli.cache, "r") as cf:
         feats = cf["reloc3r_bottom"]  # [N,196,1024] fp16, lazy
         feats = feats[:]  # load once (~fits; float16)
 
@@ -243,7 +250,7 @@ def main():
     except Exception as ex:
         print("x-check skipped:", ex)
 
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    os.makedirs(os.path.dirname(cli.out), exist_ok=True)
     json.dump({
         "R_cb": R_cb.tolist(),
         "fit_method": "wheel_odometry_handeye_kabsch (ICP-FREE): rotation-axis(turns)"
@@ -257,8 +264,8 @@ def main():
                                  "The ~90deg vs raw-LiDAR frame is absorbed here automatically.",
         "reloc3r_checkpoint": "siyan824/reloc3r-224",
         "preprocessing_version": "v2_odometry_2026-07-25",
-    }, open(OUT, "w"), indent=2)
-    print("Saved:", OUT)
+    }, open(cli.out, "w"), indent=2)
+    print("Saved:", cli.out)
 
 
 if __name__ == "__main__":

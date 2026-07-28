@@ -35,6 +35,5 @@ results/
 *.pdf
 
 # external
-plugins/
 rc_server/
 reloc3r/

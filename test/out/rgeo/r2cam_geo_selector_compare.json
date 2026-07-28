@@ -1,0 +1,37 @@
+{
+ "first": {
+  "median_J": 0.0020738077828238123,
+  "median_yaw_deg": 2.073256015777588,
+  "median_icp_y_mm_diagnostic": 536.3387637719759
+ },
+ "meanagg": {
+  "median_J": 0.0016185212940395977,
+  "median_yaw_deg": 1.9424374103546143,
+  "median_icp_y_mm_diagnostic": 536.4828368659198
+ },
+ "hand": {
+  "median_J": 0.0006898960557861174,
+  "median_yaw_deg": 0.9813137054443359,
+  "median_icp_y_mm_diagnostic": 536.627817388071
+ },
+ "geoxy": {
+  "median_J": 0.0051980444451073995,
+  "median_yaw_deg": 3.6160385608673096,
+  "median_icp_y_mm_diagnostic": 535.528766771801
+ },
+ "oracle_y": {
+  "median_J": 0.014695323865058847,
+  "median_yaw_deg": 5.214493751525879,
+  "median_icp_y_mm_diagnostic": 533.9981363990538
+ },
+ "oracle": {
+  "median_J": 0.0002337126210296993,
+  "median_yaw_deg": 0.5840494632720947,
+  "median_icp_y_mm_diagnostic": 536.7742501204202
+ },
+ "n_frames": 480,
+ "M": 16,
+ "corr_psi_theta": 0.893099111205405,
+ "corr_beta_theta": 0.49733900123180613,
+ "ckpt": "checkpoint_step_60000.pt"
+}

@@ -149,12 +149,35 @@ def annotate(ep, track):
                 n_reliable=int(rel.sum()), success=bool(success), subgoals=subgoals)
 
 
-def main(run_all=False):
-    matcher = ICPMatcher(make_template("real_dock"), ICPConfig.for_real_dock())
-    eps = sorted(glob.glob(f"{ROOT}/episode_*_dock"))
-    if not run_all:
-        eps = [f"{ROOT}/episode_{n}_dock" for n in ("161", "1", "50")]
-    os.makedirs(OUT, exist_ok=True)
+def parse_args(argv):
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--all", action="store_true", help="label every episode under --root and save npz/json")
+    p.add_argument("--root", default=ROOT, help="dir of episode_*_dock folders")
+    p.add_argument("--out", default=None, help="output dir for npz/json labels (default: <root>/../icp_labels)")
+    p.add_argument("--template", default="real_dock",
+                   help="endgame.target_model.make_template name (e.g. real_dock_5f for a "
+                        "site-specific dock geometry -- see docs/0725_reloc3r_test/"
+                        "results_all_2026-07-26.md §5a)")
+    p.add_argument("--episodes", default=None,
+                   help="comma-separated episode numbers to label (default: demo trio, or all with --all)")
+    return p.parse_args(argv)
+
+
+def main(cli_args=None):
+    args = parse_args(cli_args if cli_args is not None else sys.argv[1:])
+    run_all = args.all
+    root = args.root
+    out_dir = args.out or os.path.join(os.path.dirname(root.rstrip("/")), "icp_labels")
+
+    matcher = ICPMatcher(make_template(args.template), ICPConfig.for_real_dock())
+    eps = sorted(glob.glob(f"{root}/episode_*_dock"))
+    if args.episodes:
+        eps = [f"{root}/episode_{n}_dock" for n in args.episodes.split(",")]
+    elif not run_all:
+        eps = [f"{root}/episode_{n}_dock" for n in ("161", "1", "50")]
+        eps = [e for e in eps if os.path.isdir(e)] or eps[:3]
+    os.makedirs(out_dir, exist_ok=True)
 
     anns, onsets = [], []
     for ep in eps:
@@ -167,9 +190,9 @@ def main(run_all=False):
         anns.append(ann)
         onsets.append(ann["handoff_onset_dist"])
         if run_all:
-            np.savez(f"{OUT}/{ann['episode']}.npz",
+            np.savez(f"{out_dir}/{ann['episode']}.npz",
                      pose=track["pose"], dist=track["dist"], reliable=track["reliable"], ts=track["ts"])
-            json.dump(ann, open(f"{OUT}/{ann['episode']}.json", "w"), indent=2)
+            json.dump(ann, open(f"{out_dir}/{ann['episode']}.json", "w"), indent=2)
         else:
             sg = ", ".join(f"{s['target_dist']}m@f{s['frame']}" for s in ann["subgoals"])
             print(f"{ann['episode']:20s}: handoff onset {ann['handoff_onset_dist']*100:4.0f}cm, "
@@ -182,12 +205,12 @@ def main(run_all=False):
               f"median {np.median(on):.0f} cm, range {on.min():.0f}-{on.max():.0f} cm | "
               f"success {sum(a['success'] for a in anns)}/{len(anns)}")
     if run_all:
-        json.dump([a for a in anns], open(f"{OUT}/_index.json", "w"), indent=2)
-        print(f"saved annotations to {OUT}/")
+        json.dump([a for a in anns], open(f"{out_dir}/_index.json", "w"), indent=2)
+        print(f"saved annotations to {out_dir}/")
 
-    # plot the first episode's distance trajectory + sub-goals
+    # plot the first labeled episode's distance trajectory + sub-goals
     if not run_all and anns:
-        ep = f"{ROOT}/episode_161_dock"; track = track_episode(ep, matcher); ann = annotate(ep, track)
+        ep = eps[0]; track = track_episode(ep, matcher); ann = annotate(ep, track)
         t0 = track["ts"][0]; tt = track["ts"] - t0
         fig, ax = plt.subplots(figsize=(10, 5))
         rel = track["reliable"]
@@ -206,4 +229,4 @@ def main(run_all=False):
 
 
 if __name__ == "__main__":
-    main(run_all="--all" in sys.argv)
+    main()

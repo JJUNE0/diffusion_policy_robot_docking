@@ -113,8 +113,27 @@ def make_template(name: str, spacing: float = 0.01) -> TargetTemplate:
             name=name, points=np.load(path), is_asymmetric=False,
             description="Canonical real after_0328 dock (U-notch + shoulders).")
 
+    if name == "real_dock_5f":
+        # Site-specific dock (front_dock_5th_floor) -- geometrically DIFFERENT
+        # from after_0328's dock (measured cluster span ~0.49x0.33m vs
+        # ~0.94x0.24m), so `real_dock` gets 0/N reliable ICP locks there. Built
+        # from the 71 TRAIN episodes only via
+        # `scripts/build_dock_template.py --root dataset/front_dock_5f/dock
+        # --name dock_template_5f --limit_episodes 71` so held-out scans never
+        # leak into the measuring instrument. See docs/0725_reloc3r_test/
+        # results_all_2026-07-26.md §5a.
+        path = os.path.join(os.path.dirname(__file__), "assets", "dock_template_5f.npy")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"{path} missing — run `python scripts/build_dock_template.py "
+                f"--root dataset/front_dock_5f/dock --name dock_template_5f "
+                f"--limit_episodes 71` first.")
+        return TargetTemplate(
+            name=name, points=np.load(path), is_asymmetric=False,
+            description="Canonical front_dock_5th_floor dock (train-episodes-only).")
+
     raise ValueError(
-        f"Unknown template '{name}'. Known: l_notch_dock, symmetric_rect, real_dock.")
+        f"Unknown template '{name}'. Known: l_notch_dock, symmetric_rect, real_dock, real_dock_5f.")
 
 
 def load_template(path: str, name: str = "custom", is_asymmetric: bool = True) -> TargetTemplate:

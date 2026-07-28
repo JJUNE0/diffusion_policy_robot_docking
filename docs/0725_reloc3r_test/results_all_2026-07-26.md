@@ -18,6 +18,7 @@
 | `graft_*` | **2** (room1+room2) | `checkpoint_step_100000.pt` | batch 128 × 10 ep **위에** 100k 사전학습 | legacy pooled-AdaLN |
 | `old_baseline_100k` | **2** | scratch | batch 16 × 100k step ≈ 7.4 ep | legacy pooled-AdaLN |
 | `s20_*` | 미확인 | 미확인 | 20 ep 표기 | legacy pooled-AdaLN |
+| `r_geo_5f` (§5a, **다른 데이터셋**) | **1** (dino_bottom) | scratch | batch 256 × 7,760 step = 20 ep | token-seq + cross-attn |
 
 > ⚠️ **graft가 다른 모든 군보다 ADE/FDE에서 3배 우월한 것은 조건화 때문이 아닐 가능성이 높다** —
 > 카메라 2대 + 100k 사전학습이라는 두 요인이 같은 방향으로 작용한다. graft 군의 내부 비교
@@ -26,6 +27,10 @@
 **평가 프로토콜**: 아래 전부 `dataset/after_0328_test.h5`, **10 에피소드(0–9) × 500 스텝**.
 유일한 예외는 `test/out/weekend/old_baseline_100k_heldout.json`(구버전, **3 에피소드 × 250 스텝**)
 이며 이 문서에서는 참고용으로만 표기한다.
+
+> ⚠️ **§5a(`r_geo_5f`)는 학습·평가 데이터셋 자체가 다르다** (`front_dock_5f_*`, 5층 정면 도크).
+> 본 문서의 다른 모든 행과 **어떤 지표로도 횡비교할 수 없다** — 도크 위치·조명·시연자·에피소드
+> 구간 정의가 전부 다르다. §6 순위표와 §7 상관분석에도 **포함하지 않았다.**
 
 ### 지표 정의
 
@@ -241,6 +246,132 @@ scratch에서 효과 없음)과 상충하지 않는다 — 조건화 이득이 �
 
 ---
 
+## 5a. front_dock_5f — 신규 데이터셋 R-Geo scratch 학습 (2026-07-27)
+
+`dataset/front_dock_5th_floor/*.zip`(15개 아카이브, 86 레코드)로 **5층 정면 도크** 전용 R-Geo를
+scratch 학습했다. **평가는 아직 실시하지 않았다** — 아래는 데이터셋 구축·학습 수렴까지의 기록이다.
+
+> ⚠️ **본 문서 다른 절과 횡비교 불가.** 학습·held-out 모두 `front_dock_5f_*`이며
+> `after_0328_test.h5`가 아니다. §6 순위·§7 상관에 포함하지 않았다.
+
+### 데이터셋 구축 — 두 개의 필수 필터
+
+`dataset/front_dock_5th_floor/readme.md`가 지정한 두 규칙을 `scripts/build_front_dock_5f.py`가
+강제한다.
+
+1. **`metadata.json`의 `labels.success == true`인 레코드만.**
+2. **segment 마커 이후 구간만.** `segment_01`은 도킹 시작 자세로 접근하는 주행이며 모방 대상이
+   아니다. 센서 CSV/JSONL은 exporter가 이미 segment별로 쪼개 두므로 `segment_02..N` 연결로
+   충분하고(3-segment 레코드 2건 = `episode_476`, `episode_406`은 02+03 사용), **카메라 프레임은
+   분할돼 있지 않아 타임스탬프로 필터**한다.
+
+| 항목 | 수 |
+|---|---|
+| 원본 레코드 | 86 |
+| `success=false`로 제외 | 4 (`509`, `530`, `532`, `536`) |
+| 마커 없음으로 제외 | 1 (`515`, success=true이나 segment 전무) |
+| **최종 에피소드** | **81** |
+
+마커 필터의 효과는 크다 — 예: `record_00474`는 전체 92.2초 중 **도킹 구간이 42.7초**(46%)로,
+나머지 절반은 접근 주행이다.
+
+### 스플릿 · 규모
+
+| 스플릿 | 에피소드 | 프레임 | 에피소드당 프레임 min/med/max | 총 시간 |
+|---|---|---|---|---|
+| train | 71 | 103,654 | 775 / 1,278 / 3,530 | 57.6 분 |
+| held-out | 10 | 17,896 | 1,043 / 1,936 / 2,759 | 9.9 분 |
+
+레코드 ID 정렬 후 앞 71 / 뒤 10으로 나눴다. 그 결과 **held-out 10개가 전부 `0713` 세션**에
+몰린다 — i.i.d.가 아니라 **세션 단위 일반화 테스트**다(더 엄격한 쪽). 필요하면 교차 분할로
+재빌드해야 한다.
+
+### 전처리에서 드러난 잠복 버그 — ns/s 단위 불일치
+
+이 exporter 포맷은 타임스탬프가 **나노초**인데 `utils/preprocessing.py`는 **초**를 가정한다
+(`target_interval = 1/target_hz`, `max_time_diff=0.05`). `np.arange(min_t, max_t, 0.0333)`가
+4.3e10 span에 대해 ~1.3e12 원소를 할당하려다 **SIGKILL(exit 137, 트레이스백 없음)** 로 죽는다.
+로그에 아무것도 남지 않아 원인 파악이 어렵다.
+
+→ sync 코드가 아니라 **컨버터에서 ns→s로 정규화**했다(CSV 컬럼, JSONL 필드, `_<ts>.jpg` 파일명
+접미사 전부). 기존 `after_0328`이 이미 쓰던 규약에 맞추는 방향이다. **이 exporter 포맷을 쓰는
+다른 데이터셋도 동일하게 걸린다.**
+
+부수 변경: 이 데이터셋은 도크가 보이는 카메라가 `camera_orbbec-0`(→ room2) 하나뿐이라
+`utils/preprocessing.py`에 **`--no_room1`** 을 추가했다(가짜 room1을 복제해 넣는 대신 `image_top`
+자체를 쓰지 않음 → h5 절반). `utils/docking_dataset.py`의 `z_img1`도 `use_room1` 가드를 걸었다.
+
+### 캐시
+
+| 파일 | train | held-out |
+|---|---|---|
+| `front_dock_5f_*.h5` | 13.7 GB | 2.3 GB |
+| `*_dino_bottom.h5` (DINOv3 patch feat) | 31.2 GB | 5.4 GB |
+| `*_reloc3r_bottom.h5` (+`geometry_bottom`) | 41.6 GB | 7.2 GB |
+
+전 캐시 행 정렬 1:1 확인, NaN 0건. 빌드는 `bash scripts/prepare_front_dock_5f.sh` 한 방.
+
+> 참고: `lidar_npoints` 평균이 **42.9** 로 `after_0328`(≈80, `docs/plan/02_preprocessing.md` §5)의
+> 절반이다. crop 반경은 동일한 0.8m이므로 5층 도크 주변 스캔이 더 성기다는 뜻. point 브랜치는
+> npoints 마스킹을 하므로 학습은 진행되지만, LiDAR 정밀도 관련 결론을 낼 때 고려해야 한다.
+
+### 캘리브레이션 전이 검증 (측정된 결과)
+
+R-Geo의 geometry 토큰은 `reloc3r/body_frame_calibration_odometry.json`(camera→body 회전)에
+의존하는데, 이 값은 **`after_0328`에서 적합된 것**이다. 전이 가정을 검증 없이 쓰지 않기 위해
+동일 스크립트를 5F 오도메트리로 재적합해 비교했다(ICP-free 경로 그대로).
+
+| | axis→z 오차 median | fwd-translation dir 오차 median |
+|---|---|---|
+| `after_0328` 적합 (재사용 중) | 6.98° | 10.04° |
+| **5F 재적합** | 4.85° | 7.46° |
+
+**두 회전의 geodesic 각도 = 1.65°** — 적합 자체의 잔차(5–7°)보다 훨씬 작다. 같은 로봇·같은
+카메라 마운트이므로 예상대로 전이되며, **재사용한 캘리브레이션으로 만든 geometry 토큰은 유효**
+하다(재빌드 불필요).
+
+토큰 자체의 정합성도 확인: `dx,dy` 단위노름 1.0, `sin²+cos²=1`, NaN 0, **goal 프레임에서
+yaw ≈ −0.03°**(자기 자신 대비 → 0이어야 함), 에피소드 진행에 따라 |yaw| **1.42° → 0.03°** 감소.
+
+재적합 산출물은 별도 경로에 저장했고 `reloc3r/body_frame_calibration_odometry.json`은
+**덮어쓰지 않았다**(§1 이후 모든 런과의 일관성 유지).
+
+### 학습 설정 · 수렴
+
+`configs/robot/smr_rgeo_5f.yaml` + `sensors_variant/goal_appearance_geometry_5f.yaml`.
+네트워크·옵티마이저·batch·`action_norm: minmax` 전부 `smr_rgeo.yaml`과 동일하고 **데이터셋과
+캐시 경로만 다르다** — §2의 `r_geo`(batch256 × 20 ep)와 예산이 일치한다.
+
+조건 토큰 5종 전부 결선 확인: `wheel(60,2)` / `rgb_history(5,196,768)` / `lidar(256,2)` /
+`goal(196,768)` / `geometry(4)`.
+
+batch 256 × 7,760 step = **20 epoch**, 5.5시간(H100 1장).
+
+| step 구간 | 평균 loss |
+|---|---|
+| 0–999 | 0.0774 |
+| 1000–1999 | 0.0489 |
+| 2000–2999 | 0.0465 |
+| 3000–3999 | 0.0454 |
+| 4000–4999 | 0.0416 |
+| 5000–5999 | 0.0431 |
+| 6000–6999 | 0.0418 |
+| 7000–7760 | **0.0400** |
+
+산출물: `outputs/train/r_geo_5f/2026-07-27_18-48-31/` — `checkpoint_step_{1000..7000,7760}.pt`
+(8개), `metrics.jsonl`(776행), `train_convergence.png`.
+
+### 미실시 — 다음 단계
+
+**held-out 평가를 아직 돌리지 않았다.** 따라서 이 모델에 대해서는 align/xpos/ADE/FDE/bias 어느
+것도 본 문서에 숫자가 없다. 평가 시 §7·§8의 확립된 결론에 따라 **ADE/FDE가 아니라
+align_deg/xpos_mm를 1차 지표로** 읽어야 하며, §1a에 따라 **배포 후보 체크포인트의 조향 편향은
+그 파일에서 직접** 재야 한다(arm 단위 일반화 근거 없음). 단일 시드이므로 §8-3에 의해
+**조건화 결론에는 쓸 수 없다** — 5F에서 arm 비교를 하려면 `no_goal`/`goal_appearance` 5F 변형을
+같은 예산으로 학습해 시드 스윕까지 가야 한다.
+
+---
+
 ## 6. 전체 모델 순위
 
 ### align (°) — 낮을수록 좋음
@@ -325,6 +456,15 @@ Spearman  ADE vs xpos_mm   :  rho = -0.230,  p = 0.329   (유의하지 않음)
    3개 전부 좌편향, 1카메라 12개 전부 우편향"이라 결론 냈던 것이 100k 최종값에서 무너짐. 유일하게
    남는 이례적 사례는 old_baseline(42.9%)뿐이며, 이는 카메라 수 외에도 아키텍처가 다르므로
    카메라 수만의 효과로 귀속할 수 없다.
+8. **`r_geo_5f`의 성능 — 평가 0회** (§5a). 학습 수렴(loss 0.077→0.040)만 확인했다. 지표가 하나도
+   없으므로 5층 도크 일반화에 대해 어떤 주장도 할 수 없다. 단일 시드라 평가를 마쳐도 §8-3에
+   의해 조건화 결론에는 쓸 수 없다.
+
+### §5a에서 부수적으로 확립된 것
+
+- **Reloc3r camera→body 캘리브레이션은 데이터셋 간 전이된다** — `after_0328` 적합과 5F 재적합의
+  geodesic 차이 1.65°로 적합 잔차(5–7°)보다 작다. 같은 로봇/마운트라면 재적합 불필요.
+  (단, 이는 캘리브레이션의 전이일 뿐 **정책의 전이가 아니다**.)
 
 ---
 
@@ -345,6 +485,31 @@ EVAL_H5=dataset/after_0328_test.h5 EVAL_STATS_H5=dataset/after_0328_train.h5 EVA
 
 # old_baseline 교정 평가
 python test/eval_run_old_baseline_100k.py
+```
+
+### §5a — front_dock_5f 빌드 · 학습
+
+```bash
+# 1) zip -> 에피소드 레이아웃 (success=true + segment_02.. 만, ns->s 정규화)
+python scripts/build_front_dock_5f.py \
+  --zip_dir dataset/front_dock_5th_floor --out dataset/front_dock_5f
+
+# 2) h5 + DINO + Reloc3r rot/dir + geometry 토큰 (train 71 / held-out 10)
+bash scripts/prepare_front_dock_5f.sh
+
+# 3) 학습 (batch 256 x 20 ep = 7,760 step)
+python scripts/train.py --config-name smr_rgeo_5f
+
+# (선택) 캘리브레이션 전이 재확인 — 기존 json을 덮어쓰지 않도록 --out 지정
+python scripts/calibrate_reloc3r_odometry.py \
+  --h5 dataset/front_dock_5f_train.h5 \
+  --cache dataset/front_dock_5f_train_reloc3r_bottom.h5 \
+  --out /tmp/calib_5f.json
+
+# 평가(미실시) — EVAL_H5/EVAL_STATS_H5를 5f로 바꿔야 한다
+EVAL_H5=dataset/front_dock_5f_test.h5 EVAL_STATS_H5=dataset/front_dock_5f_train.h5 \
+EVAL_EPISODES=0,1,2,3,4,5,6,7,8,9 EVAL_TAG=heldout5f \
+  python test/eval_align_rgeo.py outputs/train/r_geo_5f/2026-07-27_18-48-31
 ```
 
 산출물: `test/out/rgeo/*.json`, `test/out/rgeo/*_align.json`,

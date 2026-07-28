@@ -1,0 +1,16 @@
+{
+ "run_dir": "outputs/train/r_geo_5f/2026-07-27_18-48-31",
+ "ckpt": "checkpoint_step_7760.pt",
+ "align": {
+  "policy_median_deg": 4.722200393676758,
+  "policy_p90_deg": 16.790927505493173,
+  "demo_median_deg": 4.567246347325542,
+  "demo_p25_deg": 2.1290585419427352,
+  "demo_p90_deg": 17.06646001368342,
+  "n_frames": 573,
+  "x_policy_median_mm": 33.27728664438012,
+  "x_policy_p90_mm": 69.70129828809593,
+  "x_demo_median_mm": 30.061966176655805,
+  "x_demo_p25_mm": 17.2351455069508
+ }
+}

@@ -147,8 +147,13 @@ class StrictSyncRoboticsDataset:
         labels_dir: str = None,
         max_episodes: int = None,
         episode_start: int = 0,
+        use_room1: bool = True,
     ):
         self.root_dir = root_dir
+        # Single-camera datasets (only image/room2 recorded) -> skip the room1
+        # branch entirely and don't write `image_top`. Matches the training-side
+        # `use_room1: false`, and halves the h5.
+        self.use_room1 = use_room1
         self.max_episodes = max_episodes
         self.episode_start = episode_start
         self.target_interval = 1.0 / target_hz
@@ -282,7 +287,7 @@ class StrictSyncRoboticsDataset:
         if not os.path.exists(enc_path):
             logger.warning(f"❌ [{ep_name}] 스킵: encoder.csv 파일이 없습니다. (경로: {enc_path})")
             return 0
-        if not os.path.exists(img_dir_top):
+        if self.use_room1 and not os.path.exists(img_dir_top):
             logger.warning(f"❌ [{ep_name}] 스킵: image/room1 폴더가 없습니다.")
             return 0
         if not os.path.exists(img_dir_bottom):
@@ -300,8 +305,13 @@ class StrictSyncRoboticsDataset:
                 logger.warning(f"❌ [{ep_name}] 스킵: encoder.csv에 '{col}' 컬럼이 없습니다.")
                 return 0
 
-        ts_top, files_top = self._get_image_timestamps(img_dir_top)
         ts_bot, files_bot = self._get_image_timestamps(img_dir_bottom)
+        if self.use_room1:
+            ts_top, files_top = self._get_image_timestamps(img_dir_top)
+        else:
+            # room2 stands in for room1 in every timestamp/window computation
+            # below; nothing is read from it (see get_full_sample).
+            ts_top, files_top = ts_bot, files_bot
 
         if len(ts_top) == 0 or len(ts_bot) == 0:
             logger.warning(f"❌ [{ep_name}] 스킵: room1 또는 room2 이미지가 비어 있습니다.")
@@ -427,7 +437,7 @@ class StrictSyncRoboticsDataset:
     def get_full_sample(self, idx):
         """저장 시 한 프레임의 모든 데이터를 로드/생성."""
         s = self.samples[idx]
-        img_top = self._load_image(s['img_top_path'])
+        img_top = self._load_image(s['img_top_path']) if self.use_room1 else None
         img_bot = self._load_image(s['img_bottom_path'])
 
         if self.use_lidar:
@@ -478,6 +488,9 @@ if __name__ == "__main__":
                         help="Process only N episodes (debug/verification/held-out).")
     parser.add_argument("--episode_start", type=int, default=0,
                         help="Skip the first K episodes (e.g. 30 -> held-out set after training on 0..29).")
+    parser.add_argument("--no_room1", action="store_true",
+                        help="Single-camera dataset: only image/room2 exists. Skips the room1 branch "
+                             "and does not write `image_top` (halves the h5). Pair with use_room1=false.")
 
     cli_args = parser.parse_args()
 
@@ -500,6 +513,7 @@ if __name__ == "__main__":
         labels_dir=cli_args.labels_dir,
         max_episodes=cli_args.max_episodes,
         episode_start=cli_args.episode_start,
+        use_room1=not cli_args.no_room1,
     )
     total_samples = len(dataset)
 
@@ -509,7 +523,7 @@ if __name__ == "__main__":
     print(f"\n데이터 저장을 시작합니다: {SAVE_PATH}")
     with h5py.File(SAVE_PATH, 'w') as f:
         dset_enc = f.create_dataset("encoder", (total_samples, 2), dtype='f4')
-        dset_img_top = f.create_dataset(
+        dset_img_top = None if cli_args.no_room1 else f.create_dataset(
             "image_top",
             (total_samples, 3, 240, 320),
             dtype='u1',
@@ -572,7 +586,8 @@ if __name__ == "__main__":
                 enc, top, bot = sample
 
             dset_enc[i] = enc
-            dset_img_top[i] = top
+            if dset_img_top is not None:
+                dset_img_top[i] = top
             dset_img_bot[i] = bot
             if cli_args.with_labels:
                 dset_pose[i] = dataset.samples[i]["dock_pose"]

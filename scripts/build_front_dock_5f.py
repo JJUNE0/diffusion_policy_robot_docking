@@ -18,6 +18,12 @@ Camera mapping: `camera_orbbec-0` is the forward camera that sees the dock =
 `room2` (`image_bottom`), the single camera the current recipe trains on
 (`use_room1: false`). `--room1_camera` can add a second camera if wanted.
 
+Timestamps: the exporter writes NANOSECONDS (monotonic) everywhere, while the
+downstream pipeline assumes SECONDS (`utils/preprocessing.py` builds its sync
+grid with `target_interval = 1/target_hz` and gates matches with
+`max_time_diff=0.05`). So every ts written here -- CSV column, JSONL field and
+the `_<ts>.jpg` filename suffix -- is converted to seconds.
+
 Output (per episode, named `episode_<record_idx>_dock` so that
 `scripts/label_subgoals.py`'s glob picks it up):
 
@@ -48,7 +54,19 @@ import zipfile
 # First segment index to keep. segment_01 = approach to the docking start pose.
 FIRST_DOCK_SEGMENT = 2
 
-FRAME_TS_RE = re.compile(r"_(\d+)\.jpg$")
+FRAME_RE = re.compile(r"^(frame_\d+)_(\d+)\.jpg$")
+
+# Exporter clock -> pipeline clock. See the module docstring.
+NS_PER_S = 1e9
+
+
+def to_seconds(ts_ns) -> float:
+    return float(ts_ns) / NS_PER_S
+
+
+def fmt_seconds(ts_s: float) -> str:
+    """9 decimals keeps full ns resolution and round-trips through float()."""
+    return f"{ts_s:.9f}"
 
 
 def parse_args():
@@ -104,9 +122,9 @@ def read_csv_rows(zf, path):
 
 
 def concat_csv(zf, prefix, segs, fname, out_path):
-    """Concatenate a per-segment CSV, sort by ts, drop duplicate ts.
+    """Concatenate a per-segment CSV, sort by ts, drop duplicate ts, ns -> s.
 
-    Returns the first ts (int) or None when there is no data.
+    Returns the first ts in seconds, or None when there is no data.
     """
     header, rows = [], []
     for s in segs:
@@ -124,17 +142,21 @@ def concat_csv(zf, prefix, segs, fname, out_path):
         if t in seen:
             continue
         seen.add(t)
+        r[ts_col] = fmt_seconds(to_seconds(t))
         dedup.append(r)
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         w.writerows(dedup)
-    return int(dedup[0][ts_col])
+    return float(dedup[0][ts_col])
 
 
 def concat_jsonl(zf, prefix, segs, fname, out_path):
-    """Concatenate per-segment JSONL, sorted by `ts`. Returns first ts or None."""
-    lines = []
+    """Concatenate per-segment JSONL, sorted by `ts`, ns -> s.
+
+    Returns the first ts in seconds, or None when there is no data.
+    """
+    recs = []
     for s in segs:
         try:
             raw = zf.read(f"{prefix}{s}/{fname}").decode("utf-8")
@@ -145,31 +167,38 @@ def concat_jsonl(zf, prefix, segs, fname, out_path):
             if not line:
                 continue
             try:
-                ts = json.loads(line)["ts"]
-            except (json.JSONDecodeError, KeyError):
+                d = json.loads(line)
+                d["ts"] = to_seconds(d["ts"])
+            except (json.JSONDecodeError, KeyError, TypeError):
                 continue
-            lines.append((float(ts), line))
-    if not lines:
+            recs.append(d)
+    if not recs:
         return None
-    lines.sort(key=lambda x: x[0])
+    recs.sort(key=lambda d: d["ts"])
     with open(out_path, "w") as f:
-        for _, line in lines:
-            f.write(line + "\n")
-    return lines[0][0]
+        for d in recs:
+            f.write(json.dumps(d) + "\n")
+    return recs[0]["ts"]
 
 
 def extract_frames(zf, prefix, camera, t0, out_dir):
-    """Copy `camera` jpgs with timestamp >= t0 out of the zip. Returns count."""
+    """Copy `camera` jpgs with timestamp >= t0 out of the zip, renaming the
+    filename's ns suffix to seconds (`_get_image_timestamps` parses it as the
+    frame's ts). Returns the count."""
     os.makedirs(out_dir, exist_ok=True)
     pre = f"{prefix}{camera}/frames/"
     n = 0
     for name in zf.namelist():
         if not name.startswith(pre) or not name.endswith(".jpg"):
             continue
-        m = FRAME_TS_RE.search(name)
-        if not m or float(m.group(1)) < t0:
+        m = FRAME_RE.match(os.path.basename(name))
+        if m is None:
             continue
-        with zf.open(name) as src, open(os.path.join(out_dir, os.path.basename(name)), "wb") as dst:
+        ts_s = to_seconds(m.group(2))
+        if ts_s < t0:
+            continue
+        out_name = f"{m.group(1)}_{fmt_seconds(ts_s)}.jpg"
+        with zf.open(name) as src, open(os.path.join(out_dir, out_name), "wb") as dst:
             shutil.copyfileobj(src, dst)
         n += 1
     return n
@@ -203,8 +232,8 @@ def build_record(zf, zip_name, prefix, meta, args, out_root):
         return ep_name, f"skip: empty encoder({enc_t0}) or lidar({lid_t0}) after the marker"
 
     # The marker time itself is only stored as wall-clock ISO, while frames /
-    # encoder / lidar share a monotonic ns clock. The earliest post-marker
-    # sensor sample is therefore the marker in that clock.
+    # encoder / lidar share a monotonic clock. The earliest post-marker sensor
+    # sample is therefore the marker in that clock.
     t0 = min(float(enc_t0), float(lid_t0))
 
     n2 = extract_frames(zf, prefix, args.room2_camera, t0, os.path.join(ep_dir, "image", "room2"))
@@ -222,7 +251,7 @@ def build_record(zf, zip_name, prefix, meta, args, out_root):
             "prefix": prefix,
             "record_idx": rec,
             "segments_used": segs,
-            "t0_ns": t0,
+            "t0_sec": t0,
             "duration_sec": meta.get("duration_sec"),
             "room2_camera": args.room2_camera,
             "room1_camera": args.room1_camera,

@@ -66,13 +66,38 @@ def dock_region(ep, R=R_DOCK, win=WIN):
     return pts if len(pts) > 20 else None
 
 
+def parse_args():
+    import argparse
+    p = argparse.ArgumentParser(description="Build a canonical dock ICP template from docked scans.")
+    p.add_argument("--root", default=ROOT, help="dir of episode_*_dock folders")
+    p.add_argument("--name", default="dock_template_real",
+                   help="asset basename; a per-site template (e.g. dock_template_5f) must NOT "
+                        "overwrite the canonical after_0328 one")
+    p.add_argument("--seed_ep", default=None,
+                   help="episode to seed the template frame (default: episode_161_dock under --root)")
+    p.add_argument("--limit_episodes", type=int, default=0,
+                   help="use only the first N episodes. Set this to the TRAIN split size when the "
+                        "template will instrument a held-out eval -- otherwise held-out scans leak "
+                        "into the measuring instrument.")
+    p.add_argument("--holdout", default="1,2,3,50,60",
+                   help="comma-separated episode numbers for the validation block")
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
+    root = args.root
     os.makedirs(ASSET_DIR, exist_ok=True)
-    eps = sorted(glob.glob(f"{ROOT}/episode_*_dock"))
+    eps = sorted(glob.glob(f"{root}/episode_*_dock"))
+    if args.limit_episodes:
+        eps = eps[:args.limit_episodes]
     print(f"found {len(eps)} episodes")
 
     # seed template from a known-clean episode
-    seed_ep = f"{ROOT}/episode_161_dock"
+    seed_ep = args.seed_ep or f"{root}/episode_161_dock"
+    if not os.path.isdir(seed_ep):
+        seed_ep = eps[0]
+        print(f"seed episode not found; falling back to {os.path.basename(seed_ep)}")
     seed = dock_region(seed_ep)
     centroid_ref = seed.mean(0)
     template = seed - centroid_ref          # centered at dock centroid (template frame)
@@ -106,7 +131,7 @@ def main():
     # dock pose in the seed robot/sensor frame when docked (for the servo)
     dock_target_pose = [float(centroid_ref[0]), float(centroid_ref[1]), 0.0]
 
-    np.save(f"{ASSET_DIR}/dock_template_real.npy", canonical.astype(np.float32))
+    np.save(f"{ASSET_DIR}/{args.name}.npy", canonical.astype(np.float32))
     meta = dict(
         n_episodes_contributed=contributed,
         n_points=len(canonical),
@@ -117,15 +142,18 @@ def main():
         restart_yaws_deg=[round(np.degrees(y), 1) for y in ICP_REAL.restart_yaws],
         is_asymmetric=False,  # borderline-symmetric notch -> rely on narrow restart band
         seed_episode=os.path.basename(seed_ep),
+        source_root=root,
+        n_episodes_scanned=len(eps),
     )
-    json.dump(meta, open(f"{ASSET_DIR}/dock_template_real.json", "w"), indent=2)
-    print(f"saved {ASSET_DIR}/dock_template_real.npy (+ .json)")
+    json.dump(meta, open(f"{ASSET_DIR}/{args.name}.json", "w"), indent=2)
+    print(f"saved {ASSET_DIR}/{args.name}.npy (+ .json)")
 
     # ---- validate on held-out episodes ------------------------------------
     rng = np.random.default_rng(1)
     tmpl = TargetTemplate("dock_real", canonical, False)
     matcher = ICPMatcher(tmpl, ICP_REAL)
-    holdout = [f"{ROOT}/episode_{n}_dock" for n in ("1", "2", "3", "50", "60")]
+    holdout = [f"{root}/episode_{n}_dock" for n in args.holdout.split(",")]
+    holdout = [h for h in holdout if os.path.isdir(h)] or eps[:5]
     print("\nheld-out validation (incremental ICP precision, baseline-corrected):")
     print("  P0 = how far this episode's docked pose sits from the template frame")
     print("       (real per-episode docking variation, NOT ICP error)")

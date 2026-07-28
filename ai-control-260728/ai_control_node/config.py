@@ -48,6 +48,16 @@ class AIControlConfig(BasePluginConfig):
     # 것이므로 경고 로그가 남는다. 재학습 없이 현장에서 윈도를 조정할 때만 사용.
     #   레거시 모델: 30 프레임 / stride 6 / 5장
     #   reloc3r 계열: 60 프레임 / stride 12 / 5장
+    # 후보 선택 방식. ""(기본) = 기존 집계(mean/medoid) 그대로.
+    # "geometry"    = M개 샘플 중 Reloc3r yaw-to-goal(psi) 만 보고 가장 잘 닫는 후보를 실행.
+    # "geometry_xy" = 위에 lateral bearing(dx,dy)도 더해 yaw+lateral 합산 잔차가 최소인 후보 실행.
+    #   두 방식 모두 오프라인 측정(r2cam_geo@60k, 근거리 480프레임, test/selector_compare.py):
+    #     mean-agg 1.942deg -> geometry(yaw만) 0.981deg (ICP oracle 0.584deg 대비 67% 회수)
+    #     geometry_xy(yaw+lateral) 결과는 test/out/rgeo/*_selector_compare.json 참고
+    #   실제 도킹 실패의 주 원인이 lateral(peg-in-hole) 오정렬이라는 현장 기록이 있어
+    #   geometry_xy를 권장 시작점으로 두되, geometry(yaw만)도 그대로 남겨 비교 가능하게 함.
+    #   geometry 토큰이 있는 체크포인트에서만 동작하며, 없으면 경고 후 집계로 폴백.
+    demo_select: str = ""
     demo_obs_horizon: int = 0                 # 0 = 체크포인트 학습값 사용
     demo_vision_stride: int = 0               # 0 = 체크포인트 학습값 사용
     demo_vision_frames: int = 0               # 0 = 체크포인트 학습값 사용

@@ -237,7 +237,9 @@ class DockingDataset(Dataset):
             return
         self.root = h5py.File(self.h5_path, "r")
         self.z_encoder = self.root["encoder"]
-        self.z_img1 = self.root["image_top"]
+        # `image_top` is absent from single-camera h5 built with
+        # preprocessing.py --no_room1; use_room1=False never reads it.
+        self.z_img1 = self.root["image_top"] if self.use_room1 else None
         self.z_img2 = self.root["image_bottom"]
         if self.with_lidar:
             self.z_lidar_points = self.root["lidar_points"]

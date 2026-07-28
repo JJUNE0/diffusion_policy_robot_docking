@@ -64,13 +64,22 @@ def wrap(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--split", choices=["train", "test"], required=True)
+    ap.add_argument("--split", choices=["train", "test"],
+                    help="after_0328 shorthand; ignored when --cache is given")
     ap.add_argument("--camera", default="image_bottom", choices=["image_bottom", "image_top"])
+    ap.add_argument("--cache", default=None,
+                    help="reloc3r cache h5 to read rot/dir from and append the geometry to "
+                         "(default: dataset/after_0328_<split>_reloc3r_<cam>.h5). Use this for "
+                         "datasets other than after_0328.")
     args = ap.parse_args()
 
     cam_tag = "bottom" if args.camera == "image_bottom" else "top"
-    src_h5 = os.path.join(REPO, f"dataset/after_0328_{args.split}.h5")
-    cache_h5 = os.path.join(REPO, f"dataset/after_0328_{args.split}_reloc3r_{cam_tag}.h5")
+    if args.cache:
+        cache_h5 = args.cache
+    elif args.split:
+        cache_h5 = os.path.join(REPO, f"dataset/after_0328_{args.split}_reloc3r_{cam_tag}.h5")
+    else:
+        ap.error("one of --split or --cache is required")
 
     with open(CALIB_PATH) as f:
         calib = json.load(f)

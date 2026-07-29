@@ -239,6 +239,96 @@ class Reloc3rRelationEncoder(DinoImageEncoder):
         super().__init__(spec, d_model, nhead)
 
 
+@register_encoder("reloc3r_goal_pair")
+class Reloc3rGoalPairEncoder(BaseModalityEncoder):
+    """Random goal-pool pair -> exact frozen ReLoc3R decoder -> policy tokens.
+
+    Input is [B,T,2,196,1024], where pair axis 0 is a cached history-frame
+    ViT-L encoder feature and axis 1 is the sampled goal's encoder feature.
+    The frozen 12-layer ReLoc3R decoder produces its two 768-D relational
+    streams online; only the projections, Perceiver resamplers and embeddings
+    below are trainable/saved with the diffusion policy.
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        super().__init__(spec, d_model, nhead)
+        self.horizon = int(spec["horizon"])
+        self.n_patch = int(spec.get("n_patch", 196))
+        self.feat_dim = int(spec.get("feat_dim", 1024))
+        self.dec_dim = int(spec.get("dec_dim", 768))
+        self.num_latents = int(spec.get("num_latents", 16))
+        self.checkpoint = str(spec.get("reloc3r_checkpoint", "siyan824/reloc3r-224"))
+        self.decoder_chunk = int(spec.get("decoder_chunk", 4))
+        if self.decoder_chunk < 1:
+            raise ValueError(f"[{self.name}] decoder_chunk must be >=1")
+
+        self.proj1 = nn.Linear(self.dec_dim, d_model)
+        self.proj2 = nn.Linear(self.dec_dim, d_model)
+        self.resampler1 = PerceiverResampler(
+            d_model, num_latents=self.num_latents, nhead=nhead)
+        self.resampler2 = PerceiverResampler(
+            d_model, num_latents=self.num_latents, nhead=nhead)
+        self.time_emb1 = nn.Parameter(torch.randn(self.horizon, d_model) * 0.02)
+        self.time_emb2 = nn.Parameter(torch.randn(self.horizon, d_model) * 0.02)
+        self.slot_emb1 = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
+        self.slot_emb2 = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
+        self.stream_emb = nn.Parameter(torch.randn(2, d_model) * 0.02)
+        self.n_tokens = 2 * self.horizon * self.num_latents
+
+    def encode(self, obs):
+        pair, valid_mask = _unpack(obs)
+        pair = pair.float()
+        if pair.dim() != 5:
+            raise ValueError(
+                f"[{self.name}] expected [B,T,2,P,D], got {tuple(pair.shape)}")
+        b, t, two, n_patch, feat_dim = pair.shape
+        if (t, two, n_patch, feat_dim) != (
+            self.horizon, 2, self.n_patch, self.feat_dim
+        ):
+            raise ValueError(
+                f"[{self.name}] expected [B,{self.horizon},2,{self.n_patch},"
+                f"{self.feat_dim}], got {tuple(pair.shape)}"
+            )
+
+        from cleandiffuser.nn_condition.reloc3r_goal_pair import (
+            get_frozen_reloc3r_decoder,
+        )
+        service = get_frozen_reloc3r_decoder(self.checkpoint, pair.device)
+        current = pair[:, :, 0].reshape(b * t, n_patch, feat_dim)
+        goal = pair[:, :, 1].reshape(b * t, n_patch, feat_dim)
+        dec1, dec2 = service.decode(current, goal, self.decoder_chunk)
+
+        lat1 = self.resampler1(self.proj1(dec1)).view(
+            b, t, self.num_latents, self.d_model)
+        lat2 = self.resampler2(self.proj2(dec2)).view(
+            b, t, self.num_latents, self.d_model)
+        lat1 = (
+            lat1
+            + self.time_emb1.view(1, t, 1, self.d_model)
+            + self.slot_emb1.view(1, 1, self.num_latents, self.d_model)
+            + self.stream_emb[0].view(1, 1, 1, self.d_model)
+        )
+        lat2 = (
+            lat2
+            + self.time_emb2.view(1, t, 1, self.d_model)
+            + self.slot_emb2.view(1, 1, self.num_latents, self.d_model)
+            + self.stream_emb[1].view(1, 1, 1, self.d_model)
+        )
+        if valid_mask is not None:
+            token_valid = valid_mask.unsqueeze(-1).expand(
+                b, t, self.num_latents).reshape(b, t * self.num_latents)
+            self._token_valid_mask = torch.cat([token_valid, token_valid], dim=1)
+        else:
+            self._token_valid_mask = None
+        return torch.cat(
+            [
+                lat1.reshape(b, t * self.num_latents, self.d_model),
+                lat2.reshape(b, t * self.num_latents, self.d_model),
+            ],
+            dim=1,
+        )
+
+
 @register_encoder("goal_image")
 class GoalImageEncoder(BaseModalityEncoder):
     """STATIC goal frame as DINO/Reloc3r patch features -> Perceiver latents,

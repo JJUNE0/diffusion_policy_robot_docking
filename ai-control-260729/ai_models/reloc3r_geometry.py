@@ -127,3 +127,52 @@ class Reloc3rGeometry:
         R_body = self.R_cb @ R_cam @ self.R_cb.T
         yaw = np.arctan2(R_body[1, 0], R_body[0, 0])
         return np.array([xy[0], xy[1], np.sin(yaw), np.cos(yaw)], dtype=np.float32)
+
+
+class Reloc3rRelationFeatures:
+    """Live counterpart of ``precompute_reloc3r_dec_features.py``.
+
+    The goal image is encoded once. Each call batch-encodes a sparse history
+    and returns the final, dec_norm-normalized decoder streams. ``dec1`` is the
+    current/history stream attending to the goal; ``dec2`` is the goal stream
+    attending to each current/history frame. Both outputs are float32 tensors
+    shaped [T, 196, 768], quantized through fp16 to match the training cache.
+    """
+
+    def __init__(self, goal_bgr, device="cuda:0", size=224):
+        _ensure_path()
+        from reloc3r.reloc3r_relpose import setup_reloc3r_relpose_model
+
+        self.device = torch.device(device)
+        self.size = size
+        self.model = setup_reloc3r_relpose_model(str(size), self.device)
+        self.model.eval()
+
+        gt, gs = _array_to_view(goal_bgr, size=size)
+        self.goal_shape = torch.from_numpy(gs).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            goal_feat, goal_pos, _ = self.model._encode_image(
+                gt.unsqueeze(0).to(self.device), self.goal_shape)
+        self.goal_feat = goal_feat.detach()
+        self.goal_pos = goal_pos.detach()
+        logger.info("Reloc3r relation-feature extractor ready (device=%s)", self.device)
+
+    @torch.no_grad()
+    def __call__(self, cur_bgr_frames):
+        if not cur_bgr_frames:
+            raise ValueError("Reloc3r relation features need at least one current frame.")
+
+        views = [_array_to_view(frame, size=self.size) for frame in cur_bgr_frames]
+        images = torch.stack([view[0] for view in views]).to(self.device)
+        shapes = torch.from_numpy(np.stack([view[1] for view in views])).to(self.device)
+        cur_feat, cur_pos, _ = self.model._encode_image(images, shapes)
+
+        batch = len(cur_bgr_frames)
+        goal_feat = self.goal_feat.expand(batch, -1, -1).contiguous()
+        goal_pos = self.goal_pos.expand(batch, -1, -1).contiguous()
+        dec1, dec2 = self.model._decoder(cur_feat, cur_pos, goal_feat, goal_pos)
+        # The final iterator element is the dec_norm-normalized last layer,
+        # exactly what the offline cache script stores.
+        out1 = list(dec1)[-1].float()
+        out2 = list(dec2)[-1].float()
+        return out1.half().float(), out2.half().float()

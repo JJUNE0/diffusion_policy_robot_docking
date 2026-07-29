@@ -143,6 +143,18 @@ def main(args):
         if init_from:
             ck = torch.load(init_from, map_location=device, weights_only=False)
             src = ck["model_state_dict"]
+            # Same-name/different-shape params (e.g. TokenSequenceFusionCondition's
+            # `modality_emb`, sized by sensor count -- grows when new sensor
+            # branches are added) can't be loaded at all: strict=False only
+            # tolerates missing/unexpected KEYS, not shape mismatches on a key
+            # present in both, so load_state_dict would still raise. Drop them
+            # up front so they fall back to the live model's fresh init, same
+            # "leave new branches fresh" intent as the missing/unexpected
+            # handling below, just for same-name params instead of new-name ones.
+            tgt_sd = nn_diffusion.model.state_dict()
+            reshaped = [k for k in src if k in tgt_sd and src[k].shape != tgt_sd[k].shape]
+            for k in reshaped:
+                del src[k]
             # Partial (graft) loading: when the live architecture ADDS branches
             # the source checkpoint never had (e.g. grafting goal/lidar/aux onto
             # the old 2-camera baseline), load every matching key and leave the
@@ -154,11 +166,13 @@ def main(args):
             print(f"Warm-started weights from: {init_from}")
             print(f"  loaded {len(src) - len(unexpected)}/{len(src)} source params"
                   f" | new (randomly initialized) params: {len(missing)}")
+            if reshaped:
+                print(f"  shape-changed params reinitialized: {len(reshaped)} e.g. {reshaped[:3]}")
             if unexpected:
                 print(f"  source-only params ignored: {len(unexpected)} e.g. {unexpected[:3]}")
             if missing:
                 print(f"  fresh branches e.g. {missing[:3]}")
-            if len(missing) == 0 and len(unexpected) == 0:
+            if len(missing) == 0 and len(unexpected) == 0 and len(reshaped) == 0:
                 print("  (exact match — plain warm-start)")
             print("(fresh optimizer/scheduler/EMA-seed/step counter)")
             print("======================================================")

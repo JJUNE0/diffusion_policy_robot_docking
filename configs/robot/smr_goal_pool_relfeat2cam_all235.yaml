@@ -1,0 +1,55 @@
+# Scratch training on all 235 after_0328 + 5F episodes, no held-out split.
+defaults:
+  - sensors_variant: reloc3r_goal_pool_2cam_all235
+  - _self_
+
+experiment_name: r_goal_pool_2cam_all235_scratch
+seed: 0
+device: cuda:0
+train_data_path: ${hydra:runtime.cwd}/dataset/front_dock_4f_5f_combined/front_dock_4f_5f_combined.h5
+
+# P(cross-floor goal | trajectory), applied symmetrically in both directions:
+# 4F -> 5F and 5F -> 4F. Override at launch, e.g. `cross_goal_prob=0.2`.
+cross_goal_prob: 0.10
+
+horizon: 60
+obs_horizon: 60
+batch_size: 512
+num_workers: 0
+prefetch_factor: null
+pin_memory: true
+
+state_dim: 2
+velocity_dim: 2
+use_modular_fusion: false
+use_token_sequence_fusion: true
+action_norm: minmax
+
+diffusion_backbone: ddpm
+d_model: 384
+n_heads: 6
+depth: 12
+dropout: 0.1
+condition_num_layers: 4
+
+ema_rate: 0.999
+num_epochs: 20
+diffusion_gradient_steps: null
+learning_rate: 1e-4
+weight_decay: 1e-5
+log_interval: 10
+save_interval: 1000
+resume_path: null
+init_from: null
+
+use_ema: false
+solver: ode_dpmsolver++_2M
+w_cfg: 1
+inference_sampling_steps: 30
+num_samples: 1
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: outputs/

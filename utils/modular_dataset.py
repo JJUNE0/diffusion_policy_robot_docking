@@ -10,6 +10,9 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
                      Row indices must align 1:1 with the main h5.
     mode           : "history" (length-`horizon` window ending at t)
                    | "current" (the single row at t)
+                   | "goal_pool_pair" (history ReLoc3R encoder tokens paired
+                     with one randomly sampled, camera-synchronized goal from
+                     a compiled goal pool)
     horizon        : window length for mode=history
     stride         : (optional) subsample the window by ::stride
     channels       : (optional) list of column indices to keep (e.g. IMU planar
@@ -18,6 +21,16 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
     normalize      : (optional) "action" -> reuse the encoder action normalizer;
                      "zscore" -> per-channel (mean/std over the source) whitening.
     npoints_source : (mode=current, pointcloud) key with the per-row valid count
+    goal_pool_file : (mode=goal_pool_pair) compiled HDF5 snapshot
+    goal_source    : ReLoc3R goal encoder-feature key in goal_pool_file
+    goal_pool_group: sensors sharing this value sample the SAME goal row
+    goal_pool_filter: optional metadata filter, e.g.
+                     {split: [train], variant: [original, qr_removed]}
+    goal_pool_match: optional episode-aware sampling policy. By default, goals
+                     are sampled from the pool rows whose `goal_field` equals
+                     the current episode's `episode_field`. A source listed in
+                     `cross_map` instead samples the mapped goal group with
+                     probability `cross_probability`, e.g. 10% 4F -> 5F.
     head           : (optional) "aux_pose" -> the dataset also emits ICP dock-pose
                      targets ("dock_target" [x_n, y_n, sin, cos] + "reliable"
                      mask) so the aux precision head can be trained/ablated.
@@ -30,6 +43,7 @@ NOTE: `dino_image` sensors expect PRECOMPUTED DINO features stored in the h5
 under `source`. Encoding raw pixels with the DINO backbone is a train-loop
 concern (kept out of the dataset), same split as the existing pipeline.
 """
+import os
 from typing import Dict
 
 import h5py
@@ -95,6 +109,7 @@ class ModularDockingDataset(Dataset):
         self.dock_pose_key = dock_pose_key
         self.reliable_key = reliable_key
         self.action_norm = action_norm
+        self._goal_pool_groups = {}
 
         # Aux precision head is on iff any sensor declares `head: aux_pose`. Then
         # the dataset must emit dock-pose targets (from the ICP labels in the h5).
@@ -108,8 +123,15 @@ class ModularDockingDataset(Dataset):
         # Sensors may read from a sidecar h5 via `file:` (e.g. a DINO feature
         # cache); everything else (episode_ends, action, aux labels) stays in
         # the main h5.
-        self._file_paths = sorted({self.h5_path} | {
-            self._sensor_path(spec) for spec in self.sensors.values()})
+        self._file_paths = sorted(
+            {self.h5_path}
+            | {self._sensor_path(spec) for spec in self.sensors.values()}
+            | {
+                spec["goal_pool_file"]
+                for spec in self.sensors.values()
+                if spec.get("mode") == "goal_pool_pair"
+            }
+        )
 
         files = {p: h5py.File(p, "r") for p in self._file_paths}
         try:
@@ -127,6 +149,8 @@ class ModularDockingDataset(Dataset):
                         f"sensor '{name}': '{spec['source']}' in {sf.filename} has "
                         f"{sf[spec['source']].shape[0]} rows but the main h5 has {n_rows}; "
                         f"external files must be row-aligned with the main h5.")
+                if spec.get("mode") == "goal_pool_pair":
+                    self._register_goal_pool_group(name, spec, files)
                 if spec.get("normalize") == "zscore":
                     col = self._select_channels(sf[spec["source"]][:], spec).astype(np.float32)
                     mean = col.reshape(-1, col.shape[-1]).mean(axis=0)
@@ -168,6 +192,139 @@ class ModularDockingDataset(Dataset):
             start = end
         self.root = None
         self.roots = None
+
+    @staticmethod
+    def _string_column(h5, key):
+        if key not in h5:
+            raise KeyError(
+                f"compiled goal pool {h5.filename} is missing metadata '{key}'. "
+                f"Available: {list(h5.keys())}"
+            )
+        return np.asarray(h5[key].asstr()[:], dtype=object)
+
+    def _register_goal_pool_group(self, name, spec, files):
+        pool_path = spec.get("goal_pool_file")
+        goal_source = spec.get("goal_source")
+        if not pool_path or not goal_source:
+            raise ValueError(
+                f"sensor '{name}' mode=goal_pool_pair requires goal_pool_file and goal_source"
+            )
+        pool = files[pool_path]
+        if goal_source not in pool:
+            raise KeyError(
+                f"sensor '{name}': goal_source '{goal_source}' not in {pool.filename}. "
+                f"Available: {list(pool.keys())}"
+            )
+        if "goal_id" not in pool:
+            raise KeyError(f"{pool.filename}: missing goal_id")
+        n_goals = int(pool["goal_id"].shape[0])
+        if int(pool[goal_source].shape[0]) != n_goals:
+            raise ValueError(
+                f"{pool.filename}: {goal_source} has {pool[goal_source].shape[0]} rows, "
+                f"goal_id has {n_goals}"
+            )
+        selected = np.ones(n_goals, dtype=bool)
+        filters = spec.get("goal_pool_filter") or {}
+        for field, allowed in filters.items():
+            allowed = allowed if isinstance(allowed, (list, tuple)) else [allowed]
+            values = self._string_column(pool, field)
+            selected &= np.isin(values, np.asarray([str(v) for v in allowed], dtype=object))
+        rows = np.flatnonzero(selected).astype(np.int64)
+        if len(rows) == 0:
+            raise ValueError(
+                f"sensor '{name}': goal_pool_filter={filters} selected zero goals "
+                f"from {pool.filename}"
+            )
+        sampling = str(spec.get("goal_sampling", "random"))
+        match = spec.get("goal_pool_match") or {}
+        match_info = None
+        if match:
+            episode_field = str(match.get("episode_field", ""))
+            goal_field = str(match.get("goal_field", ""))
+            if not episode_field or not goal_field:
+                raise ValueError(
+                    f"sensor '{name}': goal_pool_match requires episode_field "
+                    "and goal_field"
+                )
+            episode_values = self._string_column(
+                files[self.h5_path], episode_field
+            )
+            if len(episode_values) != len(self.episode_ends):
+                raise ValueError(
+                    f"sensor '{name}': episode metadata '{episode_field}' has "
+                    f"{len(episode_values)} rows but episode_ends has "
+                    f"{len(self.episode_ends)}"
+                )
+            goal_values = self._string_column(pool, goal_field)
+            cross_probability = float(match.get("cross_probability", 0.0))
+            if not 0.0 <= cross_probability <= 1.0:
+                raise ValueError(
+                    f"sensor '{name}': goal_pool_match.cross_probability must "
+                    f"be in [0, 1], got {cross_probability}"
+                )
+            cross_map = {
+                str(source): str(target)
+                for source, target in dict(match.get("cross_map") or {}).items()
+            }
+            rows_by_value = {
+                str(value): rows[goal_values[rows] == value]
+                for value in np.unique(goal_values[rows])
+            }
+            required_values = set(map(str, episode_values))
+            episode_value_set = tuple(required_values)
+            required_values.update(
+                cross_map[source]
+                for source in episode_value_set
+                if source in cross_map and cross_probability > 0.0
+            )
+            missing_values = sorted(
+                value for value in required_values
+                if value not in rows_by_value or len(rows_by_value[value]) == 0
+            )
+            if missing_values:
+                raise ValueError(
+                    f"sensor '{name}': goal_pool_match needs goal_field="
+                    f"'{goal_field}' values {missing_values}, but the filtered "
+                    f"pool has {sorted(rows_by_value)}"
+                )
+            match_info = {
+                "episode_field": episode_field,
+                "goal_field": goal_field,
+                "episode_values": episode_values,
+                "rows_by_value": rows_by_value,
+                "cross_probability": cross_probability,
+                "cross_map": cross_map,
+            }
+
+        group = str(spec.get("goal_pool_group", "default"))
+        goal_ids = tuple(self._string_column(pool, "goal_id")[rows].tolist())
+        match_signature = None
+        if match_info is not None:
+            match_signature = (
+                match_info["episode_field"],
+                match_info["goal_field"],
+                match_info["cross_probability"],
+                tuple(sorted(match_info["cross_map"].items())),
+            )
+        signature = (
+            os.path.abspath(pool_path),
+            tuple(rows.tolist()),
+            goal_ids,
+            sampling,
+            match_signature,
+        )
+        previous = self._goal_pool_groups.get(group)
+        if previous is not None and previous["signature"] != signature:
+            raise ValueError(
+                f"goal_pool_group '{group}' must use the same compiled pool/filter "
+                f"and sampling policy for every camera; sensor '{name}' does not match"
+            )
+        self._goal_pool_groups[group] = {
+            "signature": signature,
+            "rows": rows,
+            "sampling": sampling,
+            "match": match_info,
+        }
 
     def _sensor_path(self, spec):
         return spec.get("file") or self.h5_path
@@ -229,6 +386,7 @@ class ModularDockingDataset(Dataset):
         goal_row = ep_end - 1  # episode's static goal/docked frame (last row),
         # same convention as utils/docking_dataset.py and endgame/se2.py.
         obs = {}
+        sampled_goal_rows = {}
         for name, spec in self.sensors.items():
             sensor_root = self.roots[self._sensor_path(spec)]
             ds = sensor_root[spec["source"]]
@@ -265,6 +423,57 @@ class ModularDockingDataset(Dataset):
                 nsrc = spec.get("npoints_source")
                 if nsrc is not None:
                     obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][goal_row]), dtype=torch.long)
+            elif mode == "goal_pool_pair":
+                history = self._history(ds, t, ep_start)
+                valid_mask = self._history_valid_mask(t, ep_start)
+                stride = int(spec.get("stride", 1))
+                if stride > 1:
+                    history = history[::stride]
+                    valid_mask = valid_mask[::stride]
+                group = str(spec.get("goal_pool_group", "default"))
+                if group not in sampled_goal_rows:
+                    info = self._goal_pool_groups[group]
+                    candidates = info["rows"]
+                    match = info["match"]
+                    if match is not None:
+                        episode_index = int(
+                            np.searchsorted(self.episode_ends, t, side="right")
+                        )
+                        source_value = str(
+                            match["episode_values"][episode_index]
+                        )
+                        target_value = source_value
+                        cross_target = match["cross_map"].get(source_value)
+                        if (
+                            cross_target is not None
+                            and torch.rand(1).item()
+                            < match["cross_probability"]
+                        ):
+                            target_value = cross_target
+                        candidates = match["rows_by_value"][target_value]
+                    if info["sampling"] == "random":
+                        choice = int(torch.randint(len(candidates), (1,)).item())
+                    elif info["sampling"] == "first":
+                        choice = 0
+                    elif info["sampling"] == "index":
+                        choice = int(idx) % len(candidates)
+                    else:
+                        raise ValueError(
+                            f"sensor '{name}': unknown goal_sampling={info['sampling']} "
+                            "(expected random|first|index)"
+                        )
+                    sampled_goal_rows[group] = int(candidates[choice])
+                sampled_row = sampled_goal_rows[group]
+                goal_root = self.roots[spec["goal_pool_file"]]
+                goal = np.asarray(goal_root[spec["goal_source"]][sampled_row])
+                goal_history = np.broadcast_to(goal, history.shape)
+                pair = np.stack([history, goal_history], axis=1)
+                obs[name] = torch.from_numpy(
+                    np.ascontiguousarray(pair).astype(np.float32)
+                )
+                obs[f"{name}_valid_mask"] = torch.from_numpy(
+                    np.ascontiguousarray(valid_mask)
+                )
             else:
                 raise ValueError(f"sensor '{name}': unknown mode '{mode}'.")
 

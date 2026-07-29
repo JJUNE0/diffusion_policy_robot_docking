@@ -1,0 +1,57 @@
+# @package _global_
+# after_0328 history + camera-paired random goal pool.
+#
+# Unlike reloc3r_relfeat_2cam.yaml, dec1/dec2 are NOT read from a cache tied to
+# the episode's original final frame. The dataset samples one goal id shared by
+# both cameras, pairs its cached ViT-L encoder tokens with each history frame,
+# and Reloc3rGoalPairEncoder runs the exact frozen ReLoc3R decoder online.
+#
+# The split filter prevents held-out goal-image leakage. Remove the dataset
+# filter intentionally if cross-environment after_0328 + 5F goal augmentation
+# is desired (the default below does allow both datasets, split=train only).
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_pair_bottom:
+    encoder: reloc3r_goal_pair
+    source: reloc3r_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: goal_pool_pair
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 1024
+    dec_dim: 768
+    decoder_chunk: 4
+    goal_pool_file: ${hydra:runtime.cwd}/dataset/goal_pool/goal_pool_reloc3r.h5
+    goal_source: reloc3r_orbbec_0
+    goal_pool_group: paired_goal
+    goal_pool_filter:
+      split: [train]
+    goal_sampling: random
+    dropout_prob: 0.0
+  reloc3r_pair_top:
+    encoder: reloc3r_goal_pair
+    source: reloc3r_top
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_top.h5
+    mode: goal_pool_pair
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 1024
+    dec_dim: 768
+    decoder_chunk: 4
+    goal_pool_file: ${hydra:runtime.cwd}/dataset/goal_pool/goal_pool_reloc3r.h5
+    goal_source: reloc3r_usb_0
+    goal_pool_group: paired_goal
+    goal_pool_filter:
+      split: [train]
+    goal_sampling: random
+    dropout_prob: 0.0

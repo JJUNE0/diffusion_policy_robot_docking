@@ -388,18 +388,26 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
     model.model_ema.load_state_dict(ckpt["ema_state_dict"])
     model.eval()
 
-    from dino_detector import DinoBatchDetector
-    dino = DinoBatchDetector(device=device)
+    dino = None
 
     # Observation window: defaults come from the checkpoint's own sensors spec
     # (the values it was trained on), but each is overridable from config.yml so
     # a window can be re-tuned on site without editing code or retraining.
     # Overriding changes what the policy sees vs training -- log loudly.
     wheel = sensors.get("wheel", {})
-    rgb = sensors.get("rgb_history", {})
+    relation_specs = {name: spec for name, spec in sensors.items()
+                      if spec.get("encoder") == "reloc3r_relation"}
+    rgb_specs = {name: spec for name, spec in sensors.items()
+                 if spec.get("encoder") == "dino_image"}
+    lidar_specs = {name: spec for name, spec in sensors.items()
+                   if spec.get("encoder") == "pointcloud"}
+    visual_specs = list(rgb_specs.values()) + list(relation_specs.values())
+    if rgb_specs or "goal" in sensors:
+        from dino_detector import DinoBatchDetector
+        dino = DinoBatchDetector(device=device)
     obs_h = int(wheel.get("horizon", cfg.get("obs_horizon", 60)))
-    vis_stride = int(rgb.get("stride", 12))
-    vis_n = int(rgb.get("horizon", 5))
+    vis_stride = int(visual_specs[0].get("stride", 12)) if visual_specs else 12
+    vis_n = int(visual_specs[0].get("horizon", 5)) if visual_specs else 5
     for key, name, trained in (("demo_obs_horizon", "obs_h", obs_h),
                                ("demo_vision_stride", "vis_stride", vis_stride),
                                ("demo_vision_frames", "vis_n", vis_n)):
@@ -413,16 +421,29 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
                 vis_stride = int(ov)
             else:
                 vis_n = int(ov)
-    use_usb0 = "rgb_history_top" in sensors
+    def _is_top(name, spec):
+        return str(spec.get("source", name)).endswith("_top") or name.endswith("_top")
+
+    use_usb0 = any(_is_top(name, spec) for name, spec in
+                   list(rgb_specs.items()) + list(relation_specs.items()))
+    need_bottom_goal = ("goal" in sensors or "geometry" in sensors or
+                        any(not _is_top(n, s) for n, s in relation_specs.items()))
+    need_top_goal = any(_is_top(n, s) for n, s in relation_specs.items())
 
     goal_feat_orbbec0 = goal_feat_usb0 = None
-    goal_bgr = None
-    if "goal" in sensors or "geometry" in sensors:
+    goal_bgr = goal_top_bgr = None
+    if need_bottom_goal or need_top_goal:
         import cv2
+    if need_bottom_goal:
         gp = getattr(config, "demo_goal_image_orbbec0", "") or GOAL_IMAGE_ORBBEC0_DEFAULT
         goal_bgr = cv2.imread(gp)
         if goal_bgr is None:
             raise FileNotFoundError(f"goal image missing: {gp}")
+    if need_top_goal:
+        gp_top = getattr(config, "demo_goal_image_usb0", "") or GOAL_IMAGE_USB0_DEFAULT
+        goal_top_bgr = cv2.imread(gp_top)
+        if goal_top_bgr is None:
+            raise FileNotFoundError(f"top-camera goal image missing: {gp_top}")
     if "goal" in sensors:
         with torch.no_grad():
             gf, _, _ = dino.get_heatmap(_frames_to_tensor([goal_bgr], device))
@@ -440,6 +461,29 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
             goal_bgr, device=device,
             calib_path=(getattr(config, "demo_reloc3r_calib", "") or None))
 
+    relation_extractors = {}
+    if relation_specs:
+        from reloc3r_geometry import Reloc3rRelationFeatures
+        by_camera = {"bottom": [], "top": []}
+        for name, spec in relation_specs.items():
+            camera = "top" if _is_top(name, spec) else "bottom"
+            by_camera[camera].append((name, spec))
+            source = str(spec.get("source", name))
+            if "dec1" not in source and "dec2" not in source:
+                raise ValueError(
+                    f"relation sensor {name!r} source must contain dec1 or dec2, got {source!r}")
+        for camera, entries in by_camera.items():
+            if not entries:
+                continue
+            temporal = {(int(s.get("horizon", 5)), int(s.get("stride", 12)))
+                        for _, s in entries}
+            if len(temporal) != 1:
+                raise ValueError(
+                    f"all {camera} relation streams must share horizon/stride, got {temporal}")
+            goal_image = goal_top_bgr if camera == "top" else goal_bgr
+            relation_extractors[camera] = Reloc3rRelationFeatures(
+                goal_image, device=device)
+
     use_ema = float(cfg.get("ema_rate", 0.999)) <= 0.999
     solver = "euler" if str(cfg.get("diffusion_backbone", "")) == "rectified_flow" else "ode_dpmsolver++_2M"
     horizon = int(cfg.get("horizon", HORIZON))
@@ -453,6 +497,8 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
         model=model, dino=dino, device=device, use_ema=use_ema, ctrl=ctrl,
         token_sequence=True, sensors=sensors, obs_horizon=obs_h,
         vision_stride=vis_stride, vision_n=vis_n, horizon=horizon, geometry=geometry,
+        relation_specs=relation_specs, relation_extractors=relation_extractors,
+        rgb_specs=rgb_specs, need_lidar=bool(lidar_specs),
         use_goal_lidar=False, goal_lidar=None,
         use_usb0=use_usb0, video_stream_usb0=getattr(config, "demo_video1", "video1"),
         goal_feat_usb0=goal_feat_usb0, goal_feat_orbbec0=goal_feat_orbbec0,
@@ -517,82 +563,112 @@ def _infer(snap, config) -> List[CommandStep]:
     frames_orbbec0 = snap.get(st["video_stream_orbbec0"], ([], []))[0]
     enc = snap.get("encoder", ([], []))[0]
     lidar = snap.get("lidar", ([], []))[0]
-    frames_usb0 = snap.get(st["video_stream_usb0"], ([], []))[0] if st["use_usb0"] else None
-    n_frames_usb0 = len(frames_usb0) if frames_usb0 is not None else OBS_HORIZON  # n/a -> don't block readiness
-    # Token-sequence checkpoints observe a 60-frame window, not 30 (see the
-    # OBS_HORIZON comment at the top) -- readiness must be checked against the
-    # window this particular checkpoint was trained on, or the first inferences
-    # run on a short/padded history.
+    frames_usb0 = snap.get(st["video_stream_usb0"], ([], []))[0] if st["use_usb0"] else []
     obs_h = int(st.get("obs_horizon", OBS_HORIZON))
-    if n_frames_usb0 is not None and not st["use_usb0"]:
-        n_frames_usb0 = obs_h
-    if len(frames_orbbec0) < obs_h or len(enc) < obs_h or len(lidar) < 1 or n_frames_usb0 < obs_h:
-        logger.warning("window not ready (orbbec0=%d usb0=%s enc=%d lidar=%d, need %d) -> zeros",
-                       len(frames_orbbec0), n_frames_usb0 if st["use_usb0"] else "n/a",
-                       len(enc), len(lidar), obs_h)
+
+    if st.get("token_sequence"):
+        sensors = st["sensors"]
+        relation_specs = st.get("relation_specs", {})
+        rgb_specs = st.get("rgb_specs", {})
+        need_bottom = ("goal" in sensors or "geometry" in sensors or
+                       any(not str(s.get("source", n)).endswith("_top")
+                           for n, s in list(rgb_specs.items()) + list(relation_specs.items())))
+        not_ready = (len(enc) < obs_h or
+                     (need_bottom and len(frames_orbbec0) < obs_h) or
+                     (st["use_usb0"] and len(frames_usb0) < obs_h) or
+                     (st.get("need_lidar") and len(lidar) < 1))
+    else:
+        not_ready = (len(frames_orbbec0) < obs_h or len(enc) < obs_h or
+                     len(lidar) < 1 or
+                     (st["use_usb0"] and len(frames_usb0) < obs_h))
+    if not_ready:
+        logger.warning(
+            "window not ready (orbbec0=%d usb0=%s enc=%d lidar=%d, need %d) -> zeros",
+            len(frames_orbbec0), len(frames_usb0) if st["use_usb0"] else "n/a",
+            len(enc), len(lidar), obs_h)
         return _zeros(config)
 
-
-    # Window/stride come from the checkpoint: legacy = 30 / stride 6, token-
-    # sequence = 60 / stride 12 (set in _init_token_sequence).
     vis_stride = int(st.get("vision_stride", VISION_STRIDE))
     vis_n = int(st.get("vision_n", OBS_HORIZON // VISION_STRIDE))
 
-    # velocity history: last obs_h (vx, wz), normalized like training
-    vel = np.array([[float(e["vx"]), float(e["wz"])] for e in enc[-obs_h:]], np.float32)
-    vel_n = 2.0 * (vel - st["act_min"]) / st["act_scale"] - 1.0
-
-    # vision: the exact strided frames training used. ModularDockingDataset takes
-    # the LAST vis_n of the strided window, so mirror that rather than the first.
     def _sparse(frames):
         hist = frames[-obs_h:]
         idx = list(range(0, obs_h, vis_stride))[-vis_n:]
+        if len(idx) != vis_n:
+            raise ValueError(
+                f"cannot sample {vis_n} visual frames at stride {vis_stride} from {obs_h}")
         return [hist[i] for i in idx]
 
-    sparse_orbbec0 = _sparse(frames_orbbec0)
-    with torch.no_grad():
-        vf, _, _ = st["dino"].get_heatmap(_frames_to_tensor(sparse_orbbec0, device))
-    dino_feat_orbbec0 = vf.view(1, len(sparse_orbbec0), 196, 768).repeat(n_samples, 1, 1, 1)
-
-    dino_feat_usb0 = None
-    if st["use_usb0"]:
-        sparse_usb0 = _sparse(frames_usb0)
-        with torch.no_grad():
-            vf1, _, _ = st["dino"].get_heatmap(_frames_to_tensor(sparse_usb0, device))
-        dino_feat_usb0 = vf1.view(1, len(sparse_usb0), 196, 768).repeat(n_samples, 1, 1, 1)
-
-    # lidar: latest scan -> nearest-cluster crop
-    pts = np.array([[p["x"], p["y"]] for p in lidar[-1].get("points", [])], np.float32)
-    crop, npts = _crop_scan(pts if pts.size else np.zeros((0, 2), np.float32))
-
+    vel = np.array([[float(e["vx"]), float(e["wz"])] for e in enc[-obs_h:]], np.float32)
+    vel_n = 2.0 * (vel - st["act_min"]) / st["act_scale"] - 1.0
     vel_t = torch.from_numpy(vel_n).unsqueeze(0).to(device).repeat(n_samples, 1, 1)
-    lidar_t = torch.from_numpy(crop).unsqueeze(0).to(device).repeat(n_samples, 1, 1)
-    npts_t = torch.tensor([npts], device=device).repeat(n_samples)
 
     if st.get("token_sequence"):
-        # TokenSequenceFusionCondition keys the context by SENSOR NAME (the
-        # `sensors:` dict keys), not by the legacy dino_feat*/goal_feat* names.
-        # Missing *_valid_mask entries mean "all valid", which is correct here:
-        # readiness was already enforced above, so no history slot is padded.
-        context = {
-            "wheel": vel_t,
-            "rgb_history": dino_feat_orbbec0,
-            "lidar": lidar_t,
-            "lidar_npoints": npts_t,
-        }
+        context = {}
+        if "wheel" in sensors:
+            context["wheel"] = vel_t
+
+        sparse_by_camera = {}
+        if need_bottom:
+            sparse_by_camera["bottom"] = _sparse(frames_orbbec0)
         if st["use_usb0"]:
-            context["rgb_history_top"] = dino_feat_usb0
-        if "goal" in st["sensors"]:
+            sparse_by_camera["top"] = _sparse(frames_usb0)
+
+        dino_by_camera = {}
+        for name, spec in rgb_specs.items():
+            camera = "top" if str(spec.get("source", name)).endswith("_top") else "bottom"
+            if camera not in dino_by_camera:
+                with torch.no_grad():
+                    vf, _, _ = st["dino"].get_heatmap(
+                        _frames_to_tensor(sparse_by_camera[camera], device))
+                dino_by_camera[camera] = vf.view(
+                    1, len(sparse_by_camera[camera]), 196, 768).repeat(n_samples, 1, 1, 1)
+            context[name] = dino_by_camera[camera]
+
+        relation_by_camera = {}
+        for camera, extractor in st.get("relation_extractors", {}).items():
+            dec1, dec2 = extractor(sparse_by_camera[camera])
+            relation_by_camera[camera] = (
+                dec1.unsqueeze(0).repeat(n_samples, 1, 1, 1),
+                dec2.unsqueeze(0).repeat(n_samples, 1, 1, 1))
+        for name, spec in relation_specs.items():
+            source = str(spec.get("source", name))
+            camera = "top" if source.endswith("_top") else "bottom"
+            stream = 0 if "dec1" in source else 1
+            context[name] = relation_by_camera[camera][stream]
+
+        if st.get("need_lidar"):
+            pts = np.array([[p["x"], p["y"]] for p in lidar[-1].get("points", [])], np.float32)
+            crop, npts = _crop_scan(pts if pts.size else np.zeros((0, 2), np.float32))
+            lidar_t = torch.from_numpy(crop).unsqueeze(0).to(device).repeat(n_samples, 1, 1)
+            npts_t = torch.tensor([npts], device=device).repeat(n_samples)
+            for name, spec in sensors.items():
+                if spec.get("encoder") == "pointcloud":
+                    context[name] = lidar_t
+                    context[f"{name}_npoints"] = npts_t
+        if "goal" in sensors:
             context["goal"] = st["goal_feat_orbbec0"]
         if st.get("geometry") is not None:
-            # Newest frame only (mode: current). Same camera as `goal`.
             g4 = st["geometry"](frames_orbbec0[-1])
             context["geometry"] = torch.from_numpy(g4).unsqueeze(0).to(device).repeat(n_samples, 1)
     else:
-        # Model's forward() (sensor_fusion_condition.py) requires the literal keys
-        # dino_feat1/dino_feat2/goal_feat1/goal_feat2 -- that contract is fixed by
-        # the training pipeline and not renamed here. orbbec0 (base camera) maps
-        # to the *2 keys, usb0 (2nd camera) maps to the *1 keys.
+        sparse_orbbec0 = _sparse(frames_orbbec0)
+        with torch.no_grad():
+            vf, _, _ = st["dino"].get_heatmap(_frames_to_tensor(sparse_orbbec0, device))
+        dino_feat_orbbec0 = vf.view(
+            1, len(sparse_orbbec0), 196, 768).repeat(n_samples, 1, 1, 1)
+        dino_feat_usb0 = None
+        if st["use_usb0"]:
+            sparse_usb0 = _sparse(frames_usb0)
+            with torch.no_grad():
+                vf1, _, _ = st["dino"].get_heatmap(_frames_to_tensor(sparse_usb0, device))
+            dino_feat_usb0 = vf1.view(
+                1, len(sparse_usb0), 196, 768).repeat(n_samples, 1, 1, 1)
+
+        pts = np.array([[p["x"], p["y"]] for p in lidar[-1].get("points", [])], np.float32)
+        crop, npts = _crop_scan(pts if pts.size else np.zeros((0, 2), np.float32))
+        lidar_t = torch.from_numpy(crop).unsqueeze(0).to(device).repeat(n_samples, 1, 1)
+        npts_t = torch.tensor([npts], device=device).repeat(n_samples)
         context = {
             "velocity": vel_t,
             "dino_feat2": dino_feat_orbbec0,

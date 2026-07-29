@@ -213,6 +213,22 @@ class Reloc3rImageEncoder(DinoImageEncoder):
         super().__init__(spec, d_model, nhead)
 
 
+@register_encoder("reloc3r_relation")
+class Reloc3rRelationEncoder(DinoImageEncoder):
+    """Cross-attended Reloc3r decoder patch tokens -> Perceiver latents.
+
+    The live plugin supplies the last normalized decoder-layer tokens for both
+    streams (current attending to goal and goal attending to current). They
+    have the same temporal/patch layout as cached image features, but Reloc3r's
+    decoder width is 768 rather than its encoder width of 1024.
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        spec = dict(spec)
+        spec.setdefault("feat_dim", 768)
+        super().__init__(spec, d_model, nhead)
+
+
 @register_encoder("goal_image")
 class GoalImageEncoder(BaseModalityEncoder):
     """STATIC goal frame as DINO/Reloc3r patch features -> Perceiver latents,

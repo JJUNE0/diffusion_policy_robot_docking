@@ -1,0 +1,90 @@
+# @package _global_
+# Two-camera Reloc3r-relational arm on after_0328, per user-confirmed
+# architecture diagram (reloc_base.png): wheel + Reloc3r ViT encoder/decoder
+# tokens from BOTH cameras. Extends reloc3r_relfeat_only.yaml (single camera,
+# image_bottom only) with a second, independent camera stream -- same minimal
+# design, same accepted trade-off (no DINO appearance branch, no lidar, no
+# collapsed geometry token, no dropout on any vision branch; see that file's
+# header for the full rationale).
+#
+# Cameras: image_bottom = the dock-facing camera this repo has always used;
+# image_top = the second camera already present in the raw after_0328 capture
+# (after_0328_train.h5 already has an `image_top` dataset row-aligned with
+# image_bottom -- no re-extraction needed, unlike front_dock_5f which required
+# rebuilding from the raw zips to add its second camera).
+# Each camera's history stream cross-attends into ITS OWN camera's goal frame
+# (independent per-camera decoder pass -- scripts/precompute_reloc3r_dec_features.py
+# run separately with --camera image_bottom / image_top), NOT cross-camera
+# attention, matching the diagram's two parallel green/red ViT pairs.
+#
+# Built by:
+#   scripts/precompute_reloc3r_cache.py --camera image_top
+#       -> dataset/after_0328_{train,test}_reloc3r_top.h5
+#   scripts/precompute_reloc3r_dec_features.py --camera image_top
+#       -> adds reloc3r_dec{1,2}_top datasets in-place into the above
+#   (reloc3r_dec{1,2}_bottom already existed in
+#    dataset/after_0328_{train,test}_reloc3r_bottom.h5 from the single-camera
+#    reloc3r_relfeat_only.yaml arm)
+#
+# Token budget: wheel(60) + 4 x reloc3r_dec(5*16=80) = 60 + 320 = 380.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_2cam experiment_name=r_relfeat_2cam
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  # NOTE: sensor keys "reloc3r_dec1"/"reloc3r_dec2" (no "_bottom" suffix) are
+  # deliberately kept IDENTICAL to reloc3r_relfeat_only.yaml's keys
+  # (TokenSequenceFusionCondition keys its ModuleDict/state_dict by this exact
+  # YAML key, cleandiffuser/nn_condition/token_sequence_condition.py:48) so a
+  # future init_from from that single-camera checkpoint would graft-load these
+  # weights instead of reinitializing them. Only the NEW top-camera branches
+  # below get a disambiguating "_top" suffix.
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec1_top:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_top
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_top.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec2_top:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_top
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_top.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0

@@ -1,0 +1,97 @@
+# @package _global_
+# Two-camera Reloc3r-relational arm for front_dock_5th_floor, per user-confirmed
+# architecture diagram (reloc3r_front_dock_5f.png): wheel + Reloc3r ViT
+# encoder/decoder tokens from BOTH cameras. Same minimal design as
+# reloc3r_relfeat_only.yaml (see that file's header for the full rationale and
+# the accepted trade-off of dropping the DINO appearance / lidar / collapsed
+# geometry branches -- identical bet here, just duplicated across two
+# independent camera streams instead of one.
+#
+# Cameras (dataset/front_dock_5th_floor raw zips have no literal "orbbec-1";
+# user-confirmed mapping):
+#   image_bottom (room2) = camera_orbbec-0 -- forward, dock-facing (existing convention)
+#   image_top    (room1) = camera_usb-0    -- second, wider-FOV camera
+# Each camera's history stream cross-attends into ITS OWN camera's goal frame
+# (independent per-camera decoder pass, per scripts/precompute_reloc3r_dec_features.py
+# run separately with --camera image_bottom / image_top) -- NOT cross-camera
+# attention. This matches the diagram: two parallel green/red ViT encoder-decoder
+# pairs, one per camera, feeding the same fusion transformer.
+#
+# Built by:
+#   scripts/build_front_dock_5f.py --out dataset/front_dock_5f_2cam
+#       --room2_camera camera_orbbec-0 --room1_camera camera_usb-0
+#   utils/preprocessing.py (use_room1=True, i.e. no --no_room1)
+#       -> dataset/front_dock_5f_2cam_{train,test}.h5
+#   scripts/precompute_reloc3r_cache.py --camera {image_bottom,image_top}
+#       -> dataset/front_dock_5f_2cam_{train,test}_reloc3r_{bottom,top}.h5
+#   scripts/precompute_reloc3r_dec_features.py --camera {image_bottom,image_top}
+#       -> adds reloc3r_dec{1,2}_{bottom,top} datasets in-place into the above
+#
+# dropout_prob left at 0 on all four vision branches, same reasoning as
+# reloc3r_relfeat_only.yaml: dec1/dec2 are each camera's SOLE vision signal
+# here (no separate always-on DINO appearance channel to fall back to), so
+# dropping any of them would blind the trunk to that whole camera, not just
+# its goal-relative component.
+#
+# Token budget: wheel(60) + 4 x reloc3r_dec(5*16=80) = 60 + 320 = 380.
+#
+# Run:
+#   python scripts/train.py --config-name smr_front_dock_5f_relfeat2cam \
+#       experiment_name=r_relfeat_2cam_5f
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  # NOTE: sensor keys "reloc3r_dec1"/"reloc3r_dec2" (no "_bottom" suffix) are
+  # deliberately kept IDENTICAL to reloc3r_relfeat_only.yaml's bottom-camera
+  # keys (TokenSequenceFusionCondition keys its ModuleDict/state_dict by this
+  # exact YAML key, cleandiffuser/nn_condition/token_sequence_condition.py:48)
+  # so scripts/train.py's init_from graft-loads these weights from that
+  # single-camera checkpoint instead of reinitializing them. Only the NEW
+  # top-camera branches below get a disambiguating "_top" suffix.
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/front_dock_5f_2cam_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/front_dock_5f_2cam_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec1_top:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_top
+    file: ${hydra:runtime.cwd}/dataset/front_dock_5f_2cam_train_reloc3r_top.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec2_top:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_top
+    file: ${hydra:runtime.cwd}/dataset/front_dock_5f_2cam_train_reloc3r_top.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0

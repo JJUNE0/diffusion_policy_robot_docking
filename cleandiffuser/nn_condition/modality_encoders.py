@@ -213,6 +213,32 @@ class Reloc3rImageEncoder(DinoImageEncoder):
         super().__init__(spec, d_model, nhead)
 
 
+@register_encoder("reloc3r_relation")
+class Reloc3rRelationEncoder(DinoImageEncoder):
+    """Reloc3r decoder's cross-attended patch tokens (POST cross-attention,
+    PRE pose-head pooling) -> Perceiver latents. Unlike Reloc3rImageEncoder
+    (raw ViT-L *encoder* patch features, independently encoded per frame),
+    these tokens have already cross-attended into the goal frame's (or the
+    current frame's) stream inside Reloc3r's own decoder (arxiv 2412.08376;
+    see Reloc3rRelpose._decoder, reloc3r/reloc3r/reloc3r_relpose.py). obs:
+    [B, Tv, 196, 768] (dec_embed_dim=768, precomputed by
+    scripts/precompute_reloc3r_dec_features.py). Serves BOTH the dec1
+    ("goal-aware history": current frame's stream after attending into goal)
+    and dec2 ("current-aware goal": the same stream rotation/geometry already
+    collapse to a point estimate, kept here at full patch resolution) sensor
+    entries -- two independently-weighted instances of this SAME class,
+    differentiated purely by which `source`/`file` the YAML sensor entry
+    points at; no dec1-vs-dec2-specific logic lives in Python. Kept as its
+    own registry name (not reusing `reloc3r_image`) so this backbone-vs-
+    relational distinction is a one-word config change.
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        spec = dict(spec)
+        spec.setdefault("feat_dim", 768)
+        super().__init__(spec, d_model, nhead)
+
+
 @register_encoder("goal_image")
 class GoalImageEncoder(BaseModalityEncoder):
     """STATIC goal frame as DINO/Reloc3r patch features -> Perceiver latents,

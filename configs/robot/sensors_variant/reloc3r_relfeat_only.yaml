@@ -1,0 +1,64 @@
+# @package _global_
+# Minimal Reloc3r-relational arm, per user-confirmed architecture diagram
+# (Screenshot 2026-07-28 at 9.46.50 PM): wheel + Reloc3r ViT encoder/decoder
+# tokens ONLY. Unlike goal_appearance_geometry_relfeat*.yaml, this does NOT
+# keep the DINO-based rgb_history/goal branches, the LiDAR branch, or the
+# collapsed 4-dim `geometry` token -- the Reloc3r cross-attention decoder
+# tokens (dec1/dec2) are the SOLE vision signal, replacing rather than
+# supplementing DINO appearance.
+#
+#   image_history -> ViT encoder -> ViT decoder (cross-attn w/ goal stream)
+#                  -> perceiver resampler  == reloc3r_dec1 ("goal-aware history")
+#   goal_image    -> ViT encoder (weight-shared) -> ViT decoder (cross-attn
+#                  w/ history stream) -> perceiver resampler
+#                  == reloc3r_dec2 ("current-aware goal")
+#   wheel odometry -> MLP + pos enc
+#
+# KNOWN TRADE-OFF (flagged, user chose to proceed anyway): because dec1/dec2
+# fuse appearance and goal-relative information inside one tensor (dec1 IS
+# the history frame's own representation, already cross-attended into goal --
+# there is no separate always-on pure-appearance channel like rgb_history in
+# the additive variant), dropout cannot cleanly strip "goal-derived" info
+# while preserving "what does the current frame look like" the way it does in
+# goal_appearance_geometry_relfeat.yaml. dropout_prob is left at 0 (no
+# dropout) on both branches to match the diagram exactly -- dropping either
+# would blind the trunk to ALL vision, not just goal-relative vision. This
+# reintroduces the original field-diagnosis risk (goal-derived signal always
+# present -> OOD steering bias, see goal_appearance_geometry.yaml's header)
+# without the mitigation; that's the explicit bet this arm is testing.
+#
+# Token budget: wheel(60) + reloc3r_dec1(5*16=80) + reloc3r_dec2(80) = 220.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_only experiment_name=r_relfeat_only
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0

@@ -1,0 +1,92 @@
+# @package _global_
+# R-Geo + Relational features: identical to goal_appearance_geometry.yaml
+# (R-Geo: C = [Z_rgb, Z_lidar, Z_wheel, Z_goal, Z_reloc]) PLUS two new
+# branches carrying Reloc3r's own cross-attention DECODER tokens (arxiv
+# 2412.08376 architecture: shared ViT encoder -> cross-attention ViT decoder
+# -> Head -> pose). `geometry` above is that pipeline's HEAD output collapsed
+# to 4 numbers; `reloc3r_dec1`/`reloc3r_dec2` below are the same decoder pass
+# kept at full [196,768] patch resolution, from BEFORE the head pools it away
+# -- see scripts/precompute_reloc3r_dec_features.py and
+# cleandiffuser/nn_condition/modality_encoders.py:Reloc3rRelationEncoder.
+#   reloc3r_dec1 = current/history frame's stream, cross-attended INTO goal
+#                  ("goal-aware history").
+#   reloc3r_dec2 = goal frame's stream, cross-attended INTO current
+#                  ("current-aware goal" -- the same stream `geometry` already
+#                  collapses, kept here uncollapsed).
+# Motivation: R-Geo improves median terminal alignment but worsens the tail
+# (docs/0725_reloc3r_test/results_all_2026-07-26.md); this arm tests whether a
+# soft, un-collapsed relational representation narrows that tail instead of
+# committing the trunk to a single point estimate.
+#
+# horizon=5, stride=12 (NOT stride=6, which is R+rot's smr_reloc3r.yaml value
+# under its DIFFERENT obs_horizon=30) to match rgb_history's own cadence under
+# this arm's obs_horizon=60 (smr_rgeo.yaml), i.e. 5*12=60.
+#
+# Conditioning dropout (2026-07-23 field diagnosis, see
+# goal_appearance_geometry.yaml for the full writeup): an ALWAYS-PRESENT
+# goal-derived estimate makes the trunk over-rely on it, turning
+# out-of-distribution estimate error into steering bias. reloc3r_dec1/dec2
+# are both goal-derived (dec1 is literally the history frame's representation
+# after attending into goal; dec2 IS the geometry token's own source signal,
+# just uncollapsed) -- non-zero dropout_prob is required here, no exceptions,
+# matching goal/geometry's existing 0.2.
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  rgb_history:
+    encoder: dino_image
+    source: dino_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+  lidar:
+    encoder: pointcloud
+    source: lidar_points
+    mode: current
+    npoints_source: lidar_npoints
+    num_latents: 16
+  goal:
+    encoder: goal_image
+    source: dino_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_dino_bottom.h5
+    mode: goal
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.2
+  geometry:
+    encoder: geometry
+    source: geometry_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: current
+    dim: 4
+    dropout_prob: 0.2
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.2
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.2

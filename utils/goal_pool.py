@@ -353,10 +353,12 @@ class GoalPool:
             )
         return out
 
-    def validate(self, required_cameras: Iterable[str] = ()) -> List[str]:
+    def validate(
+        self, required_cameras: Iterable[str] = (), *, enabled_only: bool = False
+    ) -> List[str]:
         required = set(required_cameras)
         errors: List[str] = []
-        for rec in self.records():
+        for rec in self.records(enabled=True if enabled_only else None):
             missing = sorted(required - set(rec.images))
             if missing:
                 errors.append(f"{rec.goal_id}: missing cameras {missing}")

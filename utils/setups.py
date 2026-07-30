@@ -3,7 +3,9 @@ from datetime import datetime
 from pathlib import Path
 
 from omegaconf import OmegaConf
+import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from cleandiffuser.diffusion import ContinuousRectifiedFlow, ContinuousDiffusionSDE
 from cleandiffuser.nn_diffusion import DiT1d, DiTCrossAttn1d
@@ -14,6 +16,112 @@ from utils.modular_dataset import ModularDockingDataset
 from utils.docking_dataset import DockingDataset
 
 from .utils import Logger
+
+
+def _tree_batch_size(tree):
+    if isinstance(tree, torch.Tensor):
+        return int(tree.shape[0])
+    if isinstance(tree, dict):
+        return _tree_batch_size(next(iter(tree.values())))
+    raise TypeError(f"unsupported microbatch leaf: {type(tree)!r}")
+
+
+def _allocate_batch_like(tree, batch_size):
+    if isinstance(tree, torch.Tensor):
+        return torch.empty((batch_size, *tree.shape[1:]), dtype=tree.dtype)
+    if isinstance(tree, dict):
+        return {key: _allocate_batch_like(value, batch_size) for key, value in tree.items()}
+    raise TypeError(f"unsupported microbatch leaf: {type(tree)!r}")
+
+
+def _copy_batch_slice(dst, src, start, stop):
+    if isinstance(src, torch.Tensor):
+        dst[start:stop].copy_(src)
+        return
+    for key in src:
+        _copy_batch_slice(dst[key], src[key], start, stop)
+
+
+class _RebatchedDataLoader:
+    """Assemble worker microbatches into one large batch outside /dev/shm.
+
+    A full random-goal batch is multiple GiB and cannot pass through this
+    container's 2-GiB shared-memory mount. Workers instead return compact
+    float16 microbatches; each is copied immediately into ordinary host RAM,
+    releasing its shared-memory segment before the next one arrives.
+    """
+
+    def __init__(self, source, batch_size):
+        self.source = source
+        self.batch_size = int(batch_size)
+        self.epoch = 0
+
+    def __len__(self):
+        return len(self.source.sampler) // self.batch_size
+
+    def __iter__(self):
+        if isinstance(self.source.sampler, DistributedSampler):
+            self.source.sampler.set_epoch(self.epoch)
+            self.epoch += 1
+        dst, filled = None, 0
+        for microbatch in self.source:
+            count = _tree_batch_size(microbatch)
+            if dst is None:
+                dst = _allocate_batch_like(microbatch, self.batch_size)
+            if filled + count > self.batch_size:
+                raise RuntimeError(
+                    f"microbatch boundary {filled}+{count} exceeds {self.batch_size}"
+                )
+            _copy_batch_slice(dst, microbatch, filled, filled + count)
+            filled += count
+            if filled == self.batch_size:
+                yield dst
+                dst, filled = None, 0
+
+
+def _build_dataloader(args, dataset):
+    num_workers = int(args.get("num_workers", 4))
+    batch_size = int(args.batch_size)
+    microbatch_size = args.get("loader_microbatch_size", None)
+    distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+    sampler = (
+        DistributedSampler(dataset, shuffle=True, drop_last=True)
+        if distributed else None
+    )
+    if microbatch_size is not None:
+        microbatch_size = int(microbatch_size)
+        if num_workers < 1:
+            raise ValueError("loader_microbatch_size requires num_workers >= 1")
+        if batch_size % microbatch_size:
+            raise ValueError(
+                f"batch_size={batch_size} must be divisible by "
+                f"loader_microbatch_size={microbatch_size}"
+            )
+        source = DataLoader(
+            dataset,
+            batch_size=microbatch_size,
+            shuffle=sampler is None,
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=False,
+            drop_last=True,
+            persistent_workers=True,
+            prefetch_factor=int(args.get("prefetch_factor", 1)),
+        )
+        print(
+            f"Rebatched loader: {num_workers} workers x microbatch "
+            f"{microbatch_size} -> batch {batch_size}"
+        )
+        return _RebatchedDataLoader(source, batch_size)
+
+    loader_kwargs = dict(
+        batch_size=batch_size, shuffle=sampler is None, sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=args.get("pin_memory", True), drop_last=True)
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = args.get("prefetch_factor", 2)
+    return DataLoader(dataset, **loader_kwargs)
 
 
 def logger_setups(args):
@@ -83,14 +191,7 @@ def _modular_setups(args):
         train_h5_path=args.train_data_path,
         action_norm=args.get("action_norm", "minmax"),
     )
-    num_workers = args.get("num_workers", 4)
-    loader_kwargs = dict(
-        batch_size=args.batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=args.get("pin_memory", True), drop_last=True)
-    if num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = args.get("prefetch_factor", 2)
-    dataloader = DataLoader(dataset, **loader_kwargs)
+    dataloader = _build_dataloader(args, dataset)
 
     nn_condition = ModularSensorFusionCondition(
         sensors=sensors,
@@ -138,14 +239,7 @@ def _token_sequence_setups(args):
         train_h5_path=args.train_data_path,
         action_norm=args.get("action_norm", "minmax"),
     )
-    num_workers = args.get("num_workers", 4)
-    loader_kwargs = dict(
-        batch_size=args.batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=args.get("pin_memory", True), drop_last=True)
-    if num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = args.get("prefetch_factor", 2)
-    dataloader = DataLoader(dataset, **loader_kwargs)
+    dataloader = _build_dataloader(args, dataset)
 
     nn_condition = TokenSequenceFusionCondition(
         sensors=sensors,

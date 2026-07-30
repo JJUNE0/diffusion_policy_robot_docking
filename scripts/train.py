@@ -10,6 +10,9 @@ sys.path.append(parent_dir)
 
 import hydra
 import torch
+import torch.distributed as dist
+from omegaconf import open_dict
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # Avoid "/dev/shm ... Resource temporarily unavailable" from DataLoader workers:
 # use file_system sharing instead of the default file_descriptor strategy.
@@ -17,7 +20,7 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 from utils.setups import logger_setups, model_setups
 from dino.dino_detector import DinoBatchDetector
-from cleandiffuser.utils import loop_dataloader, set_seed
+from cleandiffuser.utils import loop_dataloader, threaded_prefetch, set_seed
 from scripts.plot_training import plot_from_jsonl
 
 
@@ -87,12 +90,45 @@ def _load_resume_state(
     return next_step
 
 
+def _checkpoint_model_state(model):
+    """Return a DDP-prefix-free state dict compatible with existing runs."""
+    state = model.state_dict()
+    clean = {}
+    for key, value in state.items():
+        key = key.replace("diffusion.module.", "diffusion.", 1)
+        key = key.replace("condition.module.", "condition.", 1)
+        clean[key] = value
+    return clean
+
+
+def _init_distributed(args):
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False, 0, 0, torch.device(args.device if torch.cuda.is_available() else "cpu")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    with open_dict(args):
+        args.device = f"cuda:{local_rank}"
+    return True, rank, local_rank, torch.device(args.device)
+
+
 @hydra.main(config_path="../configs/robot", config_name="smr", version_base=None)
 def main(args):
-    set_seed(args.seed)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    distributed, rank, local_rank, device = _init_distributed(args)
+    is_main = rank == 0
+    set_seed(int(args.seed) + rank)
 
-    logger, save_path = logger_setups(args)
+    if is_main:
+        logger, save_path = logger_setups(args)
+    else:
+        logger, save_path = None, None
+    if distributed:
+        shared = [save_path]
+        dist.broadcast_object_list(shared, src=0)
+        save_path = shared[0]
+
     dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion = model_setups(args)
 
     print(f"Total Samples {len(dataset)}\n")
@@ -129,6 +165,17 @@ def main(args):
             lr_scheduler=lr_schedulers,
             device=device,
         )
+        # A resumed run may intentionally change batch_size. That changes
+        # steps_per_epoch and therefore the live cosine horizon. The checkpoint
+        # scheduler restores its old T_max, so adapt only that horizon while
+        # preserving optimizer state, current LR, and last_epoch.
+        saved_t_max = int(lr_schedulers.T_max)
+        if saved_t_max != total_gradient_steps:
+            lr_schedulers.T_max = total_gradient_steps
+            print(
+                f"Adjusted resumed scheduler T_max: {saved_t_max} -> "
+                f"{total_gradient_steps} (live batch/epoch plan)"
+            )
     else:
         n_gradient_step = 0
         # Warm-start (init_from): load WEIGHTS ONLY from a previous checkpoint
@@ -180,6 +227,21 @@ def main(args):
             print("======================================================")
             print("Starting training from scratch...")
             print("======================================================")
+
+    # Load plain checkpoints first, then wrap the two trainable branches. DDP
+    # broadcasts rank 0 parameters and averages gradients across both H100s.
+    if distributed:
+        ddp_kwargs = dict(
+            device_ids=[local_rank], output_device=local_rank,
+            broadcast_buffers=False, gradient_as_bucket_view=True,
+            static_graph=True,
+        )
+        nn_diffusion.model["diffusion"] = DDP(
+            nn_diffusion.model["diffusion"], **ddp_kwargs)
+        nn_diffusion.model["condition"] = DDP(
+            nn_diffusion.model["condition"], **ddp_kwargs)
+        if is_main:
+            print(f"DDP enabled: {dist.get_world_size()} x H100 | per-rank batch={args.batch_size}")
 
     nn_diffusion.train()
 
@@ -247,10 +309,20 @@ def main(args):
     # (not even loaded) when reading precomputed features from the cache.
     dino_detector = None if (use_dino_cache or use_modular) else DinoBatchDetector(device=device)
 
-    for batch in loop_dataloader(dataloader):
+    amp_name = str(args.get("amp_dtype", "none")).lower()
+    amp_enabled = device.type == "cuda" and amp_name in ("bf16", "bfloat16")
+    if amp_name not in ("none", "fp32", "bf16", "bfloat16"):
+        raise ValueError(f"unsupported amp_dtype={amp_name!r}; use none or bf16")
+    if is_main:
+        amp_label = "BF16" if amp_enabled else "FP32"
+        print(f"AMP: {amp_label}")
+
+    batch_stream = threaded_prefetch(loop_dataloader(dataloader))
+    for batch in batch_stream:
         if n_gradient_step >= total_gradient_steps:
-            print("End Training")
-            plot_from_jsonl(os.path.join(save_path, "metrics.jsonl"))
+            if is_main:
+                print("End Training")
+                plot_from_jsonl(os.path.join(save_path, "metrics.jsonl"))
             break
 
         action = batch["act"].to(device, non_blocking=True)  # [B, horizon, 2]
@@ -381,7 +453,11 @@ def main(args):
             w = torch.exp((a / adv_beta).clamp(-adv_clip, adv_clip))
             w = w / w.mean().clamp(min=1e-6)      # keep the loss scale unchanged
             loss_kwargs["sample_weight"] = w
-        denoise_loss = nn_diffusion.loss(x0=action, condition=context, **loss_kwargs)
+        with torch.autocast(
+            device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled
+        ):
+            denoise_loss = nn_diffusion.loss(
+                x0=action, condition=context, **loss_kwargs)
         aux_val, mm_val = None, None
         if use_aux:
             aux_pred = nn_condition._aux_pred
@@ -422,7 +498,11 @@ def main(args):
         nn_diffusion.optimizer.step()
         nn_diffusion.ema_update()
         lr_schedulers.step()
-        diff_log = {"loss": denoise_loss.item(), "grad_norm": grad_norm,
+        loss_for_log = denoise_loss.detach().float()
+        if distributed and n_gradient_step % args.get("log_interval", 100) == 0:
+            dist.all_reduce(loss_for_log, op=dist.ReduceOp.SUM)
+            loss_for_log /= dist.get_world_size()
+        diff_log = {"loss": loss_for_log.item(), "grad_norm": grad_norm,
                     "aux": aux_val, "aux_mm": mm_val}
 
         if n_gradient_step == 0:
@@ -438,7 +518,7 @@ def main(args):
                     print(f"DINO room1 feature shape: {context['dino_feat1'].shape}")
                 print(f"Velocity history shape: {velocity.shape}")
 
-        if n_gradient_step % args.get("log_interval", 100) == 0:
+        if is_main and n_gradient_step % args.get("log_interval", 100) == 0:
             logger.log(
                 {
                     "step": n_gradient_step,
@@ -453,12 +533,12 @@ def main(args):
                      if diff_log["aux"] is not None else "")
             print(f"Step {n_gradient_step} | Loss: {diff_log['loss']:.4f}{extra}")
 
-        if n_gradient_step > 0 and n_gradient_step % args.save_interval == 0:
+        if is_main and n_gradient_step > 0 and n_gradient_step % args.save_interval == 0:
             save_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")
             torch.save(
                 {
                     "step": n_gradient_step,
-                    "model_state_dict": nn_diffusion.model.state_dict(),
+                    "model_state_dict": _checkpoint_model_state(nn_diffusion.model),
                     "ema_state_dict": nn_diffusion.model_ema.state_dict(),
                     "optimizer_state_dict": nn_diffusion.optimizer.state_dict(),
                     "scheduler_state_dict": lr_schedulers.state_dict(),
@@ -471,22 +551,31 @@ def main(args):
 
         n_gradient_step += 1
 
+    # The infinite loader was stopped by the step limit; finish its in-flight
+    # batch and worker queues before distributed/CUDA teardown.
+    batch_stream.close()
+
     # Always persist a final checkpoint. For short epoch-based runs the step
     # counter may never land on a save_interval boundary, so save explicitly.
-    final_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")
-    torch.save(
-        {
-            "step": n_gradient_step,
-            "model_state_dict": nn_diffusion.model.state_dict(),
-            "ema_state_dict": nn_diffusion.model_ema.state_dict(),
-            "optimizer_state_dict": nn_diffusion.optimizer.state_dict(),
-            "scheduler_state_dict": lr_schedulers.state_dict(),
-            "action_min": dataset.action_min,
-            "action_scale": dataset.action_scale,
-        },
-        final_ckpt_path,
-    )
-    print(f"Final checkpoint saved at step {n_gradient_step}: {final_ckpt_path}")
+    if distributed:
+        dist.barrier()
+    if is_main:
+        final_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")
+        torch.save(
+            {
+                "step": n_gradient_step,
+                "model_state_dict": _checkpoint_model_state(nn_diffusion.model),
+                "ema_state_dict": nn_diffusion.model_ema.state_dict(),
+                "optimizer_state_dict": nn_diffusion.optimizer.state_dict(),
+                "scheduler_state_dict": lr_schedulers.state_dict(),
+                "action_min": dataset.action_min,
+                "action_scale": dataset.action_scale,
+            },
+            final_ckpt_path,
+        )
+        print(f"Final checkpoint saved at step {n_gradient_step}: {final_ckpt_path}")
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

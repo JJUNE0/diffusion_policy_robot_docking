@@ -277,7 +277,11 @@ class Reloc3rGoalPairEncoder(BaseModalityEncoder):
 
     def encode(self, obs):
         pair, valid_mask = _unpack(obs)
-        pair = pair.float()
+        # Keep the multi-GiB pair tensor compact under H100 BF16 autocast.
+        # In FP32 mode retain the previous exact behavior.
+        pair = pair.to(torch.get_autocast_dtype("cuda")) if (
+            pair.is_cuda and torch.is_autocast_enabled("cuda")
+        ) else pair.float()
         if pair.dim() != 5:
             raise ValueError(
                 f"[{self.name}] expected [B,T,2,P,D], got {tuple(pair.shape)}")

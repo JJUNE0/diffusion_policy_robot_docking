@@ -109,7 +109,11 @@ def compile_pool(args):
 
     out = Path(args.out).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    old_map, old_h5 = _old_feature_map(out, cameras)
+    reuse_path = (
+        Path(args.reuse_from).expanduser().resolve()
+        if args.reuse_from else out
+    )
+    old_map, old_h5 = _old_feature_map(reuse_path, cameras)
     device = torch.device(args.device)
     model = None
 
@@ -121,6 +125,7 @@ def compile_pool(args):
             dst.attrs["format"] = "goal_pool_reloc3r_encoder_v1"
             dst.attrs["source_db"] = str(Path(args.db).expanduser().resolve())
             dst.attrs["reloc3r_checkpoint"] = "siyan824/reloc3r-224"
+            dst.attrs["reused_from"] = str(reuse_path)
             dst.create_dataset("goal_id", data=_h5_string([r.goal_id for r in records]))
             dst.create_dataset("dataset", data=_h5_string([r.dataset for r in records]))
             dst.create_dataset("split", data=_h5_string([r.split for r in records]))
@@ -186,6 +191,10 @@ def parser():
     p = argparse.ArgumentParser()
     p.add_argument("--db", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--reuse-from",
+        help="existing compiled snapshot whose unchanged feature rows are copied",
+    )
     p.add_argument("--camera", action="append", required=True)
     p.add_argument("--dataset", action="append")
     p.add_argument("--split", action="append")

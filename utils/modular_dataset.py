@@ -44,6 +44,7 @@ under `source`. Encoding raw pixels with the DINO backbone is a train-loop
 concern (kept out of the dataset), same split as the existing pipeline.
 """
 import os
+import threading
 from typing import Dict
 
 import h5py
@@ -133,6 +134,7 @@ class ModularDockingDataset(Dataset):
             }
         )
 
+        self._ram_cache = {}
         files = {p: h5py.File(p, "r") for p in self._file_paths}
         try:
             f = files[self.h5_path]
@@ -156,6 +158,24 @@ class ModularDockingDataset(Dataset):
                     mean = col.reshape(-1, col.shape[-1]).mean(axis=0)
                     std = np.clip(col.reshape(-1, col.shape[-1]).std(axis=0), 1e-6, None)
                     self.norm_stats[name] = (mean.astype(np.float32), std.astype(np.float32))
+                if spec.get("cache_in_ram", False):
+                    # One-time BULK sequential read straight into RAM, so every
+                    # later __getitem__ indexes a plain numpy array instead of
+                    # re-reading this row from the network mount. Random
+                    # per-row access over HDF5 (chunks=(1,...) here, see
+                    # scripts/precompute_reloc3r_dec_features.py) is
+                    # latency-bound on this mount -- measured ~220ms/sample
+                    # for this sensor's history window, vs. a full-array
+                    # sequential read running at ~180MB/s. Threading the
+                    # per-row reads instead (tried first) made things WORSE:
+                    # h5py serializes concurrent calls internally, so N
+                    # threads just add contention, not throughput.
+                    ds = sf[spec["source"]]
+                    print(f"[ModularDockingDataset] caching '{name}' "
+                          f"({ds.shape}, {ds.dtype}, "
+                          f"{ds.nbytes / 1e9:.1f} GB) into RAM ...", flush=True)
+                    self._ram_cache[name] = ds[:]
+                    print(f"[ModularDockingDataset] '{name}' cached.", flush=True)
             if self.with_aux:
                 for key in (self.dock_pose_key, self.reliable_key):
                     if key not in f:
@@ -190,8 +210,13 @@ class ModularDockingDataset(Dataset):
                 self.ep_start_map.append(start)
                 self.ep_end_map.append(int(end))
             start = end
-        self.root = None
-        self.roots = None
+        # Per-THREAD (not per-instance) file handles: __getitem__ is called
+        # concurrently from a thread pool (cleandiffuser.utils.parallel_batch_loader)
+        # to hide network-mount read latency (measured ~20x throughput at 4
+        # concurrent readers vs. 1, see git history), and h5py.File handles
+        # are not safe to share across threads -- each thread lazily opens
+        # its OWN handles on first access via `_ensure_open`.
+        self._tls = threading.local()
 
     @staticmethod
     def _string_column(h5, key):
@@ -236,6 +261,28 @@ class ModularDockingDataset(Dataset):
                 f"from {pool.filename}"
             )
         sampling = str(spec.get("goal_sampling", "random"))
+        variant_weights = {
+            str(variant): float(weight)
+            for variant, weight in dict(
+                spec.get("goal_variant_weights") or {}
+            ).items()
+        }
+        if any(weight < 0 for weight in variant_weights.values()):
+            raise ValueError("goal_variant_weights values must be non-negative")
+        if variant_weights and not any(
+            weight > 0 for weight in variant_weights.values()
+        ):
+            raise ValueError("goal_variant_weights must contain a positive weight")
+        if variant_weights and sampling != "random":
+            raise ValueError("goal_variant_weights requires goal_sampling=random")
+        goal_variants = self._string_column(pool, "variant")
+        selected_variants = set(map(str, goal_variants[rows]))
+        unknown_variants = sorted(set(variant_weights) - selected_variants)
+        if unknown_variants:
+            raise ValueError(
+                f"sensor {name!r}: goal_variant_weights references variants "
+                f"not present in the filtered pool: {unknown_variants}"
+            )
         match = spec.get("goal_pool_match") or {}
         match_info = None
         if match:
@@ -311,6 +358,7 @@ class ModularDockingDataset(Dataset):
             tuple(rows.tolist()),
             goal_ids,
             sampling,
+            tuple(sorted(variant_weights.items())),
             match_signature,
         )
         previous = self._goal_pool_groups.get(group)
@@ -323,6 +371,8 @@ class ModularDockingDataset(Dataset):
             "signature": signature,
             "rows": rows,
             "sampling": sampling,
+            "goal_variants": goal_variants,
+            "variant_weights": variant_weights,
             "match": match_info,
         }
 
@@ -330,16 +380,23 @@ class ModularDockingDataset(Dataset):
         return spec.get("file") or self.h5_path
 
     def _ensure_open(self):
-        if self.root is None:
-            self.roots = {p: h5py.File(p, "r") for p in self._file_paths}
-            self.root = self.roots[self.h5_path]
+        """Returns (root, roots) for the CALLING THREAD, opening that
+        thread's own h5py.File handles on first use."""
+        tls = self._tls
+        if getattr(tls, "root", None) is None:
+            tls.roots = {p: h5py.File(p, "r") for p in self._file_paths}
+            tls.root = tls.roots[self.h5_path]
+        return tls.root, tls.roots
 
     def __len__(self):
         return len(self.index_map)
 
     def __del__(self):
+        # Only closes THIS (the destructor-calling) thread's handles -- any
+        # other thread's handles are released by the OS when the process
+        # exits. Fine for a training run's lifetime (see _ensure_open).
         try:
-            for h in (getattr(self, "roots", None) or {}).values():
+            for h in (getattr(self._tls, "roots", None) or {}).values():
                 h.close()
         except Exception:
             pass
@@ -358,28 +415,36 @@ class ModularDockingDataset(Dataset):
             return arr
         return arr[..., list(channels)]
 
-    def _history(self, data, t, ep_start):
-        start_t = t - self.obs_horizon + 1
-        if start_t < ep_start:
-            valid = data[ep_start:t + 1]
-            pad = np.repeat(valid[:1], self.obs_horizon - len(valid), axis=0)
-            return np.concatenate([pad, valid], axis=0)
-        return data[start_t:t + 1]
+    def _history(self, data, t, ep_start, stride=1):
+        """Read only the temporal rows that survive ``stride``.
 
-    def _history_valid_mask(self, t, ep_start):
-        """bool[obs_horizon], True = real frame, False = repeated episode-start
-        padding (same fill rule as _history: pad = repeat(earliest valid, ...),
-        prepended). 2026-07-25: acceptance criterion #5 -- padding must reach
-        attention, not be silently treated as extra real observations."""
-        start_t = t - self.obs_horizon + 1
+        ReLoc3R uses obs_horizon=60 and stride=12, so reading a contiguous
+        60-frame HDF5 slice and subsampling it afterwards wastes 11/12 of the
+        NFS traffic. Build the padded history indices first and issue one small
+        fancy-index read for the rows the model actually consumes. ``h5py``
+        requires increasing unique indices, hence the unique/inverse roundtrip
+        for repeated episode-start padding.
+        """
+        stride = int(stride)
+        if stride < 1:
+            raise ValueError(f"history stride must be >= 1, got {stride}")
+        indices = np.arange(
+            t - self.obs_horizon + 1, t + 1, dtype=np.int64
+        )
+        indices = np.maximum(indices, int(ep_start))[::stride]
+        unique, inverse = np.unique(indices, return_inverse=True)
+        return np.asarray(data[unique])[inverse]
+
+    def _history_valid_mask(self, t, ep_start, stride=1):
+        """bool[ceil(obs_horizon/stride)], True=real and False=padded."""
         valid_len = min(self.obs_horizon, t - ep_start + 1)
         pad_len = self.obs_horizon - valid_len
         mask = np.ones(self.obs_horizon, dtype=bool)
         mask[:pad_len] = False
-        return mask
+        return mask[::int(stride)]
 
     def __getitem__(self, idx):
-        self._ensure_open()
+        root, roots = self._ensure_open()
         t = self.index_map[idx]
         ep_start = self.ep_start_map[idx]
         ep_end = self.ep_end_map[idx]
@@ -388,16 +453,15 @@ class ModularDockingDataset(Dataset):
         obs = {}
         sampled_goal_rows = {}
         for name, spec in self.sensors.items():
-            sensor_root = self.roots[self._sensor_path(spec)]
-            ds = sensor_root[spec["source"]]
+            sensor_root = roots[self._sensor_path(spec)]
+            ds = self._ram_cache.get(name)
+            if ds is None:
+                ds = sensor_root[spec["source"]]
             mode = spec.get("mode", "history")
             if mode == "history":
-                arr = self._history(ds, t, ep_start)
-                valid_mask = self._history_valid_mask(t, ep_start)
                 stride = int(spec.get("stride", 1))
-                if stride > 1:
-                    arr = arr[::stride]
-                    valid_mask = valid_mask[::stride]
+                arr = self._history(ds, t, ep_start, stride)
+                valid_mask = self._history_valid_mask(t, ep_start, stride)
                 arr = self._select_channels(arr, spec)
                 arr = np.ascontiguousarray(arr).astype(np.float32)
                 norm = spec.get("normalize")
@@ -424,12 +488,9 @@ class ModularDockingDataset(Dataset):
                 if nsrc is not None:
                     obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][goal_row]), dtype=torch.long)
             elif mode == "goal_pool_pair":
-                history = self._history(ds, t, ep_start)
-                valid_mask = self._history_valid_mask(t, ep_start)
                 stride = int(spec.get("stride", 1))
-                if stride > 1:
-                    history = history[::stride]
-                    valid_mask = valid_mask[::stride]
+                history = self._history(ds, t, ep_start, stride)
+                valid_mask = self._history_valid_mask(t, ep_start, stride)
                 group = str(spec.get("goal_pool_group", "default"))
                 if group not in sampled_goal_rows:
                     info = self._goal_pool_groups[group]
@@ -452,6 +513,28 @@ class ModularDockingDataset(Dataset):
                             target_value = cross_target
                         candidates = match["rows_by_value"][target_value]
                     if info["sampling"] == "random":
+                        variant_weights = info["variant_weights"]
+                        if variant_weights:
+                            labels = info["goal_variants"][candidates]
+                            available = [
+                                variant
+                                for variant, weight in variant_weights.items()
+                                if weight > 0 and np.any(labels == variant)
+                            ]
+                            if not available:
+                                raise RuntimeError(
+                                    "goal_variant_weights selected no variant for "
+                                    f"the current goal candidate set: {variant_weights}"
+                                )
+                            weights = torch.tensor(
+                                [variant_weights[v] for v in available],
+                                dtype=torch.float64,
+                            )
+                            variant_index = int(
+                                torch.multinomial(weights, 1).item()
+                            )
+                            selected_variant = available[variant_index]
+                            candidates = candidates[labels == selected_variant]
                         choice = int(torch.randint(len(candidates), (1,)).item())
                     elif info["sampling"] == "first":
                         choice = 0
@@ -464,28 +547,29 @@ class ModularDockingDataset(Dataset):
                         )
                     sampled_goal_rows[group] = int(candidates[choice])
                 sampled_row = sampled_goal_rows[group]
-                goal_root = self.roots[spec["goal_pool_file"]]
+                goal_root = roots[spec["goal_pool_file"]]
                 goal = np.asarray(goal_root[spec["goal_source"]][sampled_row])
                 goal_history = np.broadcast_to(goal, history.shape)
                 pair = np.stack([history, goal_history], axis=1)
-                obs[name] = torch.from_numpy(
-                    np.ascontiguousarray(pair).astype(np.float32)
-                )
+                # Source/history and compiled goal features are float16. Keep
+                # them compact across CPU RAM, worker IPC, and H2D; the encoder
+                # converts the pair to float32 on GPU before frozen decoding.
+                obs[name] = torch.from_numpy(np.ascontiguousarray(pair))
                 obs[f"{name}_valid_mask"] = torch.from_numpy(
                     np.ascontiguousarray(valid_mask)
                 )
             else:
                 raise ValueError(f"sensor '{name}': unknown mode '{mode}'.")
 
-        act = self.root[self.action_key][t:t + self.horizon].astype(np.float32)
+        act = root[self.action_key][t:t + self.horizon].astype(np.float32)
         act = self.normalize_action(act).astype(np.float32)
         sample = {"obs": obs, "act": torch.from_numpy(act)}
 
         if self.with_aux:
             # ICP dock-pose label (teacher for the precision aux head).
-            p = self.root[self.dock_pose_key][t].astype(np.float32)
+            p = root[self.dock_pose_key][t].astype(np.float32)
             valid = not np.any(np.isnan(p))
-            rel = float(self.root[self.reliable_key][t]) if valid else 0.0
+            rel = float(root[self.reliable_key][t]) if valid else 0.0
             p = np.nan_to_num(p)
             xy = (p[:2] - self.dock_xy_mean) / self.dock_xy_std
             sample["dock_target"] = torch.tensor(

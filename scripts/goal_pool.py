@@ -182,7 +182,9 @@ def cmd_list(args):
 
 def cmd_validate(args):
     with GoalPool(args.db) as pool:
-        errors = pool.validate(args.require_camera)
+        errors = pool.validate(
+            args.require_camera, enabled_only=args.enabled_only
+        )
     if errors:
         print("\n".join(errors))
         raise SystemExit(1)
@@ -258,6 +260,10 @@ def parser():
     q = sub.add_parser("validate")
     q.add_argument("--db", required=True)
     q.add_argument("--require-camera", action="append", default=[])
+    q.add_argument(
+        "--enabled-only", action="store_true",
+        help="skip disabled/tombstoned records during validation",
+    )
     q.set_defaults(func=cmd_validate)
     return p
 

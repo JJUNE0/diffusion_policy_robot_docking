@@ -22,13 +22,14 @@ sensors:
     num_latents: 16
     feat_dim: 1024
     dec_dim: 768
-    decoder_chunk: 4
-    goal_pool_file: ${hydra:runtime.cwd}/dataset/goal_pool/goal_pool_reloc3r.h5
+    decoder_chunk: 256
+    goal_pool_file: ${goal_pool_file}
     goal_source: reloc3r_orbbec_0
     goal_pool_group: paired_goal
     goal_pool_filter:
       split: [all]
     goal_sampling: random
+    goal_variant_weights: ${goal_variant_weights}
     goal_pool_match:
       episode_field: source_dataset
       goal_field: dataset
@@ -47,13 +48,14 @@ sensors:
     num_latents: 16
     feat_dim: 1024
     dec_dim: 768
-    decoder_chunk: 4
-    goal_pool_file: ${hydra:runtime.cwd}/dataset/goal_pool/goal_pool_reloc3r.h5
+    decoder_chunk: 256
+    goal_pool_file: ${goal_pool_file}
     goal_source: reloc3r_usb_0
     goal_pool_group: paired_goal
     goal_pool_filter:
       split: [all]
     goal_sampling: random
+    goal_variant_weights: ${goal_variant_weights}
     goal_pool_match:
       episode_field: source_dataset
       goal_field: dataset

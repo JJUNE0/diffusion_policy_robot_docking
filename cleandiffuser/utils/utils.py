@@ -1,6 +1,8 @@
 import math
 import os
+import queue
 import random
+import threading
 from typing import Union, Dict, Callable
 
 import numpy as np
@@ -481,3 +483,66 @@ def loop_dataloader(dl):
     while True:
         for b in dl:
             yield b
+
+
+class _ThreadedPrefetchIterator:
+    """Bounded producer thread with an explicit, graceful shutdown."""
+
+    _SENTINEL = object()
+
+    def __init__(self, iterable, queue_size):
+        self.iterable = iter(iterable)
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.exc = None
+        self.thread = threading.Thread(target=self._produce, daemon=True)
+        self.thread.start()
+
+    def _put_until_stopped(self, item):
+        while not self.stop_event.is_set():
+            try:
+                self.queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def _produce(self):
+        try:
+            while not self.stop_event.is_set():
+                item = next(self.iterable)
+                if not self._put_until_stopped(item):
+                    break
+        except StopIteration:
+            self._put_until_stopped(self._SENTINEL)
+        except BaseException as exc:  # noqa: BLE001 -- re-raised by consumer
+            self.exc = exc
+            self._put_until_stopped(self._SENTINEL)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        item = self.queue.get()
+        if item is self._SENTINEL:
+            if self.exc is not None:
+                raise self.exc
+            raise StopIteration
+        return item
+
+    def close(self, timeout=30.0):
+        self.stop_event.set()
+        self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            raise RuntimeError("prefetch producer did not stop within timeout")
+
+
+def threaded_prefetch(iterable, queue_size: int = 2):
+    """Overlap CPU batch assembly/I/O with GPU compute.
+
+    The returned iterator must be closed when the consumer stops early. This
+    lets DataLoader workers and their shared-memory queues finish cleanly before
+    Python/CUDA teardown (important for torchrun).
+    """
+    return _ThreadedPrefetchIterator(iterable, queue_size)
+

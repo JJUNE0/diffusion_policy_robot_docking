@@ -65,6 +65,12 @@ sensors:
     num_latents: 16
     feat_dim: 768
     dropout_prob: 0.0
+    # Full-array RAM cache (one-time ~31GB sequential load per branch, ~125GB
+    # total for all 4): per-row random access over this network mount is
+    # latency-bound (measured ~220ms/sample; concurrent threads made it
+    # WORSE, not better -- h5py serializes internally). Fits comfortably
+    # under this host's available RAM. See ModularDockingDataset.__init__.
+    cache_in_ram: true
   reloc3r_dec2:
     encoder: reloc3r_relation
     source: reloc3r_dec2_bottom
@@ -75,6 +81,12 @@ sensors:
     num_latents: 16
     feat_dim: 768
     dropout_prob: 0.0
+    # Full-array RAM cache (one-time ~31GB sequential load per branch, ~125GB
+    # total for all 4): per-row random access over this network mount is
+    # latency-bound (measured ~220ms/sample; concurrent threads made it
+    # WORSE, not better -- h5py serializes internally). Fits comfortably
+    # under this host's available RAM. See ModularDockingDataset.__init__.
+    cache_in_ram: true
   reloc3r_dec1_top:
     encoder: reloc3r_relation
     source: reloc3r_dec1_top
@@ -85,6 +97,12 @@ sensors:
     num_latents: 16
     feat_dim: 768
     dropout_prob: 0.0
+    # Full-array RAM cache (one-time ~31GB sequential load per branch, ~125GB
+    # total for all 4): per-row random access over this network mount is
+    # latency-bound (measured ~220ms/sample; concurrent threads made it
+    # WORSE, not better -- h5py serializes internally). Fits comfortably
+    # under this host's available RAM. See ModularDockingDataset.__init__.
+    cache_in_ram: true
   reloc3r_dec2_top:
     encoder: reloc3r_relation
     source: reloc3r_dec2_top
@@ -95,3 +113,9 @@ sensors:
     num_latents: 16
     feat_dim: 768
     dropout_prob: 0.0
+    # Full-array RAM cache (one-time ~31GB sequential load per branch, ~125GB
+    # total for all 4): per-row random access over this network mount is
+    # latency-bound (measured ~220ms/sample; concurrent threads made it
+    # WORSE, not better -- h5py serializes internally). Fits comfortably
+    # under this host's available RAM. See ModularDockingDataset.__init__.
+    cache_in_ram: true

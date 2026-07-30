@@ -161,6 +161,27 @@ D_MODEL, N_HEADS, DEPTH, DROPOUT = 384, 6, 12, 0.1
 _STATE: Dict[str, Any] = {}      # lazy singletons: model, dino, goal feat, traj-EMA
 
 
+def _resolve_ai_models_path(configured_path, default_path):
+    """Resolve a config asset path without depending on the process cwd.
+
+    Relative paths are based at ``ai_models/``. Keep accepting the older
+    ``ai_models/...`` spelling used by existing config.yml files, and pass
+    absolute container paths through unchanged.
+    """
+    raw = str(configured_path or "").strip()
+    if not raw:
+        return os.path.normpath(default_path)
+    path = os.path.expanduser(raw)
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+
+    path = os.path.normpath(path)
+    ai_models_name = os.path.basename(_AI_MODELS_DIR)
+    if path == ai_models_name or path.startswith(ai_models_name + os.sep):
+        return os.path.normpath(os.path.join(os.path.dirname(_AI_MODELS_DIR), path))
+    return os.path.normpath(os.path.join(_AI_MODELS_DIR, path))
+
+
 # ---------------------------------------------------------------- init
 def _init(config):
     if "model" in _STATE:
@@ -172,7 +193,9 @@ def _init(config):
     from dino_detector import DinoBatchDetector
 
     # resolve runtime knobs from config.yml (single source of truth)
-    ckpt_path = os.path.join(_AI_MODELS_DIR, getattr(config, "demo_ckpt", "scratch20_checkpoint_step_8460.pt"))
+    ckpt_path = _resolve_ai_models_path(
+        getattr(config, "demo_ckpt", ""),
+        os.path.join(_AI_MODELS_DIR, "scratch20_checkpoint_step_8460.pt"))
     n_samples = int(getattr(config, "demo_nsamples", 8))
     sample_steps = int(getattr(config, "demo_steps", 20))
     agg = str(getattr(config, "demo_agg", "medoid")).lower()   # "medoid" | "mean"
@@ -251,9 +274,12 @@ def _init(config):
     # All three goal-reference paths are config-overridable (fall back to the
     # ai_models/ default filename if unset) -- so a new site, or a second dock
     # geometry, only needs a config.yml edit, never a code change.
-    goal_image_orbbec0_path = getattr(config, "demo_goal_image_orbbec0", "") or GOAL_IMAGE_ORBBEC0_DEFAULT
-    goal_image_usb0_path = getattr(config, "demo_goal_image_usb0", "") or GOAL_IMAGE_USB0_DEFAULT
-    gl_path = getattr(config, "demo_goal_lidar", "") or GOAL_LIDAR_DEFAULT
+    goal_image_orbbec0_path = _resolve_ai_models_path(
+        getattr(config, "demo_goal_image_orbbec0", ""), GOAL_IMAGE_ORBBEC0_DEFAULT)
+    goal_image_usb0_path = _resolve_ai_models_path(
+        getattr(config, "demo_goal_image_usb0", ""), GOAL_IMAGE_USB0_DEFAULT)
+    gl_path = _resolve_ai_models_path(
+        getattr(config, "demo_goal_lidar", ""), GOAL_LIDAR_DEFAULT)
 
     # glidar models need the DOCKED-position scan as a goal-lidar input (analog
     # of the goal image). Missing -> hard error: running a glidar model
@@ -435,15 +461,21 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
     if need_bottom_goal or need_top_goal:
         import cv2
     if need_bottom_goal:
-        gp = getattr(config, "demo_goal_image_orbbec0", "") or GOAL_IMAGE_ORBBEC0_DEFAULT
+        gp = _resolve_ai_models_path(
+            getattr(config, "demo_goal_image_orbbec0", ""), GOAL_IMAGE_ORBBEC0_DEFAULT)
         goal_bgr = cv2.imread(gp)
         if goal_bgr is None:
-            raise FileNotFoundError(f"goal image missing: {gp}")
+            raise FileNotFoundError(
+                f"goal image missing: {gp} "
+                f"(config: demo_goal_image_orbbec0={getattr(config, 'demo_goal_image_orbbec0', '')!r})")
     if need_top_goal:
-        gp_top = getattr(config, "demo_goal_image_usb0", "") or GOAL_IMAGE_USB0_DEFAULT
+        gp_top = _resolve_ai_models_path(
+            getattr(config, "demo_goal_image_usb0", ""), GOAL_IMAGE_USB0_DEFAULT)
         goal_top_bgr = cv2.imread(gp_top)
         if goal_top_bgr is None:
-            raise FileNotFoundError(f"top-camera goal image missing: {gp_top}")
+            raise FileNotFoundError(
+                f"top-camera goal image missing: {gp_top} "
+                f"(config: demo_goal_image_usb0={getattr(config, 'demo_goal_image_usb0', '')!r})")
     if "goal" in sensors:
         with torch.no_grad():
             gf, _, _ = dino.get_heatmap(_frames_to_tensor([goal_bgr], device))

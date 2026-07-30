@@ -4,7 +4,7 @@
 plugin_id: ai-control
 run_plugin: run_postech_docking_demo
 
-demo_ckpt: demo_20260722/graft_goalimage_step_16940.pt # ai_models/ 기준 상대경로
+demo_ckpt: models/r_relfeat_only_step_12000.pt # ai_models/ 기준 상대경로
 demo_agg: medoid            # "medoid"(결단적) | "mean"(부드럽지만 급회전 뭉갬)
 demo_ema: 1.0              # 궤적 프레임간 EMA 알파 (1.0=끔). ★OLD는 궤적EMA 없음 → plugin이 plan.current를
                           #   실행하므로 이 값은 현재 미사용. OLD 동일성 유지 위해 끔(1.0)으로 명시.
@@ -20,8 +20,8 @@ demo_video2: video2         # orbbec0 스트림 — 항상 필요
 demo_backbone: ddpm   # "rectified_flow" | "ddpm" — 체크포인트와 반드시 일치시킬 것
                             # (graft6/wave2/wave3/auxfb 전부 usb0 카메라도 씀). 자동 감지되어
 # ── goal 참조 파일 경로 ──
-demo_goal_image_usb0: "ai_models/goal_image_usb0.jpg"          # usb0 도킹 완료 사진 (기본값과 동일 경로)
-demo_goal_image_orbbec0: "ai_models/goal_image_orbbec0.jpg"    # orbbec0 도킹 완료 사진 (기본값과 동일 경로)
+demo_goal_image_usb0: ""          # usb0 도킹 완료 사진 (기본값과 동일 경로)
+demo_goal_image_orbbec0: "goal_ref/goal_image_orbbec_4f_hallway.jpg"  # "ai_models/goal_image_orbbec0.jpg"    # orbbec0 도킹 완료 사진 (기본값과 동일 경로)
 demo_goal_lidar: "ai_models/goal_lidar_scan.npy"               # glidar 체크포인트용 
 
 #-----aux-pose feedback 런타임 on/off (2026-07-22, graft_auxfb_* 체크포인트 전용).
@@ -40,7 +40,7 @@ window_sync_mode: track
 window_sync_fps: 30.0
 window_sync_reference_track: usb-0
 window_sync_max_age_sec: 0.1
-require_lidar: true
+require_lidar: false
 require_encoder: true
 require_marker_pose: false
 require_video: true

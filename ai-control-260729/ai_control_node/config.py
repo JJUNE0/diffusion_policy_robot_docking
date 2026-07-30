@@ -33,14 +33,23 @@ class AIControlConfig(BasePluginConfig):
     demo_backbone: str = "rectified_flow"     # "rectified_flow"(euler) | "ddpm"(dpmsolver++_2M).
     #   ★자동감지 불가(두 백본이 파라미터명 동일) — 체크포인트 학습과 반드시 일치시켜야 함.
     #   틀리면 같은 가중치라도 완전히 다른(급가속/이상) 출력. (없으면 rectified_flow로 빠지던 버그 수정)
-    demo_video: str = "video2"                # room2(image_bottom) 카메라 스트림
+    demo_video: str = "video2"                # 구버전 호환용 단일 카메라 스트림
+    demo_video1: str = "video1"               # usb0 카메라 스트림
+    demo_video2: str = "video2"               # orbbec0 카메라 스트림
     demo_agg: str = "medoid"                  # 샘플 집계: "medoid" | "mean"
     demo_nsamples: int = 8                    # 트레젝토리 샘플 수 (느리면 4)
     demo_steps: int = 20                      # denoising 스텝 (50~100 = 느리지만 고품질)
     demo_ema: float = 0.3                     # 궤적 EMA 알파 (높을수록 덜 평활/결단적; 1.0=끔)
     demo_use_ema: bool = True                 # EMA 가중치 사용 (0.999-gen 체크포인트만)
     demo_continuity_blend: float = 0.5        # exponential continuity 스무딩 γ (old 이식; 급가속 억제). 0=끔
+    # 빈값이면 ai_models/의 기본 파일을 사용. 상대경로는 ai_models/ 기준이며,
+    # 기존 "ai_models/..." 형식과 컨테이너 절대경로도 플러그인에서 지원한다.
+    demo_goal_image_orbbec0: str = ""
+    demo_goal_image_usb0: str = ""
     demo_goal_lidar: str = ""                 # glidar 체크포인트용 docked-pose scan .npy (빈값=기본경로)
+    demo_aux_feedback: bool = True
+    demo_warm_start: bool = False
+    demo_warm_level: float = 0.3
 
     # --- R-NoGoal/R-Goal/R-Geo (token-sequence + cross-attention) 체크포인트 전용 ---
     # 관측 윈도는 기본적으로 체크포인트가 학습된 값(sensors 스펙)을 그대로 따른다.

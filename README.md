@@ -2,7 +2,7 @@
 
 # Diffusion Policy for Autonomous Robot Docking
 
-**Learning Multimodal Visuomotor Policies via Rectified Flow, with LiDAR-ICP-Distilled Precision Docking**
+**Single-Camera ReLoc3R Relational Features + DDPM DiT for Real-Robot Docking**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
@@ -12,313 +12,391 @@
 
 ---
 
-A mobile robot learns to autonomously dock at a charging station by observing two room cameras, its wheel encoder velocities, and a raw 2D LiDAR scan. A **Diffusion Transformer (DiT)**, trained as a **Rectified Flow** velocity-field model and integrated with a simple **Euler ODE**, generates future velocity trajectories conditioned on fused vision--motion--LiDAR representations. A single model handles the whole approach-to-dock path: the main head outputs the velocity trajectory, while an **ICP-distilled auxiliary head** regresses the dock pose (`x, y, θ`) from the raw LiDAR points for mm-level precision/arrival judgment — so no online ICP runs at deployment.
+This README documents **`r_relfeat_only`**, the only experiment in this
+repository that has succeeded on the real robot so far. The policy uses one
+`orbbec0` camera, wheel-velocity history, and ReLoc3R's bidirectional
+cross-attention decoder tokens to generate a 60-step velocity trajectory with
+a conditional DDPM DiT. Other model families remain in the repository for
+ablation history, but they are not the reproduction target of this README.
 
 ## Overview
 
 | | |
 |---|---|
 | **Task** | Autonomous charging-station docking for a differential-drive mobile robot |
-| **Input** | RGB (room1, room2) + encoder velocity + **raw 2D LiDAR points** + goal feature |
-| **Output** | 60-step velocity trajectory **+ ICP-distilled dock pose** (precision/arrival, aux head) |
-| **Method** | Conditional **Rectified Flow** policy + LiDAR-ICP-distilled precision head |
-| **Training** | Offline imitation learning from expert demonstrations |
+| **Model** | `r_relfeat_only` |
+| **Input** | `orbbec0` RGB history + docked-position goal RGB + wheel velocity history |
+| **Output** | 60-step `(linear velocity, angular velocity)` trajectory |
+| **Vision** | Frozen ReLoc3R-224 encoder + bidirectional decoder features (`dec1`, `dec2`) |
+| **Policy** | Token-sequence fusion + cross-attention DiT + DDPM |
+| **Training** | Offline imitation learning, 20 epochs / 16940 steps |
+| **Real robot** | `step 12000` and `step 16940`: all trials successful to date (user report) |
 
-## Method
+## 실기 검증 성공 모델: `r_relfeat_only`
 
-### Pipeline
+> **실기 결과(사용자 보고, 2026-07-30):** 현재까지 이 run이 유일하게
+> 실기 도킹에 성공한 실험이며, 테스트한 `step 12000`과 `step 16940`은
+> 각각 수행한 모든 실기 시도에 성공했다(현재까지 success rate 100%).
+> 시험 횟수가 기록되어 있지 않으므로 성공 횟수나 통계적 신뢰구간까지
+> 의미하는 결과로 확대 해석하지 않는다.
 
-단일 모델(Option A): 네 모달리티를 토큰으로 융합 → (주) 속도 궤적(**Rectified Flow**, Euler ODE) + (aux) **ICP-distill 도크 포즈**.
-ICP는 **오프라인 교사**(라벨)일 뿐 런타임엔 비전+LiDAR 정책만 동작.
+성공 run과 검증된 체크포인트는 다음과 같다.
 
-```
-   Room1 RGB     Room2 RGB     Encoder vel.   raw LiDAR pts     Goal frame(docked)
-  [5,3,240,320] [5,3,240,320]    [30,2]      [256,2]+npoints     [3,240,320]
-       │             │             │              │                  │
-   Frozen        Frozen          MLP        PointNet-style       Frozen DINO
-   DINO-v3       DINO-v3      + Pos.Enc.     point encoder       (goal feature)
-       │             │             │              │                  │
-   Perceiver     Perceiver         │        masked Perceiver     Perceiver
-   Resampler     Resampler         │         Resampler          (goal) + NoMaD
-       └─────────────┴──────┬──────┴──────────────┴──────────────────┘  mask
-                            │   (image / velocity / lidar / goal modality tokens)
-                ┌───────────▼────────────┐
-                │ Sensor Fusion Transformer│ → readout = Condition Vector [d=384]
-                └───────────┬────────────┘
-                  ┌─────────┴───────────────────┐
-        ┌─────────▼──────────┐        ┌─────────▼──────────────┐
-        │   DiT1d Velocity   │        │   ICP aux head         │
-        │ + Euler ODE (RF)   │        │  (dock pose x,y,θ)     │
-        └─────────┬──────────┘        └─────────┬──────────────┘
-                  ▼                             ▼
-        Velocity trajectory [60,2]     Dock pose  →  정밀/도착 판정(≤1cm)
-        (v_linear, v_angular)          (ICP-distilled, 런타임 ICP 없음)
-```
+| 항목 | 값 |
+|---|---|
+| Run | `outputs/train/r_relfeat_only/2026-07-28_22-47-34` |
+| 실기 성공 checkpoint 1 | `r_relfeat_only_step_12000.pt` (내부 step도 `12000`) |
+| 실기 성공 checkpoint 2 | `r_relfeat_only_step_16940.pt` (20 epoch 최종 checkpoint, 내부 step도 `16940`) |
+| 저장 config | `r_relfeat_only_step_12000.config.yaml` |
+| 현재 배포 config | `ai-control-260729/config.yml`은 `step 12000`, DDPM, EMA weight, 30 denoising steps, 1 sample을 사용 |
 
-> 나중(`docs/plan/00_overview.md` §5): goal을 **멀티 sub-goal DINO 정합**으로 확장 + anomaly 헤드.
+`step 16940`도 동일한 학습 run과 모델 구조를 사용한다. 다만 현재
+`ai-control-260729/config.yml`의 기본 선택이 `step 12000`일 뿐이며, 이것이
+`step 16940`의 실기 성공 여부와는 무관하다.
 
-### Key Design Choices
+### 이 모델이 실제로 사용하는 입력과 출력
 
-- **Rectified Flow generative backbone** -- The DiT is trained to regress the straight-line velocity field between noise and data (`x0 - x1`) rather than a score. The learned flow is nearly straight, so a plain **Euler ODE** samples high-quality trajectories in very few steps (~5-20) instead of DPM-Solver++ diffusion sampling. Because the precision (aux ICP head) and sensor-fusion branches live entirely in the condition network, this backbone is a clean drop-in swap over the diffusion version via CleanDiffuser's `ContinuousRectifiedFlow` -- the training loop is unchanged.
+`r_relfeat_only`의 입력·출력 계약은 다음과 같다.
 
-- **Role-split precision (LiDAR ICP distillation)** -- The learned policy handles robust wide-area approach; a **cross-attention aux head** attends a pose query to the raw LiDAR point tokens and regresses the dock pose, distilling an offline point-to-line ICP teacher. This yields mm-level arrival judgment (≤1 cm) without any runtime ICP, and lets the policy learn from few coarse demos (precision is not imitated).
+- **입력 카메라:** `image_bottom` 한 대(배포 이름 `orbbec0`)만 사용한다.
+- **Goal:** 각 학습 episode의 마지막 docked frame을 고정 goal image로 사용한다.
+- **관측 시간:** wheel velocity `(vx, wz)` 60 frame과, 같은 60-frame
+  history에서 stride 12로 뽑은 RGB 5 frame을 사용한다.
+- **ReLoc3R 특징:** 각 history frame과 episode goal frame을 한 쌍으로
+  ReLoc3R decoder에 넣고, pose head 직전의 두 cross-attention stream인
+  `dec1`과 `dec2`를 사용한다.
+- **사용하지 않는 것:** DINO, 두 번째 카메라(`image_top`/`usb0`), LiDAR,
+  ICP auxiliary pose head, 별도 4-D geometry token을 사용하지 않는다.
+- **출력:** 30 Hz 기준 미래 60 step의 `(linear velocity, angular velocity)`,
+  즉 약 2초 길이의 속도 trajectory를 한 번에 생성한다.
 
-- **Frozen DINOv2 backbone** -- No fine-tuning needed. The pretrained ViT-B/16 provides rich spatial features (196 patches x 768-dim per frame) that generalize well to the indoor docking environment.
+조건 토큰은 다음과 같이 만들어진다.
 
-- **Sparse temporal vision sampling** -- From 30 observation steps, only 5 frames (stride=6) are fed to the vision branch. This reduces computation 6x while preserving sufficient visual context for docking alignment.
+```text
+wheel 60 x 2
+  -> MLP + temporal embedding
+  -> 60 tokens
 
-- **Perceiver Resampler** -- Compresses 196 DINO patches per frame into 16 latent tokens via cross-attention, reducing the vision sequence from 980 tokens to 80 tokens per camera.
+5 history frames H_i + one static episode goal G
+  -> shared ReLoc3R ViT-L encoder
+  -> ReLoc3R cross-attention decoder
+     dec1_i = history stream H_i after attending to G
+     dec2_i = goal stream G after attending to H_i
+  -> each [196, 768] stream is compressed by a Perceiver to 16 tokens
+  -> dec1: 5 x 16 = 80 tokens, dec2: 5 x 16 = 80 tokens
 
-- **Offline DINO feature caching (training speedup)** -- The DINO backbone is frozen and the input frames are fixed, so the `[196, 768]` patch features are identical every step/epoch. Recomputing them on the GPU each step was the dominant training bottleneck (~1.5k ViT-B forwards/step). `scripts/precompute_dino_cache.py` runs the backbone **once offline** and stores the features (row-aligned, fp16) in a cache HDF5; training then reads features from disk and skips the backbone entirely. Features are **bit-identical** to the live path (float32 diff = 0), so results are unchanged — only faster. Enabled via `use_dino_cache` / `dino_cache_path`.
-
-- **Single-camera option** -- `use_room1=false` uses only room2 (`image_bottom`), dropping the room1 (`image_top`) vision branch. Halves DINO compute and cache size (~66 GB → for one camera at 225k frames). This is a model change (retrain required); default `true` keeps the two-camera setup.
-
-- **Velocity-conditioned fusion** -- The encoder velocity history provides proprioceptive grounding, enabling the policy to reason about the robot's current motion state alongside visual observations.
-
-- **Classifier-Free Guidance (CFG)** -- Supports conditional dropout (p=0.1) during training for optional guidance-weighted sampling at inference time.
-
-## Project Structure
-
-> 단일 모델(Option A): 하나의 flow-matching(Rectified Flow) 정책이 **DINO(room1/2) + encoder velocity + raw LiDAR 점 + goal feature**
-> 를 받아 (주) 미래 속도 궤적과 (aux) **ICP-distill 도크 포즈**를 출력. ICP는 **오프라인 라벨 생성에만** 쓰이고
-> 런타임엔 비전만 동작. 자세한 설계·진행은 `docs/plan/00..05_*.md`, `docs/CLAUDE.md`.
-
-```
-.
-├── cleandiffuser/                  # Diffusion 프레임워크 (modified CleanDiffuser)
-│   ├── diffusion/                  #   생성 백본 (ContinuousRectifiedFlow: loss/update/sample, Euler ODE) + DDPM/SDE/DPM-Solver
-│   ├── nn_diffusion/               #   DiT1d 디노이저 (adaLN-Zero)
-│   ├── nn_condition/
-│   │   └── sensor_fusion_condition.py  # ★멀티모달 조건망: DINO room1/2 + velocity
-│   │                               #     + raw-LiDAR point 브랜치 + goal 토큰 + ICP aux head
-│   ├── dataset/                    #   base dataset 클래스
-│   └── utils/                      #   Transformer 블록, normalizer, tensor ops
-│
-├── endgame/                        # ★오프라인 ICP (라벨 생성 전용, 런타임 미사용)
-│   ├── icp_matcher.py              #   raw-point known-shape ICP (point-to-line, aliasing 가드)
-│   ├── target_model.py             #   도크 형상 템플릿 (make_template, real_dock 로드)
-│   ├── se2.py / config.py          #   SE(2) 유틸 / ICPConfig
-│   └── assets/dock_template_real.* #   155개 에피소드로 만든 공식 도크 템플릿
-│
-├── dino/
-│   ├── dino_detector.py            # frozen DINOv3 (facebook/dinov3-vitb16) feature 추출
-│   └── master_vector.pt            # 유사도용 기준 벡터
-│
-├── utils/                          # 데이터 로딩 + 셋업 (preprocessing/loader 여기로 통합)
-│   ├── preprocessing.py            # ★원본 에피소드 → 학습 h5 (이미지/encoder/raw-lidar점/ICP 라벨)
-│   ├── docking_dataset.py          # ★h5 로더 (sparse-uint8 vision, lidar_points, dock_pose 반환)
-│   ├── setups.py                   # 모델/로거 초기화 (model_setups)
-│   ├── utils.py                    # Logger, RK4 궤적 복원, plotting
-│   └── check_dataset.py / viz_*    # 데이터 점검 / 시각화
-│
-├── scripts/
-│   ├── train.py                    # ★단일 모델 학습 (denoising + ICP aux 합산 손실)
-│   ├── eval_heldout.py             # held-out 평가 (dock mm, denoising)
-│   ├── plot_training.py            # 학습 수렴 곡선 plot
-│   ├── label_subgoals.py           # ★오프라인 ICP 라벨러 → dataset/after_0328/icp_labels/
-│   ├── build_dock_template.py      # 공식 도크 템플릿 생성 (endgame/assets/)
-│   ├── icp_real_data.py            # 실데이터 ICP 정밀도 검증
-│   └── inference_ema.py / _rtc.py  # 배포 추론 (EMA / 랭킹 선택, ZMQ 스트리밍)
-│
-├── configs/robot/smr.yaml          # Hydra config (architecture/training + lidar/aux/goal/sparse_vision 플래그)
-│
-├── dataset/
-│   ├── after_0328/
-│   │   ├── dock/episode_*_dock/    # 원본: room1/2 jpg, encoder.csv, lidar.jsonl, marker_pose.csv
-│   │   ├── icp_labels/             # ★ICP 산출 라벨: <ep>.npz(프레임별 도크 포즈=최종골, reliable)
-│   │   │                           #   + <ep>.json(sub-goal 마일스톤, handoff onset, success)
-│   │   └── after_0328_{train,test}.h5   # 빌드된 학습/테스트 데이터
-│   └── new/record_46/              # 신규 포맷(orbbec 깊이+usb) — 미래 깊이 브랜치용
-│
-├── docs/
-│   ├── CLAUDE.md                   # 설계 기준 문서
-│   ├── plan/00..05_*.md            # 단일모델 구현 계획·진행(정리→데이터→전처리→학습→결과→plot)
-│   ├── design_of_endgame.md        # 전체 진행 로그
-│   ├── inference.md / icp_background.md / ai_server_robot_pipeline.md
-│
-├── rc_server/  plugins/            # 외부 서버 스택 + AI 플러그인 (배포 인프라; 이 repo 핵심 아님)
-├── outputs/  results/              # 학습 산출(체크포인트/로그/plot)
-└── requirements*.txt / README.md
+total condition sequence = 60 + 80 + 80 = 220 tokens, each 384-D
+  -> 4-layer TokenSequenceFusionCondition (unpooled)
+  -> 12-layer, 6-head DiTCrossAttn1d
+  -> DDPM / ContinuousDiffusionSDE
+  -> future action [60, 2]
 ```
 
-## Getting Started
+Action DiT는 미래 60개 action token을 non-causal self-attention으로 함께
+denoise하고, 매 block에서 위 220개 condition token에 cross-attention한다.
+학습 action은 `minmax`로 `[-1, 1]`에 정규화된다. 추론은
+`ode_dpmsolver++_2M`, 30 sampling steps가 실기 검증 설정이다.
 
-### Prerequisites
+엄밀히 말하면 현재 stride 구현은 60-frame window의 index
+`[0, 12, 24, 36, 48]`을 선택한다. 즉 가장 최근 RGB는 window 마지막보다
+11 frame 앞이고, wheel만 마지막 frame까지 포함한다. 재현할 때 RGB index를
+`[11, 23, 35, 47, 59]`처럼 바꾸면 성공 모델과 다른 입력이 된다.
 
-- Python 3.11+
-- CUDA 12.1+ with a GPU (16 GB+ VRAM recommended)
+### 실기 추론 설정
 
-### Installation
+실기 성공 당시와 현재 `ai-control-260729/config.yml`에 기록된 주요 값은
+다음과 같다. `step 12000`과 `step 16940` 모두 이 모델 구조/입력 계약을
+유지해야 한다.
+
+```text
+demo_backbone=ddpm
+demo_steps=30
+demo_nsamples=1
+demo_use_ema=true
+demo_agg=medoid       # sample이 1개라 결과에는 영향 없음
+demo_ema=1.0          # trajectory frame EMA 끔
+demo_continuity_blend=0.2
+window_size=60
+inference_size=32
+action_horizon=32
+require_encoder=true
+require_lidar=false
+```
+
+배포 시 episode 마지막 training image를 읽는 것이 아니라, 같은 카메라의
+실제 docked-position goal image를 지정한다. 이 goal은 시작할 때 한 번
+ReLoc3R encoder로 처리되고 매 추론의 5개 history frame과 pair를 이룬다.
+
+### 정확한 학습 재현
+
+아래 명령은 저장소 root
+`/home/work/.postech/diffusion_policy_robot_docking`에서 실행한다.
+
+#### 1. 필요한 데이터와 cache 확인
+
+성공 run은 아래 두 파일이 row 단위로 정확히 정렬되어 있다는 전제에서
+학습되었다.
+
+```text
+dataset/after_0328_train.h5
+  episode_ends: 145 episodes / 225465 rows
+  encoder:      [225465, 2]
+  image_bottom: [225465, 3, 240, 320]
+
+dataset/after_0328_train_reloc3r_bottom.h5
+  reloc3r_bottom:      [225465, 196, 1024] float16
+  reloc3r_dec1_bottom: [225465, 196,  768] float16
+  reloc3r_dec2_bottom: [225465, 196,  768] float16
+```
+
+현재 cache가 그대로 있다면 이 단계는 다시 실행하지 않는다. Cache를
+원본 HDF5에서 재생성해야 할 때만 다음을 실행한다. 두 번째 명령은 첫 번째
+명령이 만든 HDF5에 `dec1/dec2` dataset을 in-place로 추가한다.
 
 ```bash
-# Create and activate conda environment
+cd /home/work/.postech/diffusion_policy_robot_docking
+
+python scripts/precompute_reloc3r_cache.py \
+  --h5 dataset/after_0328_train.h5 \
+  --camera image_bottom \
+  --out dataset/after_0328_train_reloc3r_bottom.h5
+
+python scripts/precompute_reloc3r_dec_features.py \
+  --cache dataset/after_0328_train_reloc3r_bottom.h5 \
+  --camera image_bottom
+```
+
+두 cache script 모두 episode마다 마지막 frame을 goal로 정하고, 전체
+episode를 끝까지 처리한다. `--limit_episodes`는 smoke test용이므로 실제
+재현 명령에는 넣지 않는다.
+
+#### 2. 성공 run과 같은 학습 실행
+
+```bash
+cd /home/work/.postech/diffusion_policy_robot_docking
+
+python scripts/train.py \
+  --config-name smr_rgeo \
+  sensors_variant=reloc3r_relfeat_only \
+  experiment_name=r_relfeat_only
+```
+
+이 명령은 현재 config 기준으로 저장된 성공 run과 동일하게 다음 설정을
+합성한다.
+
+```text
+seed=0, device=cuda:0
+batch_size=256, num_epochs=20
+learning_rate=1e-4, weight_decay=1e-5
+action_norm=minmax
+diffusion_backbone=ddpm
+d_model=384, n_heads=6, depth=12
+condition_num_layers=4, dropout=0.1
+ema_rate=0.999
+horizon=60, obs_horizon=60
+```
+
+현재 dataset에서는 학습 sample이 `216910`개이고 `drop_last=true`이므로
+epoch당 `floor(216910 / 256) = 847` gradient steps, 총
+`20 x 847 = 16940` steps가 된다. 따라서 성공 run의 최종 checkpoint가
+`step 16940`인 것도 재현 조건의 일부다. 데이터 행 수, episode 수,
+batch size 중 하나라도 바뀌면 최종 step은 달라진다.
+
+Hydra는 새 결과를 다음 형식의 별도 timestamp 디렉터리에 저장한다.
+
+```text
+outputs/train/r_relfeat_only/YYYY-MM-DD_HH-MM-SS/
+```
+
+#### 3. 기존 성공 artifact 무결성 확인
+
+```bash
+cd /home/work/.postech/diffusion_policy_robot_docking
+
+sha256sum \
+  outputs/train/r_relfeat_only/2026-07-28_22-47-34/r_relfeat_only_step_12000.pt \
+  outputs/train/r_relfeat_only/2026-07-28_22-47-34/r_relfeat_only_step_16940.pt \
+  outputs/train/r_relfeat_only/2026-07-28_22-47-34/r_relfeat_only_step_12000.config.yaml
+```
+
+기대값:
+
+```text
+803ab3cc494d17e241a2b806da93ab2bfb24baa874f95326ea40cd0be0a51152  r_relfeat_only_step_12000.pt
+a298f6a71f0ab579eb7b161a2b5be993630e7bc65b00987d69f7db3ec93cf6a5  r_relfeat_only_step_16940.pt
+d0cfc35afb523e87a5c750a32d453284e72bed67db29794af00e616895f2db08  r_relfeat_only_step_12000.config.yaml
+```
+
+### `dec1`과 `dec2`가 같은 file을 보는 이유
+
+두 sensor가 같은 `file`을 가리키는 것은 중복이나 오류가 아니다. 하나의
+HDF5 sidecar 안에 **서로 다른 dataset key**를 함께 저장한 것이다.
+
+```yaml
+reloc3r_dec1:
+  file:   dataset/after_0328_train_reloc3r_bottom.h5
+  source: reloc3r_dec1_bottom
+
+reloc3r_dec2:
+  file:   dataset/after_0328_train_reloc3r_bottom.h5
+  source: reloc3r_dec2_bottom
+```
+
+Episode의 고정 goal을 `G = last_frame(episode)`라 하고 sampled history
+frame을 `H_i`라 하면, cache는 매 row마다 다음 두 값을 저장한다.
+
+```text
+(dec1_i, dec2_i) = ReLoc3RDecoder(Encoder(H_i), Encoder(G))
+```
+
+- `dec1_i`는 `G`를 본 history-side stream이다.
+- `dec2_i`는 `H_i`를 본 goal-side stream이다.
+
+따라서 **goal image 자체는 episode 마지막 frame 하나만 주면 되고, 현재
+코드도 이미 그렇게 동작한다.** Offline cache는 마지막 frame의 encoder
+feature를 episode 내에서 재사용하고, live 배포 코드도 goal image를 시작할
+때 한 번만 encode한다.
+
+반면 `dec2`의 **출력**은 goal만의 정적 feature가 아니다. 같은 goal
+`G`라도 상대 history frame `H_i`가 달라질 때 cross-attention 결과
+`dec2_i`도 달라진다. 마지막 row의 `dec2(G, G)` 하나를 5개 시점에
+broadcast하면 `H_i`에 대한 관계 정보가 사라지므로 현재 모델과 동등하지
+않고, 기존 checkpoint에도 사용할 수 없다.
+
+`dec2`가 실제로 불필요한지는 가능한 ablation 질문이지만, 그것은 다음 중
+하나로 **별도 모델을 재학습해서** 비교해야 한다.
+
+1. `dec1`만 유지하는 모델
+2. `dec2`만 유지하는 모델
+3. 현재의 `dec1 + dec2` 성공 모델
+
+현재 성공률 100%를 재현하는 목적에서는 `dec1 + dec2`를 그대로 유지한다.
+
+## 현재 모델 코드 맵
+
+```text
+configs/robot/
+├── smr_rgeo.yaml
+│   └── DDPM, DiT, optimizer, batch/epoch 및 공통 학습 설정
+└── sensors_variant/reloc3r_relfeat_only.yaml
+    └── wheel + reloc3r_dec1 + reloc3r_dec2 입력 계약
+
+scripts/
+├── precompute_reloc3r_cache.py
+│   └── image_bottom -> ReLoc3R ViT-L encoder cache
+├── precompute_reloc3r_dec_features.py
+│   └── history/goal pair -> dec1/dec2 cache
+└── train.py
+    └── Hydra 학습 entrypoint
+
+utils/
+├── modular_dataset.py
+│   └── row-aligned HDF5 history/action sampling
+└── setups.py
+    └── TokenSequenceFusionCondition + DiTCrossAttn1d + DDPM 생성
+
+cleandiffuser/
+├── nn_condition/modality_encoders.py
+│   └── wheel 및 reloc3r_relation encoder
+├── nn_condition/token_sequence_condition.py
+│   └── 220개 condition token의 self-attention fusion
+├── nn_diffusion/dit.py
+│   └── DiTCrossAttn1d action denoiser
+└── diffusion/diffusionsde.py
+    └── ContinuousDiffusionSDE(DDPM) 학습/샘플링
+
+reloc3r/
+└── vendored ReLoc3R-224 implementation
+
+ai-control-260729/
+├── config.yml
+│   └── 실기 checkpoint와 sampler/runtime 설정
+└── ai_models/
+    ├── reloc3r_geometry.py
+    │   └── goal을 한 번 encode하고 live dec1/dec2 생성
+    └── plugins/run_postech_docking_demo.py
+        └── live sensor context, DDPM sampling, trajectory command 생성
+
+outputs/train/r_relfeat_only/2026-07-28_22-47-34/
+└── 실기 성공 checkpoint, 저장 config, metrics
+```
+
+## 환경 설정
+
+성공 run은 `device=cuda:0`에서 실행되었다. 정확한 GPU/CUDA/PyTorch 버전이
+checkpoint에 저장되지는 않으므로, 아래는 저장소의 지원 범위이고 새로운
+학습 결과가 기존 checkpoint와 bit-for-bit 동일함을 보장하지는 않는다.
+
+- Python 3.11+
+- CUDA 사용 가능한 PyTorch 2.0+
+- 대용량 HDF5 cache를 저장할 충분한 디스크 공간
+- ReLoc3R-224 checkpoint `siyan824/reloc3r-224`에 접근 가능한 Hugging Face
+  cache 또는 최초 다운로드 환경
+
+```bash
 conda create -n diffusion_policy python=3.11 -y
 conda activate diffusion_policy
 
-# Install PyTorch with CUDA support
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# Install remaining dependencies
 pip install -r requirements.txt
 ```
 
-## Data Preparation
+설치 후에는 앞의 **정확한 학습 재현** 절에 있는 두 cache 명령과 명시적인
+Hydra 명령을 사용한다. 인자 없이 `python scripts/train.py`를 실행하면 다른
+기본 config가 선택되므로 `r_relfeat_only` 재현 명령이 아니다.
 
-### Expected Raw Data Layout
+## 데이터 계약
 
-```
-data_root/
-└── validation/
-    ├── episode_001/
-    │   ├── image/
-    │   │   ├── room1/            # Top-view camera (*.jpg, timestamped filenames)
-    │   │   └── room2/            # Side-view camera (*.jpg, timestamped filenames)
-    │   └── encoder.csv           # Columns: ts, vx, wz
-    ├── episode_002/
-    └── ...
-```
+현재 모델 학습에 직접 필요한 데이터는 다음뿐이다.
 
-### Convert to HDF5
+- Main HDF5: `episode_ends`, `encoder`
+- ReLoc3R sidecar: `episode_ends`, `reloc3r_dec1_bottom`,
+  `reloc3r_dec2_bottom`
+- Cache 재생성 시에만 필요한 main HDF5 입력: `image_bottom`
+- Action target: main HDF5의 미래 `encoder` 60 frame
 
-```bash
-# Raw episodes -> training h5 with raw LiDAR points + offline ICP dock-pose labels
-python utils/preprocessing.py \
-    --data_root /path/to/data_root \
-    --save_path dataset/after_0328_train.h5 \
-    --use_lidar --lidar_format points \
-    --with_labels --labels_dir dataset/after_0328/icp_labels
-```
+`image_top`, DINO cache, LiDAR, `dock_pose`, `reliable`, ICP label은
+`r_relfeat_only`의 조건 입력이나 loss에 사용되지 않는다. Main HDF5와
+ReLoc3R sidecar는 `episode_ends`와 전체 row 수가 반드시 일치해야 한다.
+현재 성공 데이터의 정확한 shape는 앞의 재현 절에 기록되어 있다.
 
-> The ICP labels are generated offline first (`scripts/build_dock_template.py` to build the dock template, then `scripts/label_subgoals.py` to label every frame); `--with_labels` bakes them into the h5.
+## 실기 배포
 
-The resulting HDF5 contains:
+실기 경로의 기준 파일은 다음과 같다.
 
-| Dataset | Shape | Description |
-|---------|-------|-------------|
-| `encoder` | `[N, 2]` | Wheel encoder velocities (vx, wz) |
-| `image_top` | `[N, 3, 240, 320]` | Room 1 camera frames |
-| `image_bottom` | `[N, 3, 240, 320]` | Room 2 camera frames |
-| `episode_ends` | `[E]` | Episode boundary indices |
-| `lidar_points` | `[N, M, 2]` | Raw robot-frame LiDAR points, zero-padded (M=256) |
-| `lidar_npoints` | `[N]` | Number of valid points per frame |
-| `dock_pose` | `[N, 3]` | ICP dock-pose label `[x, y, θ]` (aux head teacher) |
-| `reliable` | `[N]` | 1 = ICP-reliable frame (used to mask the aux loss) |
+- `ai-control-260729/config.yml`: checkpoint와 runtime knob
+- `ai-control-260729/ai_models/plugins/run_postech_docking_demo.py`: 추론 plugin
+- `ai-control-260729/ai_models/reloc3r_geometry.py`:
+  `Reloc3rRelationFeatures`
+- `ai-control-260729/ai_models/cleandiffuser/`: 배포용 모델 코드
 
-## Training
+Token-sequence checkpoint는 weight만으로 temporal sensor 설정을 복구할 수
+없으므로 checkpoint와 그 학습 config를 함께 배포해야 한다. Plugin은 다음
+순서로 config를 찾는다.
 
-```bash
-# Run from the repository root -- config paths resolve against the launch directory
-python scripts/train.py
+```text
+<checkpoint_stem>.config.yaml
+<checkpoint_stem>_config.yaml
+config.yaml
 ```
 
-The single model trains with a **combined loss**: the Rectified Flow denoising loss (main) plus a masked ICP dock-pose loss on the reliable frames (aux). Each step logs both the flow loss and the aux pose error in mm. All hyperparameters are managed via [Hydra](https://hydra.cc/) and can be overridden from the command line:
+`step 16940`을 배포할 때도 `step 12000`과 동일한 `r_relfeat_only` 학습
+config를 해당 checkpoint 옆에 두어야 한다. 실기 전에는 명령 전송을 끈
+상태에서 카메라 stream, docked-position goal image, 60-frame window와 생성
+trajectory를 먼저 확인한다.
 
-```bash
-# Custom training run
-python scripts/train.py batch_size=48 learning_rate=5e-5 diffusion_gradient_steps=140000
+## 다른 실험 브랜치
 
-# Toggle the precision / sensor-fusion branches
-python scripts/train.py use_lidar_points=true use_aux_pose=true use_goal=true aux_weight=1.0
-
-# Resume from checkpoint
-python scripts/train.py resume_path=/path/to/checkpoint_step_100000.pt
-```
-
-### DINO Feature Caching (optional, big speedup)
-
-Precompute the frozen-DINO features once and train from the cache instead of running the backbone every step.
-
-```bash
-# 1) Precompute room2 (image_bottom) DINO features -> cache HDF5 (run once).
-#    Reproduces the exact backbone path of DinoBatchDetector.get_heatmap
-#    (interpolate->224 bicubic, ImageNet normalize, last_hidden_state[:, 5:, :]);
-#    the discarded sim-map / OpenCV path is skipped. Resumable.
-python scripts/precompute_dino_cache.py \
-    --h5 dataset/after_0328_train.h5 \
-    --camera image_bottom \
-    --out dataset/after_0328_train_dino_bottom.h5
-
-# 2) Train reading from the cache (skips the DINO backbone entirely).
-python scripts/train.py use_dino_cache=true use_room1=false \
-    dino_cache_path=dataset/after_0328_train_dino_bottom.h5
-```
-
-**Notes**
-- The cache is **row-aligned 1:1** with the source image rows and stored fp16, so it must be regenerated if the source h5 changes. Size ≈ `N_frames × 196 × 768 × 2 B` per camera (~66 GB for 225k frames, one camera).
-- Both files are used during training: the source h5 still provides encoder velocity / action targets, LiDAR points, and ICP labels; the cache provides only the DINO vision features (`dino_feat_room2`, `goal_feat_room2`). Raw image pixels are no longer read.
-- For `use_room1=true` with a cache, precompute the top camera too (`--camera image_top`) and provide a `dino_top` dataset; otherwise set `use_room1=false`.
-- Features are bit-identical to the live path, so training dynamics are unchanged — only faster.
-
-### Configuration Reference
-
-<details>
-<summary><b>Full hyperparameter table</b> (click to expand)</summary>
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| **Data** | | |
-| `horizon` | 60 | Future trajectory length (steps) |
-| `obs_horizon` | 30 | Observation history window |
-| `vision_stride` | 6 | Temporal subsampling for vision (30/6 = 5 frames) |
-| `batch_size` | 48 | Training batch size |
-| **Architecture** | | |
-| `d_model` | 384 | Transformer hidden dimension |
-| `n_heads` | 6 | Number of attention heads |
-| `depth` | 12 | DiT block depth |
-| `dropout` | 0.1 | CFG condition masking probability |
-| **Precision / Sensor Fusion** | | |
-| `use_lidar_points` | true | Enable the raw-LiDAR point-set branch |
-| `num_lidar_latents` | 16 | Perceiver latents for the LiDAR branch |
-| `use_aux_pose` | true | Enable the ICP-distilled dock-pose aux head |
-| `aux_weight` | 1.0 | Weight of the masked aux pose loss vs the flow loss |
-| `use_goal` | true | Enable goal-feature (docked frame) conditioning |
-| `goal_mask_prob` | 0.5 | P(goal active) for NoMaD-style masking |
-| `sparse_vision` | true | Dataset returns sparse uint8 frames (RAM saver) |
-| `use_room1` | true | Use the room1 (`image_top`) branch; `false` = single camera (room2 only) |
-| `use_dino_cache` | false | Read precomputed DINO features from `dino_cache_path` and skip the backbone |
-| `dino_cache_path` | null | Path to the cache HDF5 (from `scripts/precompute_dino_cache.py`) |
-| **Training** | | |
-| `diffusion_gradient_steps` | 140,000 | Total gradient steps |
-| `learning_rate` | 1e-4 | Initial learning rate (cosine decay) |
-| `weight_decay` | 1e-5 | AdamW weight decay |
-| `ema_rate` | 0.9999 | EMA model decay rate |
-| `save_interval` | 10,000 | Checkpoint save frequency |
-| **Inference** | | |
-| `solver` | `euler` | Euler ODE integrator for Rectified Flow sampling |
-| `inference_sampling_steps` | 20 | Number of Euler ODE steps (RF needs only a few) |
-| `w_cfg` | 1.0 | Classifier-free guidance weight |
-| `num_samples` | 8 | Trajectory samples per step |
-
-</details>
-
-## Inference
-
-Two inference strategies are provided for different deployment scenarios:
-
-### EMA Trajectory Smoothing
-
-Applies exponential moving average across consecutive predictions for temporally smooth control:
-
-```bash
-cd scripts
-python inference_ema.py checkpoint_step=160000
-```
-
-### Ranking-based Trajectory Continuity (RTC)
-
-Generates multiple trajectory samples, ranks them by continuity with the previous prediction, and applies exponential blending:
-
-```bash
-cd scripts
-python inference_rtc.py checkpoint_step=160000
-```
-
-Both scripts output trajectory comparison plots and stream predictions via ZMQ for real-time visualization.
+저장소에는 DINO, 두 카메라, LiDAR, ICP auxiliary head, explicit geometry,
+Rectified Flow를 사용하는 과거 실험 코드와 config도 남아 있다. 이들은
+ablation 및 기록 보존용이며 현재까지의 실기 성공 모델 설명이나 위 재현
+명령에 포함되지 않는다. 관련 역사와 비교 결과는 `docs/` 아래 문서를
+참조한다.
 
 ## Acknowledgments
 
 This project builds on the following excellent work:
 
-- **[CleanDiffuser](https://github.com/CleanDiffuserTeam/CleanDiffuser)** -- A clean and modular diffusion model library for decision-making
-- **[DINOv3](https://github.com/facebookresearch/dinov3)** -- Self-supervised vision transformer for feature extraction
+- **[ReLoc3R](https://github.com/ffrivera0/reloc3r)** -- Relative camera pose regression and the bidirectional decoder used for relational visual tokens
+- **[CleanDiffuser](https://github.com/CleanDiffuserTeam/CleanDiffuser)** -- Diffusion-model components for decision-making
 - **[Diffusion Policy](https://diffusion-policy.cs.columbia.edu/)** -- Visuomotor policy learning with diffusion models

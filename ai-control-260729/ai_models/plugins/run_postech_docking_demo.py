@@ -37,19 +37,16 @@ set to match whatever demo_ckpt was actually trained with:
   * graft6/wave2/wave3/auxfb (07-17 onward)  -> demo_backbone: ddpm
 
 Site checklist (README_DEMO.md):
-  * replace ai_models/goal_image_orbbec0.jpg with a photo of THIS site's dock
-    taken from the docked position by the orbbec0 camera (the shipped file is
+  * set demo_goal_image_orbbec0 to a photo of THIS site's dock taken from
+    the docked position by the orbbec0 camera (the bundled goal_ref image is
     only an example from the test set).
   * verify which LiveKit track is orbbec0 (=image_bottom) by comparing
     ai_models/reference_room2.jpg with the live streams; set demo_video2 in
     config.yml accordingly.
-  * ⚠️ ALL graft6/wave2/wave3/auxfb checkpoints use the usb0 camera too
-    (auto-detected as use_room1 on the model). Deploying any of them ALSO
-    requires ai_models/goal_image_usb0.jpg (a docked-position photo from the
-    usb0 camera) and demo_video1 set to whichever LiveKit track is usb0 --
-    neither exists yet as of 2026-07-22 (only the orbbec0 equivalents were
-    ever captured). _init() raises a clear FileNotFoundError naming exactly
-    this if missing, rather than a silent wrong-camera bug.
+  * 2-camera checkpoints require demo_goal_image_usb0 (a docked-position
+    photo from the USB camera) and demo_video1 set to the USB LiveKit stream.
+    Orbbec-only checkpoints do not load or require either USB input. Set
+    demo_camera_mode to match the checkpoint; _init() rejects mismatches.
   * config.yml must have require_lidar: true and run_plugin: run_postech_docking_demo.
 """
 from __future__ import annotations
@@ -134,14 +131,18 @@ def _continuity_smooth(ema, config):
 #   demo_steps     denoising sampling steps (default 20; 50-100 = slower but
 #                  higher trajectory quality, like the old 100-step baseline)
 #   demo_use_ema   use EMA weights (default true; 0.999-gen checkpoints only)
+#   demo_camera_mode  "auto" | "orbbec" | "orbbec_usb"; explicit modes are
+#                     checked against the selected checkpoint's sensor spec
 #   demo_video2    which snapshot stream is the orbbec0 (base) camera (default video2)
-#   demo_video1    which snapshot stream is the usb0 (2nd) camera -- only checkpoints
-#                  with use_room1=True (all graft6/wave2/wave3/auxfb) need this
+#   demo_video1    which snapshot stream is the usb0 (2nd) camera -- only 2-camera
+#                  checkpoints need this
 #   demo_goal_image_orbbec0  docked-position photo, orbbec0 camera
-#   demo_goal_image_usb0     docked-position photo, usb0 camera (use_room1=True ckpts only)
+#   demo_goal_image_usb0     docked-position photo, usb0 camera (2-camera goal ckpts)
 #   demo_goal_lidar          docked-position scan .npy for glidar checkpoints
-GOAL_IMAGE_ORBBEC0_DEFAULT = os.path.join(_AI_MODELS_DIR, "goal_image_orbbec0.jpg")
-GOAL_IMAGE_USB0_DEFAULT = os.path.join(_AI_MODELS_DIR, "goal_image_usb0.jpg")   # use_room1=True ckpts only
+GOAL_IMAGE_ORBBEC0_DEFAULT = os.path.join(
+    _AI_MODELS_DIR, "goal_ref", "goal_image_orbbec0.jpg")
+GOAL_IMAGE_USB0_DEFAULT = os.path.join(
+    _AI_MODELS_DIR, "goal_ref", "goal_image_usb0.jpg")
 GOAL_LIDAR_DEFAULT = os.path.join(_AI_MODELS_DIR, "goal_lidar_scan.npy")        # use_goal_lidar=True ckpts only
 OBS_HORIZON, VISION_STRIDE, HORIZON = 30, 6, 60
 # R-NoGoal/R-Goal/R-Geo (token-sequence + cross-attention) checkpoints use a
@@ -159,6 +160,58 @@ LIDAR_MAX_POINTS = 256
 D_MODEL, N_HEADS, DEPTH, DROPOUT = 384, 6, 12, 0.1
 
 _STATE: Dict[str, Any] = {}      # lazy singletons: model, dino, goal feat, traj-EMA
+
+
+def _validate_camera_mode(config, use_usb0: bool) -> str:
+    """Validate config intent against the checkpoint's fixed sensor graph."""
+    raw = str(getattr(config, "demo_camera_mode", "auto") or "auto").strip().lower()
+    aliases = {
+        "auto": "auto",
+        "orbbec": "orbbec",
+        "orbbec_only": "orbbec",
+        "1cam": "orbbec",
+        "orbbec_usb": "orbbec_usb",
+        "usb_orbbec": "orbbec_usb",
+        "2cam": "orbbec_usb",
+    }
+    if raw not in aliases:
+        raise ValueError(
+            f"unknown demo_camera_mode={raw!r}; expected auto|orbbec|orbbec_usb")
+    requested = aliases[raw]
+    trained = "orbbec_usb" if use_usb0 else "orbbec"
+    if requested == "auto":
+        return trained
+    if requested != trained:
+        raise ValueError(
+            f"demo_camera_mode={requested!r}, but checkpoint sensors require "
+            f"{trained!r}. Select a matching demo_ckpt; camera branches cannot be "
+            f"added to or removed from trained weights at deployment time.")
+    return requested
+
+
+def _token_camera_plan(sensors: Dict[str, dict]) -> Dict[str, bool]:
+    """Derive live-camera and goal-image requirements from sensor specs."""
+    visual_encoders = {"dino_image", "reloc3r_relation", "reloc3r_goal_pair"}
+    goal_encoders = {"reloc3r_relation", "reloc3r_goal_pair"}
+    visual_items = [(name, spec) for name, spec in sensors.items()
+                    if spec.get("encoder") in visual_encoders]
+    goal_items = [(name, spec) for name, spec in sensors.items()
+                  if spec.get("encoder") in goal_encoders]
+
+    def is_usb(name, spec):
+        source = str(spec.get("source", name))
+        return source.endswith("_top") or name.endswith("_top")
+
+    return {
+        "use_orbbec": ("goal" in sensors or "geometry" in sensors
+                       or any(not is_usb(name, spec)
+                              for name, spec in visual_items)),
+        "use_usb": any(is_usb(name, spec) for name, spec in visual_items),
+        "need_orbbec_goal": ("goal" in sensors or "geometry" in sensors
+                             or any(not is_usb(name, spec)
+                                    for name, spec in goal_items)),
+        "need_usb_goal": any(is_usb(name, spec) for name, spec in goal_items),
+    }
 
 
 def _resolve_ai_models_path(configured_path, default_path):
@@ -239,6 +292,7 @@ def _init(config):
                                     video_stream_orbbec0)
 
     use_room1 = any(k.startswith("condition.room1_resampler") for k in sd)
+    camera_mode = _validate_camera_mode(config, use_room1)
     use_goal = any(k.startswith("condition.goal_resampler2") or k == "condition.goal_slot_emb" for k in sd)
     use_lidar_points = any(k.startswith("condition.lidar_resampler") for k in sd)
     use_aux_pose = any(k.startswith("condition.aux_pose_head") or k.startswith("condition.aux_head") for k in sd)
@@ -423,11 +477,14 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
     wheel = sensors.get("wheel", {})
     relation_specs = {name: spec for name, spec in sensors.items()
                       if spec.get("encoder") == "reloc3r_relation"}
+    pair_specs = {name: spec for name, spec in sensors.items()
+                  if spec.get("encoder") == "reloc3r_goal_pair"}
     rgb_specs = {name: spec for name, spec in sensors.items()
                  if spec.get("encoder") == "dino_image"}
     lidar_specs = {name: spec for name, spec in sensors.items()
                    if spec.get("encoder") == "pointcloud"}
-    visual_specs = list(rgb_specs.values()) + list(relation_specs.values())
+    visual_specs = (list(rgb_specs.values()) + list(relation_specs.values())
+                    + list(pair_specs.values()))
     if rgb_specs or "goal" in sensors:
         from dino_detector import DinoBatchDetector
         dino = DinoBatchDetector(device=device)
@@ -450,11 +507,11 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
     def _is_top(name, spec):
         return str(spec.get("source", name)).endswith("_top") or name.endswith("_top")
 
-    use_usb0 = any(_is_top(name, spec) for name, spec in
-                   list(rgb_specs.items()) + list(relation_specs.items()))
-    need_bottom_goal = ("goal" in sensors or "geometry" in sensors or
-                        any(not _is_top(n, s) for n, s in relation_specs.items()))
-    need_top_goal = any(_is_top(n, s) for n, s in relation_specs.items())
+    camera_plan = _token_camera_plan(sensors)
+    use_usb0 = camera_plan["use_usb"]
+    camera_mode = _validate_camera_mode(config, use_usb0)
+    need_bottom_goal = camera_plan["need_orbbec_goal"]
+    need_top_goal = camera_plan["need_usb_goal"]
 
     goal_feat_orbbec0 = goal_feat_usb0 = None
     goal_bgr = goal_top_bgr = None
@@ -516,6 +573,28 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
             relation_extractors[camera] = Reloc3rRelationFeatures(
                 goal_image, device=device)
 
+    pair_extractors = {}
+    if pair_specs:
+        from reloc3r_geometry import Reloc3rGoalPairFeatures
+        for name, spec in pair_specs.items():
+            camera = "top" if _is_top(name, spec) else "bottom"
+            temporal = (int(spec.get("horizon", 5)), int(spec.get("stride", 12)))
+            if temporal != (vis_n, vis_stride):
+                raise ValueError(
+                    f"goal-pair sensor {name!r} uses horizon/stride={temporal}, "
+                    f"but the live visual window is {(vis_n, vis_stride)}")
+            goal_image = goal_top_bgr if camera == "top" else goal_bgr
+            pair_extractors[name] = (
+                camera,
+                Reloc3rGoalPairFeatures(
+                    goal_image,
+                    checkpoint=str(spec.get(
+                        "reloc3r_checkpoint", "siyan824/reloc3r-224")),
+                    device=device, n_patch=int(spec.get("n_patch", 196)),
+                    feat_dim=int(spec.get("feat_dim", 1024)),
+                ),
+            )
+
     use_ema = float(cfg.get("ema_rate", 0.999)) <= 0.999
     solver = "euler" if str(cfg.get("diffusion_backbone", "")) == "rectified_flow" else "ode_dpmsolver++_2M"
     horizon = int(cfg.get("horizon", HORIZON))
@@ -530,19 +609,23 @@ def _init_token_sequence(config, ckpt, sd, ckpt_path, device, Backbone,
         token_sequence=True, sensors=sensors, obs_horizon=obs_h,
         vision_stride=vis_stride, vision_n=vis_n, horizon=horizon, geometry=geometry,
         relation_specs=relation_specs, relation_extractors=relation_extractors,
+        pair_specs=pair_specs, pair_extractors=pair_extractors,
         rgb_specs=rgb_specs, need_lidar=bool(lidar_specs),
         use_goal_lidar=False, goal_lidar=None,
-        use_usb0=use_usb0, video_stream_usb0=getattr(config, "demo_video1", "video1"),
+        camera_mode=camera_mode, use_orbbec=camera_plan["use_orbbec"],
+        use_usb0=use_usb0,
+        video_stream_usb0=getattr(config, "demo_video1", "video1"),
         goal_feat_usb0=goal_feat_usb0, goal_feat_orbbec0=goal_feat_orbbec0,
         act_min=np.asarray(ckpt["action_min"], np.float32),
         act_scale=np.asarray(ckpt["action_scale"], np.float32),
         n_samples=n_samples, sample_steps=sample_steps, agg=agg,
         video_stream_orbbec0=video_stream_orbbec0, ema_alpha=ema_alpha,
     ))
-    logger.info("docking demo loaded (TOKEN-SEQUENCE): %s | sensors=%s | obs_h=%d vis=%dx stride%d "
-                "| solver=%s use_ema=%s horizon=%d n_samples=%d steps=%d",
-                os.path.basename(ckpt_path), list(sensors), obs_h, vis_n, vis_stride,
-                solver, use_ema, horizon, n_samples, sample_steps)
+    logger.info("docking demo loaded (TOKEN-SEQUENCE): %s | sensors=%s | camera_mode=%s "
+                "obs_h=%d vis=%dx stride%d | solver=%s use_ema=%s horizon=%d "
+                "n_samples=%d steps=%d",
+                os.path.basename(ckpt_path), list(sensors), camera_mode, obs_h,
+                vis_n, vis_stride, solver, use_ema, horizon, n_samples, sample_steps)
     return _STATE
 
 
@@ -601,10 +684,9 @@ def _infer(snap, config) -> List[CommandStep]:
     if st.get("token_sequence"):
         sensors = st["sensors"]
         relation_specs = st.get("relation_specs", {})
+        pair_specs = st.get("pair_specs", {})
         rgb_specs = st.get("rgb_specs", {})
-        need_bottom = ("goal" in sensors or "geometry" in sensors or
-                       any(not str(s.get("source", n)).endswith("_top")
-                           for n, s in list(rgb_specs.items()) + list(relation_specs.items())))
+        need_bottom = bool(st.get("use_orbbec", True))
         not_ready = (len(enc) < obs_h or
                      (need_bottom and len(frames_orbbec0) < obs_h) or
                      (st["use_usb0"] and len(frames_usb0) < obs_h) or
@@ -668,6 +750,10 @@ def _infer(snap, config) -> List[CommandStep]:
             camera = "top" if source.endswith("_top") else "bottom"
             stream = 0 if "dec1" in source else 1
             context[name] = relation_by_camera[camera][stream]
+
+        for name, (camera, extractor) in st.get("pair_extractors", {}).items():
+            pair = extractor(sparse_by_camera[camera])
+            context[name] = pair.unsqueeze(0).repeat(n_samples, 1, 1, 1, 1)
 
         if st.get("need_lidar"):
             pts = np.array([[p["x"], p["y"]] for p in lidar[-1].get("points", [])], np.float32)

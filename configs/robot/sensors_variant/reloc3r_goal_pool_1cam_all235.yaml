@@ -1,0 +1,43 @@
+# @package _global_
+# Bottom/orbbec0-only ReLoc3R goal-pair conditioning over all 235 combined
+# 4F + 5F episodes.  The top/usb0 camera is intentionally excluded.
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_pair_bottom:
+    encoder: reloc3r_goal_pair
+    source: reloc3r_bottom
+    file: ${hydra:runtime.cwd}/dataset/front_dock_4f_5f_combined/front_dock_4f_5f_combined_reloc3r_bottom.h5
+    mode: goal_pool_pair
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 1024
+    dec_dim: 768
+    decoder_chunk: 256
+    # The launch command points this at a shared memfd populated once from the
+    # 146-GB bottom-camera VDS. All DDP ranks/workers map the same RAM pages.
+    cache_mmap: null
+    goal_pool_file: ${goal_pool_file}
+    goal_source: reloc3r_orbbec_0
+    cache_goal_in_ram: true
+    goal_pool_group: paired_goal
+    goal_pool_filter:
+      split: [all]
+    goal_sampling: random
+    goal_variant_weights: ${goal_variant_weights}
+    goal_pool_match:
+      episode_field: source_dataset
+      goal_field: dataset
+      cross_probability: ${cross_goal_prob}
+      cross_map:
+        after_0328: front_dock_5f_2cam
+        front_dock_5f_2cam: after_0328
+    dropout_prob: 0.0

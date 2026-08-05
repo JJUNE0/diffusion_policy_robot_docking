@@ -176,3 +176,55 @@ class Reloc3rRelationFeatures:
         out1 = list(dec1)[-1].float()
         out2 = list(dec2)[-1].float()
         return out1.half().float(), out2.half().float()
+
+
+class Reloc3rGoalPairFeatures:
+    """Build live [T,2,196,1024] pairs matching the fp16 training caches.
+
+    ReLoc3R itself is owned by the condition module's singleton service.  This
+    extractor therefore shares one frozen model with both policy/EMA decoders
+    instead of allocating a second ViT-L model per camera.
+    """
+
+    def __init__(
+        self, goal_bgr, checkpoint="siyan824/reloc3r-224", device="cuda:0",
+        size=224, n_patch=196, feat_dim=1024,
+    ):
+        from cleandiffuser.nn_condition.reloc3r_goal_pair import (
+            get_frozen_reloc3r_decoder,
+        )
+
+        self.device = torch.device(device)
+        self.size = int(size)
+        self.n_patch = int(n_patch)
+        self.feat_dim = int(feat_dim)
+        self.service = get_frozen_reloc3r_decoder(checkpoint, self.device)
+
+        goal_tensor, goal_shape = _array_to_view(goal_bgr, size=self.size)
+        goal_images = goal_tensor.unsqueeze(0).to(self.device)
+        goal_shapes = torch.from_numpy(goal_shape).unsqueeze(0).to(self.device)
+        self.goal_feat = self.service.encode_images(goal_images, goal_shapes)
+        self._validate(self.goal_feat, "goal")
+        logger.info(
+            "Reloc3r goal-pair feature extractor ready (device=%s, checkpoint=%s)",
+            self.device, checkpoint,
+        )
+
+    def _validate(self, features, label):
+        expected = (self.n_patch, self.feat_dim)
+        if features.dim() != 3 or tuple(features.shape[1:]) != expected:
+            raise ValueError(
+                f"ReLoc3R {label} features expected [N,{self.n_patch},"
+                f"{self.feat_dim}], got {tuple(features.shape)}")
+
+    @torch.no_grad()
+    def __call__(self, cur_bgr_frames):
+        if not cur_bgr_frames:
+            raise ValueError("Reloc3r goal-pair features need a current frame.")
+        views = [_array_to_view(frame, size=self.size) for frame in cur_bgr_frames]
+        images = torch.stack([view[0] for view in views]).to(self.device)
+        shapes = torch.from_numpy(np.stack([view[1] for view in views])).to(self.device)
+        current = self.service.encode_images(images, shapes)
+        self._validate(current, "current")
+        goal = self.goal_feat.expand(len(cur_bgr_frames), -1, -1)
+        return torch.stack((current, goal), dim=1)

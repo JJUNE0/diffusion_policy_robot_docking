@@ -215,18 +215,122 @@ class Reloc3rImageEncoder(DinoImageEncoder):
 
 @register_encoder("reloc3r_relation")
 class Reloc3rRelationEncoder(DinoImageEncoder):
-    """Cross-attended Reloc3r decoder patch tokens -> Perceiver latents.
-
-    The live plugin supplies the last normalized decoder-layer tokens for both
-    streams (current attending to goal and goal attending to current). They
-    have the same temporal/patch layout as cached image features, but Reloc3r's
-    decoder width is 768 rather than its encoder width of 1024.
+    """Reloc3r decoder's cross-attended patch tokens (POST cross-attention,
+    PRE pose-head pooling) -> Perceiver latents. Unlike Reloc3rImageEncoder
+    (raw ViT-L *encoder* patch features, independently encoded per frame),
+    these tokens have already cross-attended into the goal frame's (or the
+    current frame's) stream inside Reloc3r's own decoder (arxiv 2412.08376;
+    see Reloc3rRelpose._decoder, reloc3r/reloc3r/reloc3r_relpose.py). obs:
+    [B, Tv, 196, 768] (dec_embed_dim=768, precomputed by
+    scripts/precompute_reloc3r_dec_features.py). Serves BOTH the dec1
+    ("goal-aware history": current frame's stream after attending into goal)
+    and dec2 ("current-aware goal": the same stream rotation/geometry already
+    collapse to a point estimate, kept here at full patch resolution) sensor
+    entries -- two independently-weighted instances of this SAME class,
+    differentiated purely by which `source`/`file` the YAML sensor entry
+    points at; no dec1-vs-dec2-specific logic lives in Python. Kept as its
+    own registry name (not reusing `reloc3r_image`) so this backbone-vs-
+    relational distinction is a one-word config change.
     """
 
     def __init__(self, spec, d_model, nhead):
         spec = dict(spec)
         spec.setdefault("feat_dim", 768)
         super().__init__(spec, d_model, nhead)
+
+
+@register_encoder("reloc3r_goal_pair")
+class Reloc3rGoalPairEncoder(BaseModalityEncoder):
+    """Random goal-pool pair -> exact frozen ReLoc3R decoder -> policy tokens.
+
+    Input is [B,T,2,196,1024], where pair axis 0 is a cached history-frame
+    ViT-L encoder feature and axis 1 is the sampled goal's encoder feature.
+    The frozen 12-layer ReLoc3R decoder produces its two 768-D relational
+    streams online; only the projections, Perceiver resamplers and embeddings
+    below are trainable/saved with the diffusion policy.
+    """
+
+    def __init__(self, spec, d_model, nhead):
+        super().__init__(spec, d_model, nhead)
+        self.horizon = int(spec["horizon"])
+        self.n_patch = int(spec.get("n_patch", 196))
+        self.feat_dim = int(spec.get("feat_dim", 1024))
+        self.dec_dim = int(spec.get("dec_dim", 768))
+        self.num_latents = int(spec.get("num_latents", 16))
+        self.checkpoint = str(spec.get("reloc3r_checkpoint", "siyan824/reloc3r-224"))
+        self.decoder_chunk = int(spec.get("decoder_chunk", 4))
+        if self.decoder_chunk < 1:
+            raise ValueError(f"[{self.name}] decoder_chunk must be >=1")
+
+        self.proj1 = nn.Linear(self.dec_dim, d_model)
+        self.proj2 = nn.Linear(self.dec_dim, d_model)
+        self.resampler1 = PerceiverResampler(
+            d_model, num_latents=self.num_latents, nhead=nhead)
+        self.resampler2 = PerceiverResampler(
+            d_model, num_latents=self.num_latents, nhead=nhead)
+        self.time_emb1 = nn.Parameter(torch.randn(self.horizon, d_model) * 0.02)
+        self.time_emb2 = nn.Parameter(torch.randn(self.horizon, d_model) * 0.02)
+        self.slot_emb1 = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
+        self.slot_emb2 = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
+        self.stream_emb = nn.Parameter(torch.randn(2, d_model) * 0.02)
+        self.n_tokens = 2 * self.horizon * self.num_latents
+
+    def encode(self, obs):
+        pair, valid_mask = _unpack(obs)
+        # Keep the multi-GiB pair tensor compact under H100 BF16 autocast.
+        # In FP32 mode retain the previous exact behavior.
+        pair = pair.to(torch.get_autocast_dtype("cuda")) if (
+            pair.is_cuda and torch.is_autocast_enabled("cuda")
+        ) else pair.float()
+        if pair.dim() != 5:
+            raise ValueError(
+                f"[{self.name}] expected [B,T,2,P,D], got {tuple(pair.shape)}")
+        b, t, two, n_patch, feat_dim = pair.shape
+        if (t, two, n_patch, feat_dim) != (
+            self.horizon, 2, self.n_patch, self.feat_dim
+        ):
+            raise ValueError(
+                f"[{self.name}] expected [B,{self.horizon},2,{self.n_patch},"
+                f"{self.feat_dim}], got {tuple(pair.shape)}"
+            )
+
+        from cleandiffuser.nn_condition.reloc3r_goal_pair import (
+            get_frozen_reloc3r_decoder,
+        )
+        service = get_frozen_reloc3r_decoder(self.checkpoint, pair.device)
+        current = pair[:, :, 0].reshape(b * t, n_patch, feat_dim)
+        goal = pair[:, :, 1].reshape(b * t, n_patch, feat_dim)
+        dec1, dec2 = service.decode(current, goal, self.decoder_chunk)
+
+        lat1 = self.resampler1(self.proj1(dec1)).view(
+            b, t, self.num_latents, self.d_model)
+        lat2 = self.resampler2(self.proj2(dec2)).view(
+            b, t, self.num_latents, self.d_model)
+        lat1 = (
+            lat1
+            + self.time_emb1.view(1, t, 1, self.d_model)
+            + self.slot_emb1.view(1, 1, self.num_latents, self.d_model)
+            + self.stream_emb[0].view(1, 1, 1, self.d_model)
+        )
+        lat2 = (
+            lat2
+            + self.time_emb2.view(1, t, 1, self.d_model)
+            + self.slot_emb2.view(1, 1, self.num_latents, self.d_model)
+            + self.stream_emb[1].view(1, 1, 1, self.d_model)
+        )
+        if valid_mask is not None:
+            token_valid = valid_mask.unsqueeze(-1).expand(
+                b, t, self.num_latents).reshape(b, t * self.num_latents)
+            self._token_valid_mask = torch.cat([token_valid, token_valid], dim=1)
+        else:
+            self._token_valid_mask = None
+        return torch.cat(
+            [
+                lat1.reshape(b, t * self.num_latents, self.d_model),
+                lat2.reshape(b, t * self.num_latents, self.d_model),
+            ],
+            dim=1,
+        )
 
 
 @register_encoder("goal_image")

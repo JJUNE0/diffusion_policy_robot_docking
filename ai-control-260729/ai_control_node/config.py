@@ -34,8 +34,10 @@ class AIControlConfig(BasePluginConfig):
     #   ★자동감지 불가(두 백본이 파라미터명 동일) — 체크포인트 학습과 반드시 일치시켜야 함.
     #   틀리면 같은 가중치라도 완전히 다른(급가속/이상) 출력. (없으면 rectified_flow로 빠지던 버그 수정)
     demo_video: str = "video2"                # 구버전 호환용 단일 카메라 스트림
-    demo_video1: str = "video1"               # usb0 카메라 스트림
-    demo_video2: str = "video2"               # orbbec0 카메라 스트림
+    # auto=체크포인트 sensors에서 감지. 명시값은 체크포인트와 다르면 시작 시 실패한다.
+    demo_camera_mode: str = "auto"             # "auto" | "orbbec" | "orbbec_usb"
+    demo_video1: str = "video1"               # usb0 카메라 스트림 (2-camera 전용)
+    demo_video2: str = "video2"               # orbbec0 카메라 스트림 (항상 필요)
     demo_agg: str = "medoid"                  # 샘플 집계: "medoid" | "mean"
     demo_nsamples: int = 8                    # 트레젝토리 샘플 수 (느리면 4)
     demo_steps: int = 20                      # denoising 스텝 (50~100 = 느리지만 고품질)

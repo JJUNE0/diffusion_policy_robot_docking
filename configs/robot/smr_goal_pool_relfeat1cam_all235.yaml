@@ -1,0 +1,72 @@
+# Scratch training on all 235 combined 4F + 5F episodes with the single
+# deployment camera (image_bottom/orbbec0).
+defaults:
+  - sensors_variant: reloc3r_goal_pool_1cam_all235
+  - _self_
+
+experiment_name: r_goal_pool_1cam_all235_color01_scratch
+seed: 0
+device: cuda:0
+train_data_path: ${hydra:runtime.cwd}/dataset/front_dock_4f_5f_combined/front_dock_4f_5f_combined.h5
+
+# Keep the existing symmetric cross-floor goal augmentation.
+cross_goal_prob: 0.10
+goal_pool_file: ${hydra:runtime.cwd}/dataset/goal_pool/goal_pool_reloc3r_with_colored.h5
+
+# Variant weights are category probabilities because they sum to one.
+# Rows are sampled uniformly only after selecting a category, so the nine
+# canonical goals imported from images/_colored have exactly 1% probability.
+goal_variant_weights:
+  original: 0.495
+  qr_removed: 0.495
+  color_changed: 0.01
+
+horizon: 60
+obs_horizon: 60
+
+# Two H100 ranks process 512 samples each (global batch 1024).  This keeps the
+# one-camera activation footprint close to the previous 2cam x 256 run while
+# using the freed memory for throughput.  Worker microbatches stay small enough
+# for the container's 2-GiB /dev/shm; completed batches live in ordinary RAM.
+batch_size: 512
+num_workers: 32
+loader_microbatch_size: 2
+prefetch_factor: 2
+pin_memory: false
+amp_dtype: bf16
+
+state_dim: 2
+velocity_dim: 2
+use_modular_fusion: false
+use_token_sequence_fusion: true
+action_norm: minmax
+
+diffusion_backbone: ddpm
+d_model: 384
+n_heads: 6
+depth: 12
+dropout: 0.1
+condition_num_layers: 4
+
+ema_rate: 0.999
+num_epochs: 20
+diffusion_gradient_steps: null
+# Linear scaling from the validated global-batch-512 setting.
+learning_rate: 2e-4
+weight_decay: 1e-5
+log_interval: 10
+save_interval: 1000
+resume_path: null
+init_from: null
+
+use_ema: false
+solver: ode_dpmsolver++_2M
+w_cfg: 1
+inference_sampling_steps: 30
+num_samples: 1
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: outputs/

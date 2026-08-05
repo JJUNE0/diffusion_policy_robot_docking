@@ -111,6 +111,7 @@ class ModularDockingDataset(Dataset):
         self.reliable_key = reliable_key
         self.action_norm = action_norm
         self._goal_pool_groups = {}
+        self._goal_ram_cache = {}
 
         # Aux precision head is on iff any sensor declares `head: aux_pose`. Then
         # the dataset must emit dock-pose targets (from the ICP labels in the h5).
@@ -153,12 +154,55 @@ class ModularDockingDataset(Dataset):
                         f"external files must be row-aligned with the main h5.")
                 if spec.get("mode") == "goal_pool_pair":
                     self._register_goal_pool_group(name, spec, files)
+                    if spec.get("cache_goal_in_ram", False):
+                        goal_ds = files[spec["goal_pool_file"]][spec["goal_source"]]
+                        print(
+                            f"[ModularDockingDataset] caching goal features for "
+                            f"'{name}' ({goal_ds.shape}, {goal_ds.dtype}, "
+                            f"{goal_ds.nbytes / 1e9:.1f} GB) into RAM ...",
+                            flush=True,
+                        )
+                        self._goal_ram_cache[name] = goal_ds[:]
+                        print(
+                            f"[ModularDockingDataset] goal features for "
+                            f"'{name}' cached.",
+                            flush=True,
+                        )
                 if spec.get("normalize") == "zscore":
                     col = self._select_channels(sf[spec["source"]][:], spec).astype(np.float32)
                     mean = col.reshape(-1, col.shape[-1]).mean(axis=0)
                     std = np.clip(col.reshape(-1, col.shape[-1]).std(axis=0), 1e-6, None)
                     self.norm_stats[name] = (mean.astype(np.float32), std.astype(np.float32))
-                if spec.get("cache_in_ram", False):
+                cache_mmap = spec.get("cache_mmap")
+                if cache_mmap and spec.get("cache_in_ram", False):
+                    raise ValueError(
+                        f"sensor '{name}' cannot set both cache_mmap and cache_in_ram"
+                    )
+                if cache_mmap:
+                    ds = sf[spec["source"]]
+                    cache_mmap = os.path.expanduser(str(cache_mmap))
+                    expected_bytes = int(ds.nbytes)
+                    actual_bytes = os.path.getsize(cache_mmap)
+                    if actual_bytes != expected_bytes:
+                        raise ValueError(
+                            f"sensor '{name}': cache_mmap={cache_mmap} has "
+                            f"{actual_bytes} bytes, expected {expected_bytes} for "
+                            f"{ds.shape} {ds.dtype}"
+                        )
+                    print(
+                        f"[ModularDockingDataset] mapping shared RAM cache for "
+                        f"'{name}' ({ds.shape}, {ds.dtype}, "
+                        f"{expected_bytes / 1e9:.1f} GB) from {cache_mmap}",
+                        flush=True,
+                    )
+                    self._ram_cache[name] = np.memmap(
+                        cache_mmap,
+                        mode="r",
+                        dtype=ds.dtype,
+                        shape=ds.shape,
+                        order="C",
+                    )
+                elif spec.get("cache_in_ram", False):
                     # One-time BULK sequential read straight into RAM, so every
                     # later __getitem__ indexes a plain numpy array instead of
                     # re-reading this row from the network mount. Random
@@ -547,8 +591,14 @@ class ModularDockingDataset(Dataset):
                         )
                     sampled_goal_rows[group] = int(candidates[choice])
                 sampled_row = sampled_goal_rows[group]
-                goal_root = roots[spec["goal_pool_file"]]
-                goal = np.asarray(goal_root[spec["goal_source"]][sampled_row])
+                goal_cache = self._goal_ram_cache.get(name)
+                if goal_cache is None:
+                    goal_root = roots[spec["goal_pool_file"]]
+                    goal = np.asarray(
+                        goal_root[spec["goal_source"]][sampled_row]
+                    )
+                else:
+                    goal = np.asarray(goal_cache[sampled_row])
                 goal_history = np.broadcast_to(goal, history.shape)
                 pair = np.stack([history, goal_history], axis=1)
                 # Source/history and compiled goal features are float16. Keep

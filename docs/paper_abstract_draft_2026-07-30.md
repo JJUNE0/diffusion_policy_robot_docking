@@ -12,9 +12,9 @@
 
 ## 초록
 
-자율이동로봇의 정밀 도킹은 목표 부근에 도달하는 것을 넘어, 충전 단자가 결합될 수 있도록 센티미터 단위의 위치 오차와 수 도 이내의 자세 오차로 로봇을 정렬해야 하는 last-centimeter navigation 문제이다. 기존의 학습 기반 접근은 충분한 양의 다환경 데이터나 명시적 위치 추정에 의존하거나, 학습에 사용된 도킹 스테이션의 외형과 배경을 암기할 위험이 있다. 본 연구는 단일 RGB 카메라, wheel-velocity history 및 한 장의 goal image만으로 미래 속도 궤적을 생성하는 goal-conditioned diffusion policy를 제안한다. 제안 모델 `r_relfeat_only`는 일반 RGB appearance branch나 ReLoc3R의 최종 pose 출력을 사용하지 않고, frozen ReLoc3R의 양방향 decoder가 생성한 goal-relative relational token을 유일한 시각 조건으로 사용한다. 두 방향의 관계 토큰은 Perceiver resampler와 self-attention fusion을 거쳐 Diffusion Transformer의 조건으로 제공되며, 정책은 매 제어 주기마다 2초 길이의 선속도·각속도 궤적을 다시 계획한다.
+자율이동로봇의 정밀 도킹은 목표 부근에 도달하는 것을 넘어, 충전 단자가 결합될 수 있도록 센티미터 단위의 위치 오차와 수 도 이내의 자세 오차로 로봇을 정렬해야 하는 last-centimeter navigation 문제이다. 기존의 학습 기반 접근은 충분한 양의 다환경 데이터나 명시적 위치 추정에 의존하거나, 학습에 사용된 도킹 스테이션의 외형과 배경을 암기할 위험이 있다. 본 연구는 단일 RGB 카메라, wheel-velocity history 및 한 장의 goal image만으로 미래 속도 궤적을 생성하는 goal-conditioned diffusion policy를 제안한다. 제안 모델 `something`는 일반 RGB appearance branch나 ReLoc3R의 최종 pose 출력을 사용하지 않고, frozen ReLoc3R의 양방향 decoder가 생성한 goal-relative relational token을 유일한 시각 조건으로 사용한다. 두 방향의 관계 토큰은 Perceiver resampler와 self-attention fusion을 거쳐 Diffusion Transformer의 조건으로 제공되며, 정책은 매 제어 주기마다 2초 길이의 선속도·각속도 궤적을 다시 계획한다.
 
-정책 학습에는 하나의 수집 환경에서 얻은 145개의 실제 성공 시연만 사용하였다. 데이터는 30 Hz 기준 225,465 frame, 총 7,515.5초, 즉 약 2.09시간에 해당하며, 정책은 20 epoch, 16,940 gradient update로 학습되었다. 실행 시 LiDAR, depth, SLAM, 사전 지도, 명시적 goal-pose label 및 별도의 고전 제어기를 사용하지 않는다. 학습 분포와 동일한 도크에 대한 기존 실로봇 시험에서는 20/20 도킹 성공을 기록하였다. 더 나아가 학습에 포함되지 않은 도킹 스테이션, 처음 보는 배경과 새로운 종류의 도킹 스테이션의 조합, 그리고 데이터셋에 전혀 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 폐루프 도킹 성공이 관찰되었다. 현장 시험에서 최종 위치 오차는 센티미터급, heading 오차는 5° 이내로 유지되었다. 새 OOD 조건의 반복 횟수와 오차 분포는 아직 정량화 중이지만, 이 결과는 정책이 특정 도크의 외형을 단순히 암기하기보다 goal image와 현재 관측 사이의 상대적 시각 관계를 제어 신호로 변환하고 있음을 보여준다. 특히 범용 시각 관계 표현을 이용하면 약 2시간의 task-specific 실제 시연만으로도 도크 인스턴스와 배경을 넘어서는 정밀 도킹 정책을 학습할 수 있다는 가능성을 제시한다.
+정책 학습에는 하나의 수집 환경에서 얻은 145개의 실제 성공 시연만 사용하였다. 데이터는 30 Hz 기준 225,465 frame, 약 2시간에 해당하며, 정책은 20 epoch, 16,940 gradient update로 학습되었다. 실행 시 LiDAR, depth, SLAM, 사전 지도, 명시적 goal-pose label 및 별도의 고전 제어기를 사용하지 않는다. 학습 분포와 동일한 도크에 대한 기존 실로봇 시험에서는 20/20 도킹 성공을 기록하였다. 더 나아가 학습에 포함되지 않은 도킹 스테이션, 처음 보는 배경과 새로운 종류의 도킹 스테이션의 조합, 그리고 데이터셋에 전혀 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 폐루프 도킹 성공이 관찰되었다. 현장 시험에서 최종 위치 오차는 센티미터급, heading 오차는 5° 이내로 유지되었다. 새 OOD 조건의 반복 횟수와 오차 분포는 아직 정량화 중이지만, 이 결과는 정책이 특정 도크의 외형을 단순히 암기하기보다 goal image와 현재 관측 사이의 상대적 시각 관계를 제어 신호로 변환하고 있음을 보여준다. 특히 범용 시각 관계 표현을 이용하면 약 2시간의 task-specific 실제 시연만으로도 도크 인스턴스와 배경을 넘어서는 정밀 도킹 정책을 학습할 수 있다는 가능성을 제시한다.
 
 **RA-L Index Terms:** Vision-Based Navigation, Robot Docking, Imitation Learning, Diffusion Policy, Visual Generalization, Sensor-Based Control
 
@@ -30,14 +30,14 @@
 
 이를 위해 목표 상태에서 촬영한 한 장의 영상을 task specification으로 사용한다. 그러나 goal image를 독립적인 appearance embedding으로 처리하는 것만으로는 작은 횡방향 오차와 heading 오차를 안정적으로 표현하기 어렵다. 본 연구는 ReLoc3R [4]가 두 영상의 상대 pose를 추정하기 직전에 형성하는 양방향 decoder token에 주목한다. 이 token은 current image가 goal image를 참조한 표현과 goal image가 current image를 참조한 표현을 모두 포함하므로, 특정 도크의 의미적 identity보다 두 관측 사이의 상대적인 correspondence와 관점 변화를 표현할 가능성이 있다.
 
-제안 모델 `r_relfeat_only`는 이 관계 표현을 정책의 유일한 시각 입력으로 사용한다. 즉, 별도의 DINO appearance feature, LiDAR, depth 또는 ReLoc3R final-pose vector를 사용하지 않는다. frozen ReLoc3R가 생성한 dense relational token과 wheel history를 학습 가능한 condition fusion network로 결합하고, cross-attention Diffusion Transformer가 미래 선속도와 각속도 sequence를 생성한다. 이 구성은 범용 relative-geometry prior를 task-specific한 도킹 행동으로 변환하면서, 적은 실제 시연만으로 학습할 수 있도록 설계되었다.
+제안 모델 `something`는 이 관계 표현을 정책의 유일한 시각 입력으로 사용한다. 즉, 별도의 DINO appearance feature, LiDAR, depth 또는 ReLoc3R final-pose vector를 사용하지 않는다. frozen ReLoc3R가 생성한 dense relational token과 wheel history를 학습 가능한 condition fusion network로 결합하고, cross-attention Diffusion Transformer가 미래 선속도와 각속도 sequence를 생성한다. 이 구성은 범용 relative-geometry prior를 task-specific한 도킹 행동으로 변환하면서, 적은 실제 시연만으로 학습할 수 있도록 설계되었다.
 
-실로봇 시험에서 나타난 가장 중요한 결과는 학습 도크에 대한 성공 자체가 아니라 학습 분포 밖으로의 전이다. `r_relfeat_only`는 수집에 사용한 도크뿐 아니라 (i) 학습하지 않은 도킹 스테이션, (ii) 처음 보는 배경에 놓인 새로운 종류의 도킹 스테이션, (iii) 데이터셋에 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 도킹 행동을 완수하였다. 이는 정책이 “이 물체가 학습 도크인가?”를 분류하는 대신 “현재 영상이 주어진 goal 영상과 같은 상대 관측이 되려면 어떻게 움직여야 하는가?”를 학습했다는 해석과 일치한다.
+실로봇 시험에서 나타난 가장 중요한 결과는 학습 도크에 대한 성공 자체가 아니라 학습 분포 밖으로의 전이다. `something`는 수집에 사용한 도크뿐 아니라 (i) 학습하지 않은 도킹 스테이션, (ii) 처음 보는 배경에 놓인 새로운 종류의 도킹 스테이션, (iii) 데이터셋에 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 도킹 행동을 완수하였다. 이는 정책이 “이 물체가 학습 도크인가?”를 분류하는 대신 “현재 영상이 주어진 goal 영상과 같은 상대 관측이 되려면 어떻게 움직여야 하는가?”를 학습했다는 해석과 일치한다.
 
 본 연구의 기여는 다음과 같다.
 
 1. 단일 RGB 카메라와 wheel history만을 사용하는 map- and range-sensor-free last-centimeter docking을 goal-conditioned offline imitation learning 문제로 정식화한다.
-2. ReLoc3R의 final pose가 아니라 pose head 이전의 양방향 relational token을 직접 사용하는 `r_relfeat_only` 조건 구조를 제안한다.
+2. ReLoc3R의 final pose가 아니라 pose head 이전의 양방향 relational token을 직접 사용하는 `something` 조건 구조를 제안한다.
 3. 145개, 225,465 frame, 약 2.09시간의 task-specific 실제 시연만으로 정책을 학습하고, 동일 도크에서 20/20의 실로봇 성공을 보인다.
 4. 미관측 도크, 미관측 배경과 도크의 동시 변화, 그리고 비도크 일반 물체를 포함한 goal image까지 성공적으로 추종하는 정성적 cross-instance·cross-environment·cross-category 전이를 보인다.
 5. 이러한 전이를 유지하면서 센티미터급 최종 위치 오차와 5° 이내 heading 오차의 정밀 도킹 가능성을 실로봇에서 확인한다.

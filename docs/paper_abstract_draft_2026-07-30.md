@@ -12,9 +12,11 @@
 
 ## 초록
 
-자율이동로봇의 정밀 도킹은 목표 부근에 도달하는 것을 넘어, 충전 단자가 결합될 수 있도록 센티미터 단위의 위치 오차와 수 도 이내의 자세 오차로 로봇을 정렬해야 하는 last-centimeter navigation 문제이다. 기존의 학습 기반 접근은 충분한 양의 다환경 데이터나 명시적 위치 추정에 의존하거나, 학습에 사용된 도킹 스테이션의 외형과 배경을 암기할 위험이 있다. 본 연구는 단일 RGB 카메라, wheel-velocity history 및 한 장의 goal image만으로 미래 속도 궤적을 생성하는 goal-conditioned diffusion policy를 제안한다. 제안 모델 `something`는 일반 RGB appearance branch나 ReLoc3R의 최종 pose 출력을 사용하지 않고, frozen ReLoc3R의 양방향 decoder가 생성한 goal-relative relational token을 유일한 시각 조건으로 사용한다. 두 방향의 관계 토큰은 Perceiver resampler와 self-attention fusion을 거쳐 Diffusion Transformer의 조건으로 제공되며, 정책은 매 제어 주기마다 2초 길이의 선속도·각속도 궤적을 다시 계획한다.
+자율이동로봇의 정밀 도킹은 목표 부근에 도달하는 것을 넘어, 충전 단자가 결합될 수 있도록 센티미터 단위의 위치 오차와 수 도 이내의 자세 오차로 로봇을 정렬해야 하는 last-centimeter navigation 문제이다. 기존의 학습 기반 접근은 충분한 양의 다환경 데이터나 명시적 위치 추정에 의존하거나, 학습에 사용된 도킹 스테이션의 외형과 배경을 암기할 위험이 있다. 본 연구의 핵심 기여는 특정 visual-localization backbone 자체가 아니라, 범용 관계 표현을 소량의 실제 데이터로 정밀 폐루프 제어에 전이하는 **Relational Token Docking Policy (RTDP)**이다. 내부 실험명 **r_relfeat_only**인 RTDP는 단일 RGB 카메라, wheel-velocity history 및 한 장의 goal image로부터 미래 속도 궤적을 생성한다.
 
-정책 학습에는 하나의 수집 환경에서 얻은 145개의 실제 성공 시연만 사용하였다. 데이터는 30 Hz 기준 225,465 frame, 약 2시간에 해당하며, 정책은 20 epoch, 16,940 gradient update로 학습되었다. 실행 시 LiDAR, depth, SLAM, 사전 지도, 명시적 goal-pose label 및 별도의 고전 제어기를 사용하지 않는다. 학습 분포와 동일한 도크에 대한 기존 실로봇 시험에서는 20/20 도킹 성공을 기록하였다. 더 나아가 학습에 포함되지 않은 도킹 스테이션, 처음 보는 배경과 새로운 종류의 도킹 스테이션의 조합, 그리고 데이터셋에 전혀 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 폐루프 도킹 성공이 관찰되었다. 현장 시험에서 최종 위치 오차는 센티미터급, heading 오차는 5° 이내로 유지되었다. 새 OOD 조건의 반복 횟수와 오차 분포는 아직 정량화 중이지만, 이 결과는 정책이 특정 도크의 외형을 단순히 암기하기보다 goal image와 현재 관측 사이의 상대적 시각 관계를 제어 신호로 변환하고 있음을 보여준다. 특히 범용 시각 관계 표현을 이용하면 약 2시간의 task-specific 실제 시연만으로도 도크 인스턴스와 배경을 넘어서는 정밀 도킹 정책을 학습할 수 있다는 가능성을 제시한다.
+도킹 상태가 단일 영상의 절대 appearance보다 current–goal 사이의 상대 관점으로 정의된다는 점에 착안하여, 두 영상을 함께 처리하고 양방향 관계 token을 제공하는 ReLoc3R를 frozen feature backbone으로 선택하였다. 그러나 ReLoc3R의 localization용 pose head와 final pose 출력은 사용하지 않는다. pose head는 dense relation을 하나의 전역 rotation과 translation으로 축약하여 localization에는 적합하지만, 정밀 제어에 유용한 국소 correspondence, 가려짐 및 ambiguity를 제거할 수 있기 때문이다. RTDP는 pose head 이전의 dense token을 우리가 설계한 Perceiver resampler, temporal–multimodal self-attention fusion 및 cross-attention Diffusion Transformer에 연결한다. 따라서 ReLoc3R는 교체 가능한 관계 특징 공급자이고, 어떤 정보를 보존하고 압축하여 wheel history와 결합하고 행동 궤적으로 변환할지를 학습하는 RTDP가 제안 방법이다.
+
+정책 학습에는 하나의 수집 환경에서 얻은 145개의 실제 성공 시연만 사용하였다. 데이터는 30 Hz 기준 225,465 frame, 약 2시간에 해당하며, 정책은 20 epoch, 16,940 gradient update로 학습되었다. 실행 시 LiDAR, depth, SLAM, 사전 지도, 명시적 goal-pose label 및 별도의 고전 제어기를 사용하지 않는다. 학습 분포와 동일한 도크에 대한 기존 실로봇 시험에서는 20/20 도킹 성공을 기록하였다. 더 나아가 학습에 포함되지 않은 도킹 스테이션, 처음 보는 배경과 새로운 종류의 도킹 스테이션의 조합, 그리고 데이터셋에 전혀 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 폐루프 도킹 성공이 관찰되었다. 현장 시험에서 최종 위치 오차는 센티미터급, heading 오차는 5° 이내로 유지되었다. 새 OOD 조건의 반복 횟수와 오차 분포는 아직 정량화 중이지만, 이 결과는 RTDP가 특정 도크의 외형을 단순히 암기하기보다 goal image와 현재 관측 사이의 상대적 시각 관계를 제어 신호로 변환하고 있음을 보여준다.
 
 **RA-L Index Terms:** Vision-Based Navigation, Robot Docking, Imitation Learning, Diffusion Policy, Visual Generalization, Sensor-Based Control
 
@@ -28,19 +30,23 @@
 
 > 하나의 환경에서 수집한 약 2시간의 실제 시연만으로 학습한 정책이, 학습하지 않은 도킹 스테이션과 배경에서도 센티미터급 정밀 도킹을 수행할 수 있는가?
 
-이를 위해 목표 상태에서 촬영한 한 장의 영상을 task specification으로 사용한다. 그러나 goal image를 독립적인 appearance embedding으로 처리하는 것만으로는 작은 횡방향 오차와 heading 오차를 안정적으로 표현하기 어렵다. 본 연구는 ReLoc3R [4]가 두 영상의 상대 pose를 추정하기 직전에 형성하는 양방향 decoder token에 주목한다. 이 token은 current image가 goal image를 참조한 표현과 goal image가 current image를 참조한 표현을 모두 포함하므로, 특정 도크의 의미적 identity보다 두 관측 사이의 상대적인 correspondence와 관점 변화를 표현할 가능성이 있다.
+이 질문에 답하기 위해 먼저 결정해야 할 것은 backbone의 이름이 아니라 도킹에 적합한 표현의 형태이다. 단일 영상 appearance embedding은 무엇이 보이는지를 잘 표현하지만, 도킹 제어에 필요한 것은 현재 관측이 목표 관측에 대해 얼마나 이동·회전되어 있는가이다. 따라서 RTDP는 current와 goal을 독립적으로 부호화한 뒤 단순 비교하는 구조보다, 두 영상을 입력 단계부터 함께 처리하는 pairwise relational representation을 선택한다.
 
-제안 모델 `something`는 이 관계 표현을 정책의 유일한 시각 입력으로 사용한다. 즉, 별도의 DINO appearance feature, LiDAR, depth 또는 ReLoc3R final-pose vector를 사용하지 않는다. frozen ReLoc3R가 생성한 dense relational token과 wheel history를 학습 가능한 condition fusion network로 결합하고, cross-attention Diffusion Transformer가 미래 선속도와 각속도 sequence를 생성한다. 이 구성은 범용 relative-geometry prior를 task-specific한 도킹 행동으로 변환하면서, 적은 실제 시연만으로 학습할 수 있도록 설계되었다.
+본 구현에서는 이러한 설계 조건을 만족하는 frozen backbone으로 ReLoc3R [4]를 사용한다. 선택 이유는 ReLoc3R의 이름이나 최종 pose 정확도 자체가 아니라, current가 goal을 참조한 token과 goal이 current를 참조한 token을 공간 해상도를 유지한 채 동시에 제공하기 때문이다. ReLoc3R는 RTDP 안의 사전학습된 feature extractor일 뿐이며, 본 연구는 ReLoc3R를 개선하거나 그 localization 성능을 기여로 주장하지 않는다.
 
-실로봇 시험에서 나타난 가장 중요한 결과는 학습 도크에 대한 성공 자체가 아니라 학습 분포 밖으로의 전이다. `something`는 수집에 사용한 도크뿐 아니라 (i) 학습하지 않은 도킹 스테이션, (ii) 처음 보는 배경에 놓인 새로운 종류의 도킹 스테이션, (iii) 데이터셋에 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 도킹 행동을 완수하였다. 이는 정책이 “이 물체가 학습 도크인가?”를 분류하는 대신 “현재 영상이 주어진 goal 영상과 같은 상대 관측이 되려면 어떻게 움직여야 하는가?”를 학습했다는 해석과 일치한다.
+더 중요한 설계는 ReLoc3R를 **어디까지 사용하는가**이다. RTDP는 원래 pose head 직전에서 backbone을 절단하고 final rotation·translation 출력은 사용하지 않는다. pose head는 dense decoder grid를 하나의 전역 pose로 축약하도록 학습되어 localization에는 적합하지만, 정밀 행동 생성에는 다음과 같은 병목이 될 수 있다. 첫째, global pooling은 도크 모서리, 접촉부, 가려짐과 같은 국소 관계 정보를 제거한다. 둘째, 하나의 pose point estimate는 correspondence의 모호성과 신뢰도를 숨긴다. 셋째, camera-pose regression과 wheel-velocity trajectory generation은 서로 다른 목적 함수이다. 넷째, pose 좌표계·scale·camera-to-body calibration 오차가 controller 입력으로 직접 전파될 수 있다. RTDP는 이 병목 앞의 양방향 token을 보존하고, task-learned resampler와 fusion network가 도킹 행동에 필요한 정보를 직접 선택하도록 한다.
+
+그 이후가 본 연구가 개발한 제어 정책이다. RTDP는 양방향 dense token을 고정 길이 latent로 학습 압축하고, wheel 및 시간 history와 token 수준에서 융합하며, Diffusion Transformer로 2초 길이의 속도 궤적을 생성하고 최신 관측으로 반복 재계획한다. 별도의 DINO appearance branch, LiDAR, depth 또는 final-pose vector는 사용하지 않는다.
+
+실로봇 시험에서 나타난 가장 중요한 결과는 학습 도크에 대한 성공 자체가 아니라 학습 분포 밖으로의 전이다. RTDP는 수집에 사용한 도크뿐 아니라 (i) 학습하지 않은 도킹 스테이션, (ii) 처음 보는 배경에 놓인 새로운 종류의 도킹 스테이션, (iii) 데이터셋에 존재하지 않는 일반 물체를 포함한 goal image에 대해서도 도킹 행동을 완수하였다. 이는 RTDP가 이 물체가 학습 도크인가를 분류하는 대신 현재 영상이 주어진 goal 영상과 같은 상대 관측이 되려면 어떻게 움직여야 하는가를 학습했다는 해석과 일치한다.
 
 본 연구의 기여는 다음과 같다.
 
 1. 단일 RGB 카메라와 wheel history만을 사용하는 map- and range-sensor-free last-centimeter docking을 goal-conditioned offline imitation learning 문제로 정식화한다.
-2. ReLoc3R의 final pose가 아니라 pose head 이전의 양방향 relational token을 직접 사용하는 `something` 조건 구조를 제안한다.
-3. 145개, 225,465 frame, 약 2.09시간의 task-specific 실제 시연만으로 정책을 학습하고, 동일 도크에서 20/20의 실로봇 성공을 보인다.
-4. 미관측 도크, 미관측 배경과 도크의 동시 변화, 그리고 비도크 일반 물체를 포함한 goal image까지 성공적으로 추종하는 정성적 cross-instance·cross-environment·cross-category 전이를 보인다.
-5. 이러한 전이를 유지하면서 센티미터급 최종 위치 오차와 5° 이내 heading 오차의 정밀 도킹 가능성을 실로봇에서 확인한다.
+2. localization용 final pose를 제어 입력으로 사용하는 대신, pre-head 양방향 dense token을 보존하여 학습 압축하고 wheel·시간 정보와 융합한 뒤 행동 sequence로 변환하는 **RTDP 제어 아키텍처**를 제안한다.
+3. 범용 pairwise backbone을 frozen feature supplier로 제한하고, pose-head의 정보 병목과 localization–control objective mismatch를 피하는 task-specific pre-head interface를 설계한다.
+4. 145개, 225,465 frame, 약 2.09시간의 task-specific 실제 시연만으로 RTDP를 학습하여 동일 도크에서 20/20의 실로봇 성공과 센티미터급·5° 이내 종단 정밀도를 보인다.
+5. 미관측 도크, 미관측 배경과 도크의 동시 변화, 그리고 비도크 일반 물체를 포함한 goal image까지 성공적으로 추종하는 정성적 cross-instance·cross-environment·cross-category 전이를 보인다.
 
 ## 2. Related Work
 
@@ -54,11 +60,13 @@ AnyImageNav [2]는 goal image를 geometric query로 취급하고 dense correspon
 
 Diffusion Policy [3]는 행동 정책을 conditional denoising process로 표현하여 multimodal action distribution과 시간적으로 일관된 action sequence를 모델링한다. Receding-horizon execution과 결합하면 정책이 최신 관측으로 반복 재계획할 수 있다. 본 연구에서 diffusion은 여러 가능한 접근 및 복구 궤적을 평균 행동으로 붕괴시키지 않기 위한 action generator이며, 일반화의 직접적인 원천은 아니다. 새로운 도크에 대한 전이를 결정하는 핵심은 diffusion model에 어떤 goal-relative representation을 조건으로 제공하는가이다.
 
-### 2.3 Relative Visual Geometry and Transfer
+### 2.3 Pairwise Visual Representation as a Policy Component
 
-ReLoc3R [4]는 약 8백만 개의 posed image pair로 사전학습되어 새로운 scene으로 일반화되는 relative camera-pose regression을 목표로 한다. ReLoc3R의 final pose head는 decoder token을 하나의 rotation과 translation으로 축약하지만, 이 과정에서 정책에 유용할 수 있는 국소 correspondence, 공간 구조 및 ambiguity가 제거될 수 있다. 본 연구는 final pose를 외부 localization 결과로 사용하지 않고, 양방향 decoder의 pre-head token을 그대로 downstream policy에 전달한다.
+ReLoc3R [4]는 약 8백만 개의 posed image pair로 사전학습된 relative camera-pose regression model이다. 본 연구는 ReLoc3R의 새 변형을 제안하지 않으며, 그 final-pose 성능을 연구 기여로 사용하지도 않는다. RTDP에서 ReLoc3R는 current–goal pair를 함께 처리하고 공간적으로 조밀한 양방향 token을 제공하는 frozen backbone의 한 구현이다. 같은 인터페이스를 제공하는 다른 pairwise backbone으로 교체할 수 있다는 점에서, 제안 방법과 backbone은 구분된다.
 
-따라서 본 연구의 “약 2시간 데이터”는 ReLoc3R를 처음부터 학습한 총 데이터량이 아니라 **도킹 행동을 학습하는 데 사용한 task-specific robot demonstration의 양**을 의미한다. 광범위한 사전학습으로 획득한 시각 관계 prior를 고정하고, 소량의 실제 로봇 데이터로 그 표현을 정밀 제어 행동에 연결한다는 점이 데이터 효율의 핵심이다.
+기존 localization pipeline은 decoder token을 pose head에 통과시켜 하나의 rotation과 translation으로 완결한다. 반면 RTDP는 localization 결과를 소비하는 controller가 아니라, pre-head representation을 task-specific하게 다시 읽는 policy이다. 학습 가능한 Perceiver query가 국소 관계를 선택하고, fusion Transformer가 시간·wheel·양방향 visual token의 상호작용을 형성하며, action DiT가 이를 폐루프 velocity trajectory로 변환한다. 즉, 기여는 pretrained token의 존재가 아니라 **pose로 축약되기 전의 표현을 정밀 제어용 정보 인터페이스로 재설계한 것**에 있다.
+
+따라서 본 연구의 약 2시간 데이터는 backbone을 처음부터 학습한 총 데이터량이 아니라 **RTDP의 도킹 행동을 학습하는 데 사용한 task-specific robot demonstration의 양**을 의미한다. 사전학습 관계 표현을 고정한 채 소량의 실제 로봇 데이터로 압축·융합·행동 생성을 학습한다는 점이 데이터 효율의 핵심이다.
 
 ## 3. Method
 
@@ -73,16 +81,36 @@ A_t=[a_t,\ldots,a_{t+59}]\in\mathbb{R}^{60\times2},
 
 관측은 30 Hz로 수집된 60-frame wheel-velocity history와 동일한 약 2초 구간에서 stride 12로 선택한 다섯 장의 RGB frame으로 구성된다. 학습 중에는 각 성공 episode의 마지막 도킹 frame을 goal image로 사용한다. 정책은 조건부 행동 분포 \(p_\theta(A_t\mid O_t,G)\)를 학습하고, 실행 중에는 새로운 goal image로 목표를 교체할 수 있다.
 
-### 3.2 Bidirectional ReLoc3R Relational Tokens
+### 3.2 Backbone Selection and Pre-Head Control Interface
 
-각 history frame \(H_i\)와 goal image \(G\)는 weight-shared frozen ReLoc3R ViT encoder를 통과한다. 이어지는 양방향 decoder는 다음 두 stream을 생성한다.
+#### 3.2.1 Why a Pairwise Relational Backbone?
 
-- `dec1`: goal feature를 참조하여 갱신된 current-frame token
-- `dec2`: current-frame feature를 참조하여 갱신된 goal token
+도킹 제어의 목표 상태는 특정 물체 class가 아니라 goal image가 정의하는 상대 관측이다. 따라서 RTDP가 필요한 primitive는 single-image recognition feature보다 current–goal 사이의 correspondence와 viewpoint change이다. ReLoc3R는 두 영상을 jointly encode하고 양방향 cross-attention decoder stream을 제공하므로 이 표현 요건에 부합한다. 또한 대규모 image-pair 사전학습 결과를 frozen 상태로 사용할 수 있어, 145개 도킹 episode로 visual relation 자체를 처음부터 학습해야 하는 부담을 줄인다.
 
-각 stream의 출력은 프레임당 \(196\times768\) token이다. 두 stream은 같은 image pair를 반대 방향에서 표현한다. `dec1`은 현재 관측의 어느 부분이 goal과 대응하는지에 유리하고, `dec2`는 goal의 어느 부분이 현재 관측에서 관찰되는지 또는 가려지는지를 표현할 수 있다. 본 연구는 두 출력을 모두 사용하되, 한 stream만 사용하는 선택도 가능한 설계 변수로 남긴다.
+여기서 ReLoc3R를 선택한 논리는 **task–representation alignment**와 **data-efficient transfer**이며, ReLoc3R pose output을 정답으로 신뢰해서가 아니다. RTDP는 backbone의 pose loss로 재학습되지 않으며, downstream 행동 loss도 backbone으로 전달하지 않는다. 따라서 backbone은 관계 token을 공급하고, 실제 도킹 지식은 그 token을 읽어 행동으로 바꾸는 RTDP의 학습 모듈에 저장된다.
+
+#### 3.2.2 Why Stop Before the Original Pose Head?
+
+원래 ReLoc3R pose head는 양방향 decoder grid를 projection, convolution 및 global pooling으로 축약하여 camera rotation과 translation을 회귀한다. 이는 localization에는 타당하지만 RTDP가 원하는 control representation과는 다르다.
+
+- **Spatial bottleneck:** 196개 위치에 분산된 접촉부·모서리·바닥 경계와 같은 국소 단서를 하나의 pose로 압축한다.
+- **Uncertainty loss:** 여러 대응 후보나 부분 가림에서 나타나는 ambiguity가 하나의 point estimate 뒤에 숨는다.
+- **Objective mismatch:** camera-pose regression에 최적인 요약이 wheel-velocity sequence 생성에도 최적이라는 보장은 없다.
+- **Error coupling:** pose 좌표계, metric scale 및 camera-to-body calibration 오차가 명시적 controller 입력에 직접 결합될 수 있다.
+- **Control sufficiency:** 정책은 완전한 6-DoF pose를 복원할 필요 없이, 현재 관측을 goal 관측으로 이동시키는 데 필요한 행동 단서만 선택하면 된다.
+
+따라서 RTDP는 pose head를 성능이 낮다고 간주하여 제거한 것이 아니다. head가 해결하는 문제와 정책이 해결하는 문제가 다르기 때문에, 정보가 아직 조밀하게 남은 경계에서 interface를 형성한다. 이 선택을 통해 downstream policy가 localization용 hand-designed bottleneck을 거치지 않고 docking loss로 필요한 관계 정보를 직접 선택할 수 있다.
+
+각 history frame \(H_i\)와 goal image \(G\)는 weight-shared frozen encoder를 통과한다. 이어지는 양방향 decoder는 다음 두 stream을 생성한다.
+
+- **dec1:** goal feature를 참조하여 갱신된 current-frame token
+- **dec2:** current-frame feature를 참조하여 갱신된 goal token
+
+각 stream의 출력은 프레임당 \(196\times768\) token이다. 두 stream은 같은 image pair를 반대 방향에서 표현한다. RTDP는 두 출력을 모두 사용하여 current-side correction cue와 goal-side reference cue를 함께 보존한다. 한 stream만 사용하는 것은 backbone의 요구사항이 아니라 후속 directional ablation으로 검증할 RTDP의 설계 변수이다.
 
 ### 3.3 Perceiver Resampling and Condition Fusion
+
+pre-head token 이후의 projection, resampling, multimodal fusion 및 action generation은 모두 RTDP가 새로 구성한 policy head이다. 이 모듈들은 ReLoc3R의 원래 pose head를 재사용한 것이 아니며, localization objective가 아니라 docking action loss로 학습된다.
 
 각 decoder stream은 linear projection으로 768차원에서 384차원으로 변환된다. 이후 학습 가능한 16개의 latent query가 196개의 patch token을 cross-attend하는 Perceiver resampler를 적용한다.
 
@@ -173,27 +201,31 @@ A_t^\tau=\alpha_\tau A_t^0+\sigma_\tau\epsilon.
 
 이 결과는 일반적인 ImageNav의 meter-scale success radius보다 훨씬 엄격한 실제 단자 결합 수준의 목표를 다룬다는 점을 강조한다. 다만 “센티미터급”을 논문의 최종 정량 결과로 사용하려면 측정 장비와 기준 좌표계, 평균·중앙값·표준편차·최댓값 및 trial 수를 함께 보고해야 한다. 현재 문구는 관찰된 정밀도 범위를 나타내며, 아직 분포 통계가 확보되었다는 의미는 아니다.
 
-## 6. Why Does `r_relfeat_only` Generalize?
+## 6. Why Does RTDP Generalize?
 
-관찰된 일반화는 다음 네 요소가 결합된 결과로 해석할 수 있다.
+관찰된 일반화의 주체는 frozen backbone 단독이 아니다. backbone token만으로는 선속도·각속도를 출력할 수 없고, 도킹의 action horizon, 종단 감속, 각도 복구 또는 폐루프 correction도 알지 못한다. RTDP가 적은 시연으로 이러한 관계 표현을 **어떻게 선택·압축·융합하고 행동으로 변환했는가**가 결과의 핵심이다.
 
-### 6.1 Appearance Classification 대신 Goal-Relative Matching
+### 6.1 A Control-Oriented Pre-Head Interface
 
-고정 도크만 입력받는 정책은 도크 색상, QR pattern 또는 배경을 action과 직접 연결할 수 있다. 반면 `r_relfeat_only`는 매 trial마다 current–goal image pair를 함께 처리한다. 따라서 절대적인 물체 identity보다 두 영상의 상대적 관점과 correspondence가 행동을 결정한다. 새로운 물체를 goal로 제공했을 때도 행동이 형성된 것은 이 해석과 일치한다.
+RTDP는 pretrained model의 최종 답인 pose를 사용하는 대신, 답을 만들기 전의 양방향 dense representation을 제어 인터페이스로 사용한다. 이 때문에 국소 대응, 부분 가림 및 ambiguity를 downstream에 남겨 두고, docking loss가 실제 행동에 유효한 정보를 결정할 수 있다. 이는 off-the-shelf pose estimator와 controller를 직렬 연결한 구조가 아니라, pretrained representation과 task policy 사이의 새로운 연결 방식이다.
 
-### 6.2 Large-Scale Pretrained Relational Prior
+### 6.2 Goal-Relative Task Formulation
 
-ReLoc3R는 약 8백만 image pair에서 학습된 상대 시각 표현을 제공한다. 도킹 데이터가 약 2.09시간으로 작더라도, 정책은 다양한 scene과 viewpoint에 대한 관계 표현을 처음부터 학습할 필요가 없다. 도킹 시연은 이 범용 표현에서 정렬 행동에 필요한 부분을 선택하고 velocity command로 연결하는 역할을 한다.
+고정 도크만 입력받는 정책은 도크 색상, QR pattern 또는 배경을 action과 직접 연결할 수 있다. 반면 RTDP는 매 trial마다 current–goal image pair를 함께 처리한다. 따라서 절대적인 물체 identity보다 두 영상의 상대적 관점과 correspondence가 행동을 결정한다. 새로운 물체를 goal로 제공했을 때도 행동이 형성된 것은 이 해석과 일치한다.
 
-### 6.3 Dense Pre-Head Token의 정보 보존
+### 6.3 Learned Compression and Temporal–Multimodal Fusion
 
-final pose vector는 localization에 필요한 정보를 하나의 point estimate로 축약한다. 반면 pre-head `dec1+dec2` token은 국소 대응, 가려짐, 구조 및 추정 ambiguity를 더 풍부하게 유지한다. downstream policy가 이 정보 중 실제 도킹에 유용한 부분을 직접 선택할 수 있기 때문에, 새로운 도크에서도 final-pose head의 calibration에 덜 종속될 수 있다.
+RTDP의 Perceiver query는 프레임별 196개 patch를 단순 평균하지 않고 action loss에 유용한 16개 latent로 선택 압축한다. 이어지는 4-layer self-attention은 dec1, dec2, 다섯 시점의 변화 및 60-step wheel history를 공동으로 융합한다. 즉, RTDP는 pretrained feature를 그대로 사용하는 것이 아니라, 도킹에 맞는 고정 길이의 동적 condition representation을 학습한다.
 
-### 6.4 Closed-Loop Replanning
+### 6.4 Diffusion Trajectory Generation and Closed-Loop Correction
 
-정책은 한 번 예측한 궤적을 끝까지 open-loop로 실행하지 않는다. 최신 RGB와 wheel history로 계속 다시 계획하기 때문에 작은 translation 또는 heading 오차가 발생해도 이후 예측에서 보정할 수 있다. 센티미터급 정밀도는 relational representation뿐 아니라 이러한 반복적인 error-correction 과정의 결과이다.
+12-layer action DiT는 fused token에서 단일 steering command가 아니라 2초 길이의 일관된 velocity trajectory를 생성한다. 실행 중에는 최신 RGB와 wheel history로 반복 재계획하므로 작은 translation 또는 heading 오차를 이후 예측에서 보정할 수 있다. 센티미터급 정밀도는 관계 특징의 존재만이 아니라 RTDP가 학습한 trajectory generation과 반복 error correction의 결과이다.
 
-이 네 설명은 현재 결과와 일치하는 가설이며, 각각의 인과적 기여가 완전히 증명된 것은 아니다. DINO appearance, ReLoc3R final pose, `dec1` only, `dec2` only, `dec1+dec2` 및 goal-shuffle 조건을 동일한 데이터와 제어 설정에서 비교해야 한다.
+### 6.5 Pretraining as a Data-Efficient Starting Point
+
+frozen pairwise backbone은 다양한 scene과 viewpoint에 대한 유용한 초기 relation prior를 제공한다. 이 prior 덕분에 RTDP는 약 2.09시간의 도킹 데이터로 visual relation을 처음부터 학습할 필요가 없다. 그러나 어떤 token을 남기고, wheel과 어떻게 결합하며, 언제 감속·회전·정지할지는 RTDP가 task-specific demonstration에서 학습한다. 따라서 사전학습은 데이터 효율을 가능하게 하는 기반이고, 관찰된 정밀 도킹과 일반화를 구현한 시스템은 RTDP 전체이다.
+
+이 설명은 현재 결과와 일치하는 가설이며 각 요소의 인과적 기여는 controlled ablation으로 검증해야 한다. 특히 appearance-only, final-pose interface, dec1 only, dec2 only, no-goal 및 다른 pairwise backbone을 같은 RTDP control stack과 데이터 예산에서 비교하면 backbone 자체의 효과와 우리의 interface·policy 설계 효과를 분리할 수 있다.
 
 ## 7. Required Quantitative Generalization Protocol
 
@@ -235,9 +267,9 @@ final pose vector는 localization에 필요한 정보를 하나의 point estimat
 
 ## 9. Conclusion
 
-본 연구는 정밀 도킹 정책이 반드시 대규모 task-specific robot dataset이나 명시적 pose-control pipeline을 필요로 하는 것은 아니라는 가능성을 보여준다. `r_relfeat_only`는 145개, 약 2.09시간의 실제 도킹 시연으로 학습되었으며, 단일 RGB 카메라와 wheel history만을 사용해 학습 도크에서 20/20의 성공을 기록했다. 더 나아가 미관측 도킹 스테이션, 미관측 배경과 새로운 도크 종류의 조합, 그리고 데이터셋에 존재하지 않는 일반 물체를 포함한 goal image에서도 폐루프 도킹 성공이 관찰되었다. 성공한 실행은 센티미터급 위치 오차와 5° 이내 heading 오차를 유지하였다.
+본 연구는 정밀 도킹 정책이 반드시 대규모 task-specific robot dataset이나 명시적 pose-control pipeline을 필요로 하는 것은 아니라는 가능성을 보여준다. 제안한 RTDP의 구현체 **r_relfeat_only**는 145개, 약 2.09시간의 실제 도킹 시연으로 학습되었으며, 단일 RGB 카메라와 wheel history만을 사용해 학습 도크에서 20/20의 성공을 기록했다. 더 나아가 미관측 도킹 스테이션, 미관측 배경과 새로운 도크 종류의 조합, 그리고 데이터셋에 존재하지 않는 일반 물체를 포함한 goal image에서도 폐루프 도킹 성공이 관찰되었다. 성공한 실행은 센티미터급 위치 오차와 5° 이내 heading 오차를 유지하였다.
 
-이 결과는 도크의 절대 appearance를 암기하는 대신 current–goal 관계를 표현하는 pretrained relational token을 행동 생성의 조건으로 사용하는 것이 데이터 효율과 실제 환경 일반화를 동시에 얻는 유효한 방향임을 시사한다. 후속 정량 시험이 현재의 정성 결과를 확인한다면, 본 방법은 새로운 충전 스테이션마다 데이터를 다시 수집하거나 전용 pose controller를 설계하지 않고도 goal image 한 장으로 정밀 도킹 목표를 재지정할 수 있는 실용적 접근이 될 수 있다.
+이 결과에서 pretrained backbone은 current–goal 관계의 초기 표현을 제공했을 뿐이다. 정밀 도킹을 가능하게 한 제안 방법은 localization head 이전의 정보를 보존하고, 이를 행동 중심으로 압축하며, 양방향 시각 관계와 wheel·시간 정보를 융합하고, diffusion trajectory와 폐루프 재계획으로 변환하는 RTDP 전체이다. 후속 정량 시험이 현재의 정성 결과를 확인한다면, RTDP는 새로운 충전 스테이션마다 데이터를 다시 수집하거나 전용 pose controller를 설계하지 않고도 goal image 한 장으로 정밀 도킹 목표를 재지정할 수 있는 실용적 접근이 될 수 있다.
 
 ## 제출 전 반드시 갱신할 항목
 

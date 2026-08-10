@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.egg
+.venv_dp_image_goal/
 
 # Data & Checkpoints
 *.h5

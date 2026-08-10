@@ -1,0 +1,82 @@
+# Official Diffusion Policy appearance baseline for image-goal docking.
+# Policy source: real-stanford/diffusion_policy @ 5ba07ac6661db573af695b419a7947ecb704690f
+name: dp_image_goal
+seed: 42
+
+data:
+  h5_path: dataset/front_dock_4f_5f_combined/front_dock_4f_5f_combined.h5
+  image_key: image_bottom
+  image_cache_mmap: null
+  goal_pool_db: dataset/goal_pool/goal_pool.sqlite3
+  goal_camera: orbbec-0
+  horizon: 60
+  obs_horizon: 60
+  vision_horizon: 5
+  vision_stride: 12
+  action_key: encoder
+  goal_splits: [all]
+  goal_variant_weights:
+    original: 0.495
+    qr_removed: 0.495
+    color_changed: 0.01
+  cross_goal_prob: 0.10
+  cross_goal_map:
+    after_0328: front_dock_5f_2cam
+    front_dock_5f_2cam: after_0328
+
+policy:
+  # One official observation step containing five named history images, one
+  # goal image, and the complete 60x2 wheel history. This avoids recomputing the
+  # static goal five times while preserving exactly the RTDP input window.
+  n_obs_steps: 1
+  n_action_steps: 60
+  image_resize: [96, 128]
+  image_crop: [84, 112]
+  resnet: resnet18
+  share_rgb_model: true
+  imagenet_norm: true
+  use_group_norm: true
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+  num_train_timesteps: 100
+  num_inference_steps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: squaredcos_cap_v2
+  variance_type: fixed_small
+  prediction_type: epsilon
+
+training:
+  device: cuda
+  epochs: 20
+  # Measured with the full 350.4M policy: batch 512 peaks at 17.34 GiB,
+  # leaving ample room on each 80-GiB H100 even while paused baselines retain
+  # their CUDA contexts. Two ranks give the same global batch 1024 as RTDP.
+  per_gpu_batch_size: 512
+  # One prefetched 512-sample uint8 image batch is ~0.71 GiB per rank; one
+  # worker/rank keeps both ranks below the container's 2-GiB /dev/shm cap.
+  num_workers: 1
+  prefetch_factor: 1
+  pin_memory: true
+  persistent_workers: true
+  amp_dtype: bf16
+  learning_rate: 0.0001
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+  fused_adamw: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  use_ema: true
+  ema_update_after_step: 0
+  ema_inv_gamma: 1.0
+  ema_power: 0.75
+  ema_min_value: 0.0
+  ema_max_value: 0.9999
+  log_every_steps: 10
+  checkpoint_every_epochs: 1
+  milestone_every_epochs: 5
+  resume: true

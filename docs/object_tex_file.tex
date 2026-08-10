@@ -1,0 +1,425 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%2345678901234567890123456789012345678901234567890123456789012345678901234567890
+%        1         2         3         4         5         6         7         8
+
+\documentclass[letterpaper, 10 pt, conference]{IEEEtran}  % Comment this line out if you need a4paper
+
+%\documentclass[a4paper, 10pt, conference]{ieeeconf}      % Use this line for a4 paper
+
+\IEEEoverridecommandlockouts                              % This command is only needed if 
+                                                          % you want to use the \thanks command
+
+%\overrideIEEEmargins                                      % Needed to meet printer requirements.
+
+%In case you encounter the following error:
+%Error 1010 The PDF file may be corrupt (unable to open PDF file) OR
+%Error 1000 An error occurred while parsing a contents stream. Unable to analyze the PDF file.
+%This is a known problem with pdfLaTeX conversion filter. The file cannot be opened with acrobat reader
+%Please use one of the alternatives below to circumvent this error by uncommenting one or the other
+%\pdfobjcompresslevel=0
+%\pdfminorversion=4
+
+% See the \addtolength command later in the file to balance the column lengths
+% on the last page of the document
+
+%The following packages can be found on http:\\www.ctan.org
+\usepackage{graphics} % for pdf, bitmapped graphics files
+\usepackage{epsfig} % for postscript graphics files
+\usepackage{mathptmx} % assumes new font selection scheme installed
+\usepackage{times} % assumes new font selection scheme installed
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+
+\title{\LARGE \bf
+VoDOCK: Generalizable Last-Centimeter Robot Docking for Unseen Visual Goals
+}
+
+
+\author{Albert Author$^{1}$ and Bernard D. Researcher$^{2}$% <-this % stops a space
+\thanks{*This work was not supported by any organization}% <-this % stops a space
+\thanks{$^{1}$Albert Author is with Faculty of Electrical Engineering, Mathematics and Computer Science,
+        University of Twente, 7500 AE Enschede, The Netherlands
+        {\tt\small albert.author@papercept.net}}%
+\thanks{$^{2}$Bernard D. Researcheris with the Department of Electrical Engineering, Wright State University,
+        Dayton, OH 45435, USA
+        {\tt\small b.d.researcher@ieee.org}}%
+}
+
+
+\begin{document}
+
+
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{empty}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{abstract}
+
+Autonomous mobile robot docking requires precise terminal alignment, yet conventional systems often depend on explicit localization, additional range sensors, maps, or dock-specific controllers. We propose Vision-only DOCKing Policy (VoDOCK), a goal-conditioned policy that maps the visual relationship between the current observation and a goal image directly to closed-loop velocity commands. VoDOCK retains bidirectional relational tokens from a pretrained vision model before its pose head and uses them, together with wheel-velocity history, to condition a diffusion policy without explicit relative-pose estimation. The policy is trained from 145 successful real-world demonstrations collected in a single environment (2.09~h) and requires only monocular RGB observations and wheel-velocity history at deployment. In real-robot experiments, VoDOCK achieved 20/20 successful trials on the training dock, xx/xx trials on unseen docks, and xx/xx trials on non-dock objects, demonstrating precise goal-conditioned control beyond the training target.
+
+
+
+\end{abstract}
+
+\begin{IEEEkeywords}
+Vision-Based Navigation, Robot Docking, Imitation Learning
+\end{IEEEkeywords}
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=\textwidth]{figures/vodock_architecture.png}
+\caption{Overview of VoDOCK. Five current observations are paired with a goal image by a frozen ReLoc3R backbone. Bidirectional pre-head relational tokens are resampled and fused with wheel-velocity history, and a conditional Diffusion Transformer predicts a 60-step velocity trajectory. Receding-horizon replanning closes the control loop.}
+\label{fig:vodock_architecture}
+\end{figure*}
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{INTRODUCTION}
+\IEEEPARstart{F}{or} an Autonomous Mobile Robot (AMR) to operate for extended periods without human intervention, it must not only navigate to a charging station but also autonomously complete the final alignment required for physical engagement with the charging terminal. This final stage differs fundamentally from conventional navigation in its precision requirements. Position errors of only a few centimeters or heading errors of a few degrees can prevent successful terminal engagement, and the robot must be able to recover from such errors through closed-loop feedback during the approach.
+
+Conventional precision docking systems often combine LiDAR or depth sensing, SLAM, prior maps, fiducial markers, explicit relative-pose estimation, and dock-specific controllers. Such modular pipelines can provide high accuracy in structured environments, but deployment to new docks or environments may require additional sensor calibration, map updates, or redesign of dock-specific control rules. Learning-based policies offer an alternative by directly learning the mapping of observations to actions. However, when trained with limited data, they may exploit visual shortcuts by associating a specific dock appearance or background with the desired behavior, rather than learning a reusable relationship between the current observation and the docking goal.
+
+This work asks whether a policy trained from only approximately two hours of real-world demonstrations collected in a single environment can perform centimeter-level precision docking while transferring to docking stations, backgrounds, and even visual targets that were never observed during training. Addressing this question requires choosing an appropriate representation for docking control rather than simply selecting a stronger visual backbone. A single-image appearance embedding can effectively encode what is visible in a scene, whereas docking fundamentally requires information about how the current observation differs from the desired goal observation in terms of relative translation and orientation. We therefore formulate docking around a pairwise relational representation in which the current and goal images are jointly processed, rather than independently encoded and subsequently compared.
+
+In our implementation, we use ReLoc3R [4] as a frozen visual backbone because it satisfies this representational requirement. In particular, it provides spatially resolved bidirectional relational tokens in which the current observation attends to the goal, and the goal attends to the current observation. ReLoc3R is used only as a pretrained feature extractor within VoDOCK; we neither modify ReLoc3R nor claim improvements in its localization performance.
+
+A central design choice is where to interface with the pretrained backbone. Rather than using its final rotation and translation estimates, VoDOCK truncates the network immediately before the pose head and retains the bidirectional dense relational tokens. Although collapsing the decoder features into a global pose estimate is appropriate for localization, this representation may be restrictive for precision control. Global aggregation can discard local geometric relationships around contact regions, edges, and partially occluded structures; a single pose estimate suppresses correspondence ambiguity and confidence information; and camera-pose regression and wheel-velocity trajectory generation optimize fundamentally different objectives. Moreover, errors in coordinate conventions, metric scale, or camera-to-body calibration can propagate directly into a controller when an explicit pose is used as input. Instead, VoDOCK allows a task-specific control network to directly select and transform relational information that is useful for docking.
+
+The retained bidirectional dense tokens are compressed into a fixed-length latent representation using a learnable resampling module and fused at the token level with wheel-velocity and temporal history. A Diffusion Transformer then predicts a 2s future wheel-velocity trajectory. During deployment, the policy repeatedly replans from the latest camera observation, yielding closed-loop control throughout the final approach. The complete system requires only a monocular RGB camera and wheel-velocity history, without LiDAR, depth sensing, SLAM, prior maps, fiducial markers, an explicit final-pose vector, or a separate appearance branch.
+
+VoDOCK is trained from 145 successful real-world docking demonstrations collected in a single environment, corresponding to approximately 2.09~h of task-specific data. In real-robot experiments, it completed 20/20 trials on the training dock, xx/xx trials on unseen docks, and xx/xx trials on non-dock objects. These results indicate that the policy uses the current--goal visual relationship rather than merely replaying a behavior associated with the training dock.
+
+The primary contribution of this work is VoDOCK, a goal-conditioned visual policy that transfers precise last-centimeter control to unseen docks and non-dock visual goals using only monocular RGB observations and wheel history, without explicit pose supervision.
+
+
+\section{Related work}
+
+\subsection{Goal-Conditioned Visual Navigation}
+Image-goal navigation extends a fixed policy,
+\begin{equation} \pi(A\mid O) \end{equation}
+to a goal-conditioned policy, 
+\begin{equation} \pi(A \mid O, G) \end{equation}
+by providing an image captured at the target location as the goal observation. NoMaD [1] unifies goal-conditioned navigation and goal-agnostic exploration within a single diffusion policy and demonstrates long-horizon navigation in previously unseen environments. However, conventional ImageNav benchmarks typically define success using meter-scale goal radii and do not directly evaluate the last-centimeter alignment required for physical engagement with a charging terminal.
+
+AnyImageNav [2] treats the goal image as a geometric query and recovers a 6-DoF goal pose through dense visual correspondences. It reports pose-recovery errors of 0.27 m/3.41° on Gibson and 0.21 m/1.23° on HM3D, substantially improving the precision of last-meter ImageNav. In contrast, our work does not address global exploration or explicit 6-DoF goal-pose recovery. Instead, we focus on the final approach regime, where the robot is already near the dock and must directly convert goal-relative visual relationships into velocity sequences that achieve alignment at the level required for physical terminal engagement.
+
+Aim My Robot (AMR)~\cite{meng2025aim} addresses precision local navigation to arbitrary nearby objects and combines multimodal perception with precise action prediction, trained primarily on large-scale photorealistic simulation data for sim-to-real transfer. Like VoDOCK, it targets centimeter-level positioning and evaluates generalization to unseen objects. However, AMR predicts object-relative navigation actions for general downstream tasks, whereas VoDOCK studies physical last-centimeter docking from a goal image and learns direct closed-loop velocity trajectories from a small set of real-world demonstrations without explicit goal-pose supervision.
+
+\subsection{Diffusion Policies for Closed-Loop Control}
+
+Diffusion Policy [3] formulates action generation as a conditional denoising process, enabling the modeling of multimodal action distributions and temporally coherent action sequences. When combined with receding-horizon execution, the policy can repeatedly replan from the latest observation and thereby operate in closed loop.
+
+In VoDOCK, diffusion serves as an action generator that prevents multiple plausible approach and recovery trajectories from collapsing into a single averaged behavior. We do not regard diffusion itself as the primary source of generalization. Rather, transfer to previously unseen docks depends critically on the goal-relative representation used to condition the diffusion model. Our focus is therefore on how relational visual information between the current and goal observations is exposed to the control policy.
+
+\subsection{Pairwise Visual Representation as a Policy Component}
+
+ReLoc3R [4] is a relative camera-pose regression model pretrained on approximately eight million posed image pairs. We do not propose a new variant of ReLoc3R, nor do we claim its final pose-estimation performance as a contribution of this work. Within VoDOCK, ReLoc3R is used as a frozen backbone that jointly processes the current and goal images and provides spatially dense bidirectional relational tokens. The proposed policy is therefore conceptually separated from the particular backbone implementation and can, in principle, be paired with other pretrained models that expose an equivalent pairwise relational interface.
+
+Conventional localization pipelines pass decoder features through a pose head and collapse them into a single rotation and translation estimate. VoDOCK instead operates before this final reduction. Rather than consuming the output of a localization module, the policy directly reads and adapts the pre-head representation for task-specific control. Learnable Perceiver queries select and compress local relational information, a fusion Transformer models interactions among temporal context, wheel-velocity history, and bidirectional visual tokens, and an action Diffusion Transformer converts the resulting representation into a closed-loop velocity trajectory. The key distinction is therefore not the availability of pretrained relational tokens themselves, but the use of the representation before it is compressed into an explicit pose as an information interface for precision control.
+
+Accordingly, the approximately two hours of data used in this study should not be interpreted as the total data required to train the visual backbone from scratch. Rather, it corresponds to the amount of task-specific real-robot demonstration data used to learn the docking behavior of VoDOCK. By keeping the pretrained relational representation fixed and learning only the task-specific compression, multimodal fusion, and action-generation modules from a limited number of real-robot demonstrations, VoDOCK leverages large-scale visual pretraining while maintaining a low task-specific data requirement.
+
+
+% English Overleaf-ready body for an IEEE RA-L manuscript.
+% Paste this block after the Related Work section.
+% Required packages:
+% \usepackage{amsmath,amssymb,booktabs,graphicx,array}
+% Bibliography key used below: dong2025reloc3r
+%
+% IMPORTANT BEFORE SUBMISSION:
+% 1) Replace every bold XX placeholder with the measured value.
+% 2) Fill the intentionally empty result-table cells.
+% 3) Report percentage points for absolute success-rate differences and %
+%    only for relative improvements.
+% 4) Remove these comments after all results have been verified.
+
+\section{Proposed Method}
+\label{sec:method}
+
+The proposed Vision-only DOCKing Policy (VoDOCK) is a closed-loop velocity policy that aligns the current observation with a desired terminal observation specified by a goal image. VoDOCK consists of four stages: (i) current--goal relational feature extraction, (ii) task-adaptive token resampling, (iii) fusion of visual tokens and wheel-velocity history, and (iv) diffusion-based action trajectory generation. The pretrained visual backbone remains frozen, while all modules for token projection, resampling, multimodal fusion, and action generation are trained using real-world docking demonstrations.
+
+\subsection{Problem Formulation}
+\label{subsec:problem_formulation}
+
+At time $t$, the policy observation $O_t$ comprises an RGB observation history $\mathcal{I}_t$ containing five images and a 60-step wheel-velocity history $W_t$:
+
+\begin{equation}
+    O_t=(\mathcal{I}_t,W_t),\qquad
+    \mathcal{I}_t=\{I_t^{(i)}\}_{i=1}^{5},\qquad
+    W_t=\{w_{t-j}\}_{j=0}^{59}
+\end{equation}
+
+All signals are recorded at 30~Hz. The five RGB observations are sampled with a stride of 12 over an approximately 2-s history window. A single goal image $G$, captured at the desired terminal configuration, specifies the docking target. Conditioned on $O_t$ and $G$, VoDOCK predicts a horizon of $H_a=60$ future linear and angular velocity commands:
+
+\begin{equation}
+A_t=[a_t,\ldots,a_{t+H_a-1}]\in {R}^{60\times2},
+\qquad a_t=(v_t,\omega_t)
+\end{equation}
+\begin{equation}
+A_t\sim p_\theta(A_t\mid O_t,G)
+\end{equation}
+
+During training, the final docked frame of each successful episode is used as $G$. The policy therefore learns to align the current observation with a goal observation rather than regress a fixed dock pose. At deployment, the policy can be retargeted by replacing only the goal image.
+
+\subsection{Pre-Head Relational Visual Representation}
+\label{subsec:relational_representation}
+
+Each history image $I_t^{(i)}$ and the goal image $G$ are jointly processed as an image pair by a frozen ReLoc3R backbone~\cite{dong2025reloc3r}. Its bidirectional cross-attention decoder produces two relational token streams: $Z_i^{c\leftarrow g}$, in which the current image attends to the goal image, and $Z_i^{g\leftarrow c}$, in which the goal image attends to the current image:
+
+\begin{equation}
+    \left(Z_i^{c\leftarrow g},Z_i^{g\leftarrow c}\right) =F_\phi\!\left(I_t^{(i)},G\right)Z_i^{c\leftarrow g},
+\end{equation}
+
+\begin{equation}
+    Z_i^{g\leftarrow c} \in {R}^{196\times768}
+\end{equation}
+
+where the backbone parameters $\phi$ remain fixed throughout policy training. The two streams encode the same image pair in opposite directions, thereby retaining both current-side correction cues and goal-side reference cues.
+
+VoDOCK discards the localization-specific pose head and does not use its final rotation or translation estimates. Although a global pose is appropriate for localization, the pose head compresses dense correspondences, local structures, partial occlusions, and correspondence ambiguity into a single point estimate. It can also propagate coordinate-frame, metric-scale, and camera-to-body calibration errors directly to a downstream controller. VoDOCK instead exposes the dense pre-head tokens as the policy interface and lets the docking action objective select the relational cues that are useful for control. This design does not modify ReLoc3R itself; it redesigns the interface between a pretrained relational representation and a task-specific control policy.
+
+\subsection{Task-Adaptive Token Resampling and Fusion}
+\label{subsec:token_fusion}
+
+A linear projection first maps each directional token stream from 768 to $d=384$ dimensions. A Perceiver resampler with 16 learnable latent queries then compresses the 196 spatial tokens of each frame into a fixed-length representation:
+
+
+\begin{equation}
+       \widetilde{Z}_i^{c\leftarrow g}
+    =\mathcal{R}_{Q_c}\!\left(P_c Z_i^{c\leftarrow g}\right),
+\end{equation}
+\begin{equation}
+    \widetilde{Z}_i^{g\leftarrow c}
+    =\mathcal{R}_{Q_g}\!\left(P_g Z_i^{g\leftarrow c}\right),
+    \qquad
+    \widetilde{Z}_i^{(\cdot)}\in\mathbb{R}^{16\times384}. 
+\end{equation}
+
+Unlike spatial average pooling, learned resampling allows different latent queries to select distinct local and relational cues according to the docking objective. The five observation times and two relation directions produce 160 visual tokens. These tokens are concatenated with 60 wheel-velocity tokens and jointly updated by a four-layer, six-head self-attention Transformer:
+
+\begin{equation}
+    C_t=\mathcal{F}_\psi
+    \left(
+    \left[
+    \{\widetilde{Z}_i^{c\leftarrow g}\}_{i=1}^{5};
+    \{\widetilde{Z}_i^{g\leftarrow c}\}_{i=1}^{5};
+    E_w(W_t)
+    \right]
+    \right)
+    \in\mathbb{R}^{220\times384}.
+\end{equation}
+
+
+where $E_w$ embeds the wheel-velocity history into the token space and $\mathcal{F}_\psi$ denotes the multimodal fusion network. The resulting condition $C_t$ is passed to the action denoiser as a token sequence without global pooling.
+
+\subsection{Goal-Conditioned Diffusion Action Policy}
+\label{subsec:diffusion_policy}
+
+VoDOCK models the conditional action distribution $p_\theta(A_t\mid O_t,G)$ using a diffusion model. During training, Gaussian noise is added to a clean action trajectory $A_t^0$ at diffusion step $k$:
+
+\begin{equation}
+A_t^k=\alpha_k A_t^0+\sigma_k\epsilon,
+\qquad
+\epsilon\sim\mathcal{N}(0,I).
+\end{equation}
+
+A 12-layer cross-attention Diffusion Transformer allows the noisy action tokens to attend to the condition sequence $C_t$. The network minimizes the noise-prediction objective
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{diff}}
+=
+\mathbb{E}_{A_t^0,k,\epsilon}
+\left[
+\left\|
+\epsilon-\epsilon_\theta(A_t^k,k,C_t)
+\right\|_2^2
+\right].
+\end{equation}
+
+The diffusion formulation represents multiple feasible approach and recovery behaviors as temporally coherent velocity trajectories rather than collapsing them into a single averaged action. All modules downstream of the frozen relational backbone---including the projections, resamplers, wheel encoder, fusion Transformer, and action denoiser---are optimized end-to-end.
+
+\subsection{Closed-Loop Execution}
+\label{subsec:closed_loop}
+
+For real-robot inference, we use exponential-moving-average weights and DPM-Solver++(2M) with 30 denoising steps to generate a 60-step action trajectory. VoDOCK repeatedly replans from the latest RGB observations and wheel-velocity history. It can therefore correct translation and heading errors in closed loop as the current--goal relation evolves, without relying on a single explicit pose estimate. Deployment requires neither LiDAR, depth, SLAM, a prior map, explicit goal-pose supervision, nor a separate classical controller.
+
+
+\section{Experimental Evaluation}
+\label{sec:experiments}
+
+The experiments address three questions: (i) whether VoDOCK can be trained from a small task-specific demonstration set, (ii) whether it achieves the precision and repeatability required for physical connector engagement, and (iii) whether it transfers to unseen docks, environments, and visual goals. All quantitative comparisons use the same initial-condition distribution and success criterion across VoDOCK and the baselines.
+
+\subsection{Dataset and Training Setup}
+\label{subsec:dataset_training}
+
+The training set contains 145 successful docking demonstrations collected by a human operator in a single environment using the mobile robot platform shown in Fig.~\ref{fig:robot_platform}. It contains 225,465 frames recorded at 30~Hz, corresponding to 7,515.5~s, or approximately 2.09~h, of real-world trajectories. Table~\ref{tab:training_setup_en} summarizes the dataset and training configuration.
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.55\columnwidth]{figures/robot.png}
+\caption{Mobile robot platform used for demonstration collection and real-world docking experiments.}
+\label{fig:robot_platform}
+\end{figure}
+
+\begin{table}[t]
+\caption{Task-Specific Dataset and Training Configuration}
+\label{tab:training_setup_en}
+\centering
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Item & Configuration \\
+\midrule
+Successful demonstrations & 145 \\
+Total frames & 225,465 \\
+Sampling frequency & 30~Hz \\
+Total demonstration time & 7,515.5~s (2.09~h) \\
+Episode duration & 51.83~s mean / 48.50~s median \\
+Training epochs & 20 \\
+Gradient updates & 16,940 \\
+Task-specific pose supervision & None \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Because frames sampled from a continuous trajectory are correlated, we report the number of episodes and total trajectory duration in addition to the raw frame count. The policy receives only a monocular RGB stream, wheel-velocity history, and a goal image; it does not use LiDAR, depth, SLAM, a prior map, or an explicit goal pose. The frozen ReLoc3R backbone was pretrained on an external image-pair corpus. Accordingly, the 2.09~h figure refers to the task-specific robot demonstrations used to transfer the relational representation to docking control, rather than the data used to pretrain the visual backbone.
+
+\subsection{Evaluation Protocol and Baselines}
+\label{subsec:evaluation_protocol}
+
+The real-robot evaluation comprises one seen dock and background, \textbf{XX} unseen dock instances, \textbf{XX} unseen environments, and \textbf{XX} generic objects that do not appear in the training set. Each condition is evaluated from a predefined set of distance and heading-offset bins over \textbf{XX} trials. A trial is considered successful when the robot stops without collision within the specified time limit and satisfies the terminal position and heading tolerances.
+
+We compare VoDOCK with an appearance-only goal-conditioned policy, a controller conditioned on the final ReLoc3R pose, a no-goal policy, and directional variants using only $Z^{c\leftarrow g}$ or $Z^{g\leftarrow c}$. All methods use the same demonstrations, action horizon, initial-condition distribution, and evaluation trials. We report docking success rate, terminal position and heading errors, completion time, and inference latency.
+
+\subsection{Real-Robot Docking Results}
+\label{subsec:robot_results}
+
+Table~\ref{tab:robot_results_en} summarizes the real-robot docking results. VoDOCK succeeds in all 20 trials performed with the training dock and background. Across the unseen evaluation conditions, VoDOCK achieves an average success rate of \textbf{XX\%} and outperforms the strongest baseline by at least \textbf{XX\%}. Its median terminal position and heading errors are \textbf{XX~cm} and \textbf{XX}$^\circ$, respectively.
+
+\begin{table}[t]
+\caption{Real-Robot Docking and Generalization Results}
+\label{tab:robot_results_en}
+\centering
+\scriptsize
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Evaluation condition & VoDOCK & Best baseline & Relative gain \\
+\midrule
+Seen dock and background & 100\% (20/20) & {} & {} \\
+Unseen dock instances & {} & {} & {} \\
+Unseen environments and dock types & {} & {} & {} \\
+Generic-object visual goals & {} & {} & {} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The gains on unseen dock instances indicate that the policy does not rely solely on the appearance of the training dock. The improvement under simultaneous changes in dock type and background further suggests that VoDOCK uses the current--goal relation as a reusable control signal. Performance on generic-object visual goals provides an additional stress test of goal conditioning beyond the dock category.
+
+\subsection{Ablation and Generalization Analysis}
+\label{subsec:ablation_analysis}
+
+Table~\ref{tab:ablation_en} isolates the contribution of the relational interface and the downstream policy components. The complete VoDOCK improves the mean OOD docking success rate by at least \textbf{XX\%} over the strongest ablated variant and reduces median terminal position error by \textbf{XX\%}.
+
+\begin{table}[t]
+\caption{Ablation Study on the Real-Robot Evaluation}
+\label{tab:ablation_en}
+\centering
+\scriptsize
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & Seen success & Mean OOD success & Position error \\
+\midrule
+Appearance-only policy & {} & {} & {} \\
+Final-pose interface & {} & {} & {} \\
+No-goal policy & {} & {} & {} \\
+Current-to-goal tokens only & {} & {} & {} \\
+Goal-to-current tokens only & {} & {} & {} \\
+VoDOCK (full) & {} & {} & {} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\textbf{Pre-head relational interface:}
+The comparison with the final-pose interface shows that preserving dense pre-head tokens improves docking success by \textbf{XX\%}. This result supports the hypothesis that local correspondences and ambiguity discarded by the localization head remain useful for control.
+
+\textbf{Bidirectional relation modeling:}
+Combining both directional token streams outperforms the strongest single-stream variant by \textbf{XX\%}, indicating that current-side correction cues and goal-side reference cues provide complementary information.
+
+\textbf{Goal conditioning:}
+VoDOCK exceeds the no-goal policy by \textbf{XX\%} under unseen conditions. This gap verifies that the policy responds to the specified goal image rather than replaying a dock-specific approach trajectory.
+
+\textbf{Closed-loop trajectory generation:}
+VoDOCK reduces terminal position and heading errors by \textbf{XX\%} and \textbf{XX\%}, respectively, relative to the strongest baseline. Replanning from updated current--goal relations enables the policy to correct residual alignment errors during the final approach.
+
+
+\section{Limitations}
+\label{sec:limitations}
+
+The task-specific training set contains only one robot platform, one camera configuration, and one data-collection environment. Although the evaluation covers \textbf{XX} unseen docks and \textbf{XX} unseen environments, performance under larger changes in camera height, intrinsics, robot kinematics, lighting, and connector geometry remains to be established.
+
+The reported 2.09~h data budget excludes the external image-pair corpus used to pretrain ReLoc3R. The result should therefore be interpreted as data-efficient transfer of a pretrained relational representation, not as learning the complete visual representation from two hours of robot data. Furthermore, the current evaluation is limited to \textbf{XX} trials per condition and \textbf{XX} random seeds. Broader trials and additional hardware platforms are required to characterize rare failure modes and statistical variability.
+
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This work presented VoDOCK, a goal-conditioned policy for last-centimeter robot docking. Rather than converting a current--goal image pair into an explicit relative pose, VoDOCK preserves bidirectional dense tokens before the localization head, compresses them into task-adaptive latent tokens, fuses them with wheel-velocity history, and generates closed-loop velocity trajectories using a diffusion Transformer.
+
+VoDOCK was trained from 145 successful demonstrations totaling approximately 2.09~h and requires only a monocular RGB stream, wheel-velocity history, and a goal image at deployment. It achieved 20/20 successful trials on the training dock and an average success rate of \textbf{XX\%} across unseen conditions, outperforming the strongest baseline by at least \textbf{XX\%}. These results demonstrate that a pretrained relational representation can be transferred to precise closed-loop control with a small task-specific robot dataset and can support retargetable docking from a single visual goal.
+
+
+\addtolength{\textheight}{-12cm}   % This command serves to balance the column lengths
+                                  % on the last page of the document manually. It shortens
+                                  % the textheight of the last page by a suitable amount.
+                                  % This command does not take effect until the next page
+                                  % so it should come on the page before the last. Make
+                                  % sure that you do not shorten the textheight too much.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{APPENDIX}
+
+Appendixes should appear before the acknowledgment.
+
+\section*{ACKNOWLEDGMENT}
+
+The preferred spelling of the word ÒacknowledgmentÓ in America is without an ÒeÓ after the ÒgÓ. Avoid the stilted expression, ÒOne of us (R. B. G.) thanks . . .Ó  Instead, try ÒR. B. G. thanksÓ. Put sponsor acknowledgments in the unnumbered footnote on the first page.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+References are important to the reader; therefore, each citation must be complete and correct. If at all possible, references should be commonly available publications.
+
+\begin{thebibliography}{99}
+
+\bibitem{c1} A. Sridhar, D. Shah, C. Glossop, and S. Levine, ``NoMaD: Goal Masked Diffusion Policies for Navigation and Exploration,'' in \emph{Proc. IEEE Int. Conf. Robot. Autom. (ICRA)}, 2024.
+
+\bibitem{c2} Y. Deng, S. Yuan, and Y. Fang, ``AnyImageNav: Any-View Geometry for Precise Last-Meter Image-Goal Navigation,'' arXiv:2604.05351, 2026.
+
+\bibitem{c3} C. Chi, Z. Xu, S. Feng, E. Cousineau, Y. Du, B. Burchfiel, R. Tedrake, and S. Song, ``Diffusion Policy: Visuomotor Policy Learning via Action Diffusion,'' in \emph{Proc. Robot Sci. Syst. (RSS)}, 2023.
+
+\bibitem{c4} S. Dong, S. Wang, S. Liu, L. Cai, Q. Fan, J. Kannala, and Y. Yang, ``ReLoc3R: Large-Scale Training of Relative Camera Pose Regression for Generalizable, Fast, and Accurate Visual Localization,'' in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp. 16739--16752, 2025.
+
+\bibitem{meng2025aim} X. Meng, X. Yang, S. Jung, F. Ramos, S. S. Jujjavarapu, S. Paul, and D. Fox, ``Aim My Robot: Precision Local Navigation to Any Object,'' in \emph{Proc. IEEE Int. Conf. Robot. Autom. (ICRA)}, 2025.
+
+\end{thebibliography}
+
+\end{document}

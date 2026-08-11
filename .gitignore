@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.egg
+.venv_dp_image_goal/
 
 # Data & Checkpoints
 *.h5
@@ -11,8 +12,11 @@ __pycache__/
 !dino/master_vector.pt
 episode*
 dataset/
-!dataset/*.py
-
+*.png
+*.JPG
+models
+third_party
+docs
 # Hydra outputs
 outputs/
 multirun/
@@ -34,7 +38,9 @@ results/
 
 # report
 *.pdf
+!docs/figures/vodock_train_inference_*.png
+!docs/figures/vodock_train_inference_*.pdf
 
-#server
-plugins/
+# external
 rc_server/
+reloc3r/

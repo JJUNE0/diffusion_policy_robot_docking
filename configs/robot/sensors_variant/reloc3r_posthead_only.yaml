@@ -1,0 +1,65 @@
+# @package _global_
+# CONTROLLED BASELINE for reloc3r_relfeat_only.yaml (`r_relfeat_only`).
+#
+# Same frozen ReLoc3R, same bidirectional dec1/dec2 streams, same everything
+# downstream -- the ONLY change is WHERE the stream is tapped:
+#
+#   r_relfeat_only    dec1/dec2 [196,768]  <-- BEFORE the pose head
+#   r_posthead_only   head feat [  1,1024] <-- AFTER  the pose head's
+#                                              AdaptiveAvgPool2d(1) + more_mlps
+#
+# ReLoc3R's PoseHead (reloc3r/reloc3r/pose_head.py) does, in order:
+#     proj 768->1024 (per patch)      [196,768] -> [196,1024]   lossless lift
+#     2x ResConvBlock (1x1 convs)     [1024,14,14] -> same      NO spatial mixing
+#     AdaptiveAvgPool2d(1)            [1024,14,14] -> [1024]    <-- 196 -> 1
+#     more_mlps (1024->1024, ReLU)    [1024]                    <-- THIS TAP
+#     fc_t/fc_rot + SVD               -> 4x4 pose               (see *_pose_only)
+# The 1x1 convs never mix patches, so the pool is the FIRST and ONLY step that
+# destroys spatial layout: "which part of the image corresponds to the goal"
+# collapses to "how much correspondence on average". That single step is the
+# variable this arm isolates.
+#
+# Token budget is held EXACTLY equal to r_relfeat_only: n_patch=1 still goes
+# through the same 16-latent Perceiver resampler, so
+#   wheel(60) + head1(5*16=80) + head2(80) = 220 condition tokens, same as the
+# relfeat arm. Only `vision_proj` differs in shape (1024->384 vs 768->384),
+# which is unavoidable and is exactly the structural difference under test.
+# num_latents/horizon/stride/dropout_prob/feature dtype are all unchanged.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_posthead_only experiment_name=r_posthead_only
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_head1:
+    encoder: reloc3r_relation
+    source: reloc3r_head1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 1024
+    dropout_prob: 0.0
+    cache_in_ram: true
+  reloc3r_head2:
+    encoder: reloc3r_relation
+    source: reloc3r_head2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 1024
+    dropout_prob: 0.0
+    cache_in_ram: true

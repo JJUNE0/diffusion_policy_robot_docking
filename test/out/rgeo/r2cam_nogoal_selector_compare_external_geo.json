@@ -1,0 +1,29 @@
+{
+ "first": {
+  "median_J": 0.0022856902682413674,
+  "median_yaw_deg": 2.144303560256958
+ },
+ "meanagg": {
+  "median_J": 0.0021917877398279937,
+  "median_yaw_deg": 2.163045644760132
+ },
+ "hand": {
+  "median_J": 0.0007465172959171954,
+  "median_yaw_deg": 0.991729736328125
+ },
+ "oracle": {
+  "median_J": 0.00033218237427493893,
+  "median_yaw_deg": 0.5966169834136963
+ },
+ "n_frames": 480,
+ "M": 16,
+ "corr_psi_theta": 0.893099111205405,
+ "ckpt": "checkpoint_step_60000.pt",
+ "policy_sensors": [
+  "wheel",
+  "rgb_history",
+  "rgb_history_top",
+  "lidar"
+ ],
+ "geometry_source": "external_cache_not_policy_input"
+}

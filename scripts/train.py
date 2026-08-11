@@ -10,14 +10,21 @@ sys.path.append(parent_dir)
 
 import hydra
 import torch
+import torch.distributed as dist
+from omegaconf import open_dict
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+# Avoid "/dev/shm ... Resource temporarily unavailable" from DataLoader workers:
+# use file_system sharing instead of the default file_descriptor strategy.
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 # Avoid "/dev/shm ... Resource temporarily unavailable" from DataLoader workers:
 # use file_system sharing instead of the default file_descriptor strategy.
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 from utils.setups import logger_setups, model_setups
-from dino.dino_detector import DinoBatchDetector
-from cleandiffuser.utils import loop_dataloader, set_seed
+from cleandiffuser.utils import loop_dataloader, threaded_prefetch, set_seed
+from scripts.plot_training import plot_from_jsonl
 
 
 def _resolve_resume_checkpoint(resume_path: str | None) -> str | None:
@@ -86,6 +93,7 @@ def _load_resume_state(
     return next_step
 
 
+<<<<<<< HEAD
 def _resolve_total_gradient_steps(args, dataset) -> int:
     """
     Decide how many gradient steps to train for.
@@ -122,11 +130,69 @@ def _resolve_total_gradient_steps(args, dataset) -> int:
 def main(args):
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+=======
+def _checkpoint_model_state(model):
+    """Return a DDP-prefix-free state dict compatible with existing runs."""
+    state = model.state_dict()
+    clean = {}
+    for key, value in state.items():
+        key = key.replace("diffusion.module.", "diffusion.", 1)
+        key = key.replace("condition.module.", "condition.", 1)
+        clean[key] = value
+    return clean
 
-    logger, save_path = logger_setups(args)
+
+def _init_distributed(args):
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False, 0, 0, torch.device(args.device if torch.cuda.is_available() else "cpu")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    with open_dict(args):
+        args.device = f"cuda:{local_rank}"
+    return True, rank, local_rank, torch.device(args.device)
+
+
+@hydra.main(config_path="../configs/robot", config_name="smr_rgeo", version_base=None)
+def main(args):
+    distributed, rank, local_rank, device = _init_distributed(args)
+    is_main = rank == 0
+    set_seed(int(args.seed) + rank)
+
+    if is_main:
+        logger, save_path = logger_setups(args)
+    else:
+        logger, save_path = None, None
+    if distributed:
+        shared = [save_path]
+        dist.broadcast_object_list(shared, src=0)
+        save_path = shared[0]
+>>>>>>> endgame
+
     dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion = model_setups(args)
 
+<<<<<<< HEAD
     total_gradient_steps = _resolve_total_gradient_steps(args, dataset)
+=======
+    print(f"Total Samples {len(dataset)}\n")
+
+    # Resolve total gradient steps. If `num_epochs` is set, derive it from the
+    # dataloader length (drop_last=True -> floor(len(dataset) / batch_size)) so
+    # that "N epochs" is honored regardless of dataset size. Otherwise fall back
+    # to the explicit `diffusion_gradient_steps`.
+    num_epochs = args.get("num_epochs", None)
+    steps_per_epoch = len(dataloader)
+    if num_epochs is not None:
+        total_gradient_steps = int(num_epochs) * steps_per_epoch
+        print(
+            f"num_epochs={num_epochs} x steps_per_epoch={steps_per_epoch} "
+            f"-> total_gradient_steps={total_gradient_steps}"
+        )
+    else:
+        total_gradient_steps = int(args.diffusion_gradient_steps)
+>>>>>>> endgame
 
     print("Start Training...")
     lr_schedulers = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -145,80 +211,158 @@ def main(args):
             lr_scheduler=lr_schedulers,
             device=device,
         )
+        # A resumed run may intentionally change batch_size. That changes
+        # steps_per_epoch and therefore the live cosine horizon. The checkpoint
+        # scheduler restores its old T_max, so adapt only that horizon while
+        # preserving optimizer state, current LR, and last_epoch.
+        saved_t_max = int(lr_schedulers.T_max)
+        if saved_t_max != total_gradient_steps:
+            lr_schedulers.T_max = total_gradient_steps
+            print(
+                f"Adjusted resumed scheduler T_max: {saved_t_max} -> "
+                f"{total_gradient_steps} (live batch/epoch plan)"
+            )
     else:
         n_gradient_step = 0
-        print("======================================================")
-        print("Starting training from scratch...")
-        print("======================================================")
+        # Warm-start (init_from): load WEIGHTS ONLY from a previous checkpoint
+        # into a fresh run (new run dir/config/optimizer/scheduler/step count).
+        # Unlike resume_path, the live config applies -> use this to continue
+        # training under a changed config.
+        # The EMA is re-seeded from the loaded weights: the source runs' EMA
+        # still carries most of its random init (ema_rate 0.9999 vs 4230 steps
+        # -> ~65% init, see memory ema-undertrained-4230-steps), so copying the
+        # trained weights is the only sane EMA start.
+        init_from = args.get("init_from", None)
+        if init_from:
+            ck = torch.load(init_from, map_location=device, weights_only=False)
+            src = ck["model_state_dict"]
+            # Same-name/different-shape params (e.g. TokenSequenceFusionCondition's
+            # `modality_emb`, sized by sensor count -- grows when new sensor
+            # branches are added) can't be loaded at all: strict=False only
+            # tolerates missing/unexpected KEYS, not shape mismatches on a key
+            # present in both, so load_state_dict would still raise. Drop them
+            # up front so they fall back to the live model's fresh init, same
+            # "leave new branches fresh" intent as the missing/unexpected
+            # handling below, just for same-name params instead of new-name ones.
+            tgt_sd = nn_diffusion.model.state_dict()
+            reshaped = [k for k in src if k in tgt_sd and src[k].shape != tgt_sd[k].shape]
+            for k in reshaped:
+                del src[k]
+            # Partial (graft) loading: when the live architecture ADDS sensor
+            # branches the source checkpoint never had, load every matching key
+            # and leave the new branches at their fresh init. strict load stays
+            # the default path so exact warm-starts still catch real mismatches
+            # loudly.
+            missing, unexpected = nn_diffusion.model.load_state_dict(src, strict=False)
+            nn_diffusion.model_ema.load_state_dict(src, strict=False)
+            print("======================================================")
+            print(f"Warm-started weights from: {init_from}")
+            print(f"  loaded {len(src) - len(unexpected)}/{len(src)} source params"
+                  f" | new (randomly initialized) params: {len(missing)}")
+            if reshaped:
+                print(f"  shape-changed params reinitialized: {len(reshaped)} e.g. {reshaped[:3]}")
+            if unexpected:
+                print(f"  source-only params ignored: {len(unexpected)} e.g. {unexpected[:3]}")
+            if missing:
+                print(f"  fresh branches e.g. {missing[:3]}")
+            if len(missing) == 0 and len(unexpected) == 0 and len(reshaped) == 0:
+                print("  (exact match — plain warm-start)")
+            print("(fresh optimizer/scheduler/EMA-seed/step counter)")
+            print("======================================================")
+        else:
+            print("======================================================")
+            print("Starting training from scratch...")
+            print("======================================================")
+
+    # Load plain checkpoints first, then wrap the two trainable branches. DDP
+    # broadcasts rank 0 parameters and averages gradients across both H100s.
+    if distributed:
+        ddp_kwargs = dict(
+            device_ids=[local_rank], output_device=local_rank,
+            broadcast_buffers=False, gradient_as_bucket_view=True,
+            static_graph=True,
+        )
+        nn_diffusion.model["diffusion"] = DDP(
+            nn_diffusion.model["diffusion"], **ddp_kwargs)
+        nn_diffusion.model["condition"] = DDP(
+            nn_diffusion.model["condition"], **ddp_kwargs)
+        if is_main:
+            print(f"DDP enabled: {dist.get_world_size()} x H100 | per-rank batch={args.batch_size}")
 
     nn_diffusion.train()
 
-    # Frozen DINO feature extractor used only to build condition inputs.
-    dino_detector = DinoBatchDetector(device=device)
+    # The dataset already returns the condition dict keyed exactly as
+    # TokenSequenceFusionCondition expects (sensor names from the YAML
+    # `sensors:` block), so each batch is forwarded verbatim. ReLoc3R features
+    # are precomputed (in-h5 or sidecar `file:`) -- no vision backbone runs
+    # here, except the frozen ReLoc3R decoder inside the goal-pair encoder.
 
-    # Vision uses sparse temporal sampling from 30-step history.
-    vision_stride = args.get("vision_stride", 6)
+    amp_name = str(args.get("amp_dtype", "none")).lower()
+    amp_enabled = device.type == "cuda" and amp_name in ("bf16", "bfloat16")
+    if amp_name not in ("none", "fp32", "bf16", "bfloat16"):
+        raise ValueError(f"unsupported amp_dtype={amp_name!r}; use none or bf16")
+    if is_main:
+        amp_label = "BF16" if amp_enabled else "FP32"
+        print(f"AMP: {amp_label}")
 
+<<<<<<< HEAD
     for batch in loop_dataloader(dataloader):
         if n_gradient_step >= total_gradient_steps:
             print("End Training")
+=======
+    batch_stream = threaded_prefetch(loop_dataloader(dataloader))
+    for batch in batch_stream:
+        if n_gradient_step >= total_gradient_steps:
+            if is_main:
+                print("End Training")
+                plot_from_jsonl(os.path.join(save_path, "metrics.jsonl"))
+>>>>>>> endgame
             break
 
         action = batch["act"].to(device, non_blocking=True)  # [B, horizon, 2]
-        obs_dict = batch["obs"]
+        context = {k: v.to(device, non_blocking=True) for k, v in batch["obs"].items()}
 
-        # ------------------------------------------------------------------
-        # Multimodal condition inputs:
-        #   - image_room1: full 30-step history -> sparse history via ::vision_stride
-        #   - image_room2: full 30-step history -> sparse history via ::vision_stride
-        #   - velocity:    full 30-step normalized encoder history
-        # ------------------------------------------------------------------
-        image_room1 = obs_dict["image_room1"][:, ::vision_stride].to(device, non_blocking=True)
-        image_room2 = obs_dict["image_room2"][:, ::vision_stride].to(device, non_blocking=True)
-        velocity = obs_dict["velocity"].to(device, non_blocking=True)
+        with torch.autocast(
+            device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled
+        ):
+            total_loss = nn_diffusion.loss(x0=action, condition=context)
 
-        B, T_vis, C, H, W = image_room1.shape
-        image_room1_flat = image_room1.reshape(B * T_vis, C, H, W)
-        image_room2_flat = image_room2.reshape(B * T_vis, C, H, W)
-
-        with torch.no_grad():
-            dino_feat1, _, _ = dino_detector.get_heatmap(image_room1_flat)
-            dino_feat2, _, _ = dino_detector.get_heatmap(image_room2_flat)
-
-        context = {
-            "dino_feat1": dino_feat1.view(B, T_vis, 196, 768),
-            "dino_feat2": dino_feat2.view(B, T_vis, 196, 768),
-            "velocity": velocity,
-        }
-
-        diff_log = nn_diffusion.update(x0=action, condition=context)
+        nn_diffusion.optimizer.zero_grad()
+        total_loss.backward()
+        grad_norm = (torch.nn.utils.clip_grad_norm_(nn_diffusion.model.parameters(),
+                     nn_diffusion.grad_clip_norm) if nn_diffusion.grad_clip_norm else None)
+        nn_diffusion.optimizer.step()
+        nn_diffusion.ema_update()
         lr_schedulers.step()
+        loss_for_log = total_loss.detach().float()
+        if distributed and n_gradient_step % args.get("log_interval", 100) == 0:
+            dist.all_reduce(loss_for_log, op=dist.ReduceOp.SUM)
+            loss_for_log /= dist.get_world_size()
 
         if n_gradient_step == 0:
             print(f"Action target shape: {action.shape}")
-            print(f"Room1 image sparse history shape: {image_room1.shape}")
-            print(f"Room2 image sparse history shape: {image_room2.shape}")
-            print(f"DINO room1 feature shape: {dino_feat1.shape}")
-            print(f"DINO room2 feature shape: {dino_feat2.shape}")
-            print(f"Velocity history shape: {velocity.shape}")
+            print(f"Token-sequence fusion | backbone="
+                  f"{args.get('diffusion_backbone', 'rectified_flow')}")
+            for k, v in context.items():
+                print(f"  obs[{k}]: {tuple(v.shape)}")
 
-        if n_gradient_step % args.get("log_interval", 100) == 0:
+        if is_main and n_gradient_step % args.get("log_interval", 100) == 0:
             logger.log(
                 {
                     "step": n_gradient_step,
-                    "loss": diff_log["loss"],
-                    "grad_norm": diff_log["grad_norm"],
+                    "loss": loss_for_log.item(),
+                    "grad_norm": grad_norm,
                 },
                 category="train",
             )
-            print(f"Step {n_gradient_step} | Loss: {diff_log['loss']:.4f}")
+            print(f"Step {n_gradient_step} | Loss: {loss_for_log.item():.4f}")
 
-        if n_gradient_step > 0 and n_gradient_step % args.save_interval == 0:
+        if is_main and n_gradient_step > 0 and n_gradient_step % args.save_interval == 0:
             save_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")
             torch.save(
                 {
                     "step": n_gradient_step,
-                    "model_state_dict": nn_diffusion.model.state_dict(),
+                    "model_state_dict": _checkpoint_model_state(nn_diffusion.model),
                     "ema_state_dict": nn_diffusion.model_ema.state_dict(),
                     "optimizer_state_dict": nn_diffusion.optimizer.state_dict(),
                     "scheduler_state_dict": lr_schedulers.state_dict(),
@@ -230,6 +374,32 @@ def main(args):
             print(f"Checkpoint saved at step {n_gradient_step}")
 
         n_gradient_step += 1
+
+    # The infinite loader was stopped by the step limit; finish its in-flight
+    # batch and worker queues before distributed/CUDA teardown.
+    batch_stream.close()
+
+    # Always persist a final checkpoint. For short epoch-based runs the step
+    # counter may never land on a save_interval boundary, so save explicitly.
+    if distributed:
+        dist.barrier()
+    if is_main:
+        final_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")
+        torch.save(
+            {
+                "step": n_gradient_step,
+                "model_state_dict": _checkpoint_model_state(nn_diffusion.model),
+                "ema_state_dict": nn_diffusion.model_ema.state_dict(),
+                "optimizer_state_dict": nn_diffusion.optimizer.state_dict(),
+                "scheduler_state_dict": lr_schedulers.state_dict(),
+                "action_min": dataset.action_min,
+                "action_scale": dataset.action_scale,
+            },
+            final_ckpt_path,
+        )
+        print(f"Final checkpoint saved at step {n_gradient_step}: {final_ckpt_path}")
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

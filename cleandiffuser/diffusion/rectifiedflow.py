@@ -428,7 +428,7 @@ class ContinuousRectifiedFlow(DiffusionModel):
 
     # ==================== Training: Straighten Flow ======================
 
-    def loss(self, x0, x1=None, condition=None):
+    def loss(self, x0, x1=None, condition=None, sample_weight=None):
 
         # x1 is the samples of source distribution.
         # If x1 is None, then we assume x1 is from a standard Gaussian distribution.
@@ -446,8 +446,16 @@ class ContinuousRectifiedFlow(DiffusionModel):
         condition = self.model["condition"](condition) if condition is not None else None
 
         loss = (self.model["diffusion"](xt, t, condition) - (x0 - x1)) ** 2
+        loss = loss * self.loss_weight * (1 - self.fix_mask)
 
-        return (loss * self.loss_weight * (1 - self.fix_mask)).mean()
+        # Per-sample (batch) advantage weighting for offline reward-weighted BC
+        # (AWR-style; see scripts/train.py adv_weight). sample_weight is [B];
+        # broadcast over the horizon/action dims. Normalized by its own mean in
+        # the train loop so the loss scale is unchanged when disabled/uniform.
+        if sample_weight is not None:
+            loss = loss * at_least_ndim(sample_weight, loss.dim())
+
+        return loss.mean()
 
     def update(self, x0, condition=None, update_ema=True, x1=None, **kwargs):
         """One-step gradient update.

@@ -1,0 +1,15 @@
+{
+ "run_dir": "outputs/eval60k_r2cam_geo",
+ "ckpt": "checkpoint_step_60000.pt",
+ "n_frames": 480,
+ "M": 16,
+ "J_first": 0.0020738077828238123,
+ "J_random": 0.0040741263604081885,
+ "J_oracle": 0.0002337126210296993,
+ "reduction_pct": 94.26349110570337,
+ "yaw_random_deg": 2.46976900100708,
+ "yaw_oracle_deg": 0.5840494632720947,
+ "xpos_random_mm": 21.949474207405842,
+ "xpos_oracle_mm": 7.967118153449455,
+ "verdict": "HEADROOM: selection is worth building"
+}

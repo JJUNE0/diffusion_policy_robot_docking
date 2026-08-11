@@ -1,0 +1,78 @@
+# @package _global_
+# DIRECTIONAL TOKEN ABLATION for reloc3r_relfeat_only.yaml (`r_relfeat_only`),
+# the arm the paper draft's Sec. 7 lists as "directional token ablation"
+# (docs/paper_abstract_draft_2026-07-30.md:256).
+#
+# ONE variable: the dec1 stream is REMOVED. Only the goal->current stream
+# (dec2) survives.
+#
+#   r_relfeat_only        dec1 + dec2   both streams     220 condition tokens
+#   r_relfeat_dec2_only   dec2 only     goal -> current  140 condition tokens
+#
+# WHICH STREAM IS "goal-to-current"? Two conventions disagree on the label, so
+# fix it by the POSE convention (user-confirmed 2026-08-10), which is the one
+# Reloc3R's own code comments use:
+#
+#   scripts/precompute_reloc3r_dec_features.py calls
+#       model._decoder(cur_feat, pos, gf, gpos)
+#   so view1 = CURRENT frame and view2 = GOAL frame. In
+#   Reloc3rRelpose.forward (reloc3r/reloc3r/reloc3r_relpose.py:161):
+#       pose2 = self._downstream_head([... dec2 ...], shape2)
+#           # relative camera pose from 2 to 1.
+#   pose2 therefore is the transform FROM view2 (goal) TO view1 (current) --
+#   i.e. dec2 is the stream carrying the goal -> current relative pose. That
+#   is the stream this arm keeps.
+#
+#   (The other convention reads the ATTENTION direction instead: dec1 is the
+#   current frame's stream after cross-attending into the goal, so goal
+#   information flows into it -- the precompute script's docstring calls dec1
+#   "goal-aware history" for that reason. Under that reading dec1 would be the
+#   "goal-to-current" stream. The mirror arm using dec1 lives in
+#   reloc3r_relfeat_dec1_only.yaml and is NOT trained. When writing this up,
+#   say "the dec2 / goal->current-pose stream" rather than a bare directional
+#   arrow, or the sentence is ambiguous.)
+#
+# KNOWN CONFOUND (flagged, not hidden): removing a stream necessarily drops the
+# condition-token count from 220 to 140 and removes that stream's 1,494,144
+# encoder parameters. There is no way to remove one stream while holding both
+# token count and per-stream latent count fixed. This file is the
+# convention-consistent ablation (same pattern as no_goal.yaml /
+# goal_appearance.yaml, which also change token count by dropping sensors). If
+# a drop is observed and must be defended against "it just had fewer tokens",
+# reloc3r_relfeat_dec2_only_tokmatch.yaml holds the budget at 220 by raising
+# num_latents 16 -> 32 on the surviving stream.
+#
+# Everything else is loaded from smr_rgeo.yaml and is identical to
+# r_relfeat_only by construction: d_model=384, depth=12, n_heads=6,
+# dropout=0.1, condition_num_layers=4, batch_size=256, num_epochs=20,
+# lr=1e-4, wd=1e-5, ema=0.999, action_norm=minmax, seed=0, same dataset, same
+# sampler. dec2's own spec (horizon/stride/num_latents/feat_dim/dropout_prob,
+# no cache_in_ram -- the 226 GB file is streamed from disk exactly as in
+# r_relfeat_only) is copied verbatim from reloc3r_relfeat_only.yaml.
+#
+# Token budget: wheel(60) + reloc3r_dec2(5*16=80) = 140.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_dec2_only experiment_name=r_relfeat_dec2_only
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

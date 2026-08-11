@@ -1,0 +1,90 @@
+# ==========================================
+# Two-camera Reloc3r-relational arm, trained FROM SCRATCH on the 5th-floor
+# front-dock dataset. Architecture per reloc3r_front_dock_5f.png
+# (user-confirmed): wheel + Reloc3r ViT encoder/decoder cross-attention
+# tokens (dec1/dec2) from BOTH the dock-facing camera (image_bottom =
+# camera_orbbec-0) and a second, wider-FOV camera (image_top =
+# camera_usb-0) -- no DINO appearance branch, no lidar, no collapsed
+# geometry token. See configs/robot/sensors_variant/reloc3r_relfeat_2cam_5f.yaml
+# for the full sensor spec and rationale.
+#
+# Identical to smr_rgeo_5f.yaml (network, optimizer, batch size, sampler,
+# action_norm) except for the sensors_variant and the dataset build (2-camera
+# extraction, see below), so numbers are comparable to r_geo_5f / r_relfeat_only
+# modulo the dataset/sensor change.
+#
+# Dataset: dataset/front_dock_5f_2cam_train.h5 -- 71 episodes, built by
+#   scripts/build_front_dock_5f.py --out dataset/front_dock_5f_2cam
+#       --room2_camera camera_orbbec-0 --room1_camera camera_usb-0
+#   + utils/preprocessing.py (use_room1=True). Same success==true /
+#   post-segment-marker filtering as smr_rgeo_5f.yaml, per
+#   dataset/front_dock_5th_floor/readme.md.
+#   Held-out: dataset/front_dock_5f_2cam_test.h5 (remaining 10 episodes).
+#
+# Run:
+#   python scripts/train.py --config-name smr_front_dock_5f_relfeat2cam
+# ==========================================
+defaults:
+  - sensors_variant: reloc3r_relfeat_2cam_5f
+  - _self_
+
+experiment_name: r_relfeat_2cam_5f
+seed: 0
+device: cuda:0
+
+train_data_path: ${hydra:runtime.cwd}/dataset/front_dock_5f_2cam_train.h5
+horizon: 60
+obs_horizon: 60
+batch_size: 256
+num_workers: 0
+prefetch_factor: null
+
+state_dim: 2
+velocity_dim: 2
+image_width: 320
+image_height: 240
+
+
+# Kept at minmax to match the r_* arms (see smr_rgeo.yaml for why).
+action_norm: minmax
+
+# ---- Network ----
+diffusion_backbone: ddpm
+d_model: 384
+n_heads: 6
+depth: 12
+dropout: 0.1
+condition_num_layers: 4
+
+# ---- Diffusion / training ----
+ema_rate: 0.999
+num_epochs: 20
+diffusion_gradient_steps: null
+learning_rate: 1e-4
+weight_decay: 1e-5
+log_interval: 10
+save_interval: 1000
+resume_path: null
+# Warm-start from the completed single-camera (bottom-only) after_0328 run:
+# same wheel/reloc3r_dec1/reloc3r_dec2 architecture and sensor KEY NAMES (see
+# reloc3r_relfeat_2cam_5f.yaml's naming note), grafting those weights onto
+# this arm's superset architecture; the two new top-camera branches
+# (reloc3r_dec1_top/reloc3r_dec2_top) and the resized `modality_emb` start
+# fresh (scripts/train.py's init_from path handles both).
+init_from: ${hydra:runtime.cwd}/outputs/train/r_relfeat_only/2026-07-28_22-47-34/checkpoint_step_16940.pt
+
+# ---- Inference defaults (unused during train) ----
+use_ema: false
+solver: ode_dpmsolver++_2M
+w_cfg: 1
+inference_sampling_steps: 30
+num_samples: 1
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: outputs/
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}

@@ -1,0 +1,29 @@
+{
+  "R_cb": [
+    [
+      0.02852171787632217,
+      -0.8666918693305126,
+      0.4980278257745895
+    ],
+    [
+      -0.9994662540179197,
+      -0.03266578112972076,
+      0.0003922022092651365
+    ],
+    [
+      0.015928549487360055,
+      -0.497773191704381,
+      -0.8671609602211472
+    ]
+  ],
+  "fit_method": "wheel_odometry_handeye_kabsch (ICP-FREE): rotation-axis(turns) + fwd-translation(straights) correspondences vs Reloc3r-224 camera motion",
+  "uses_icp_or_dock_pose": false,
+  "val_axis_to_z_error_median_deg": 6.980525941839393,
+  "val_fwd_translation_dir_error_median_deg": 10.041791918907226,
+  "dock_pose_cross_check_info_only": {
+    "geodesic_deg_vs_icp_R_cb": 5.6601834021838675
+  },
+  "body_frame_convention": "wheel-odometry chassis frame: +x forward (vx), +y left, theta CCW (se2.py / reconstruct_pose_rk4). The ~90deg vs raw-LiDAR frame is absorbed here automatically.",
+  "reloc3r_checkpoint": "siyan824/reloc3r-224",
+  "preprocessing_version": "v2_odometry_2026-07-25"
+}

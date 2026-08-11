@@ -1,0 +1,16 @@
+{
+ "run_dir": "outputs/train/r_goal/2026-07-25_07-54-16",
+ "ckpt": "checkpoint_step_16940.pt",
+ "align": {
+  "policy_median_deg": 1.4976990222930908,
+  "policy_p90_deg": 2.598447871208191,
+  "demo_median_deg": 1.0279325012726872,
+  "demo_p25_deg": 0.6038210264356936,
+  "demo_p90_deg": 2.335913875963583,
+  "n_frames": 480,
+  "x_policy_median_mm": 9.976866910534437,
+  "x_policy_p90_mm": 42.267937669994076,
+  "x_demo_median_mm": 8.826926747700167,
+  "x_demo_p25_mm": 3.5164641082977637
+ }
+}

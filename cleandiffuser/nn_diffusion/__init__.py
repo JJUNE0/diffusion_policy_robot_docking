@@ -1,7 +1,7 @@
 from .base_nn_diffusion import *
 from .chitransformer import ChiTransformer
 from .chiunet import ChiUNet1d
-from .dit import DiT1d
+from .dit import DiT1d, DiT1Ref, DiTCrossAttn1d
 from .dqlmlp import DQLMlp
 from .idqlmlp import IDQLMlp
 from .dvinvmlp import DVInvMlp

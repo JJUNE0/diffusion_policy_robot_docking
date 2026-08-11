@@ -1,0 +1,52 @@
+# @package _global_
+# TOKEN-MATCHED companion to reloc3r_relfeat_dec2_only.yaml.
+#
+# Same single goal->current stream (dec2 -- see that file's header for why the
+# pose convention makes dec2 the goal->current stream), but the Perceiver
+# resampler emits 32 latents per frame instead of 16, so the condition-token
+# count returns to exactly 220:
+#
+#   r_relfeat_only                dec1 + dec2, 16 latents each  60 + 80 + 80 = 220
+#   r_relfeat_dec2_only           dec2 only,   16 latents       60 + 80      = 140
+#   r_relfeat_dec2_only_tokmatch  dec2 only,   32 latents       60 + 160     = 220
+#
+# WHY BOTH EXIST: removing a stream cannot hold token count and per-stream
+# latent count constant at the same time. The plain arm keeps num_latents fixed
+# and lets tokens fall; this arm keeps tokens fixed and lets num_latents rise.
+# Neither is a perfect control alone -- read as a pair they bracket the answer.
+# If both arms drop relative to r_relfeat_only by a similar amount, the loss is
+# attributable to the missing STREAM; if only the 140-token arm drops, it was
+# token capacity.
+#
+# The only other parameter that moves is resampler latents / slot_emb growing
+# from 16 to 32 rows (+12,288 params). Everything else -- smr_rgeo.yaml's
+# network, optimizer, batch, epochs, seed, dataset, sampler, and dec2's
+# horizon/stride/feat_dim/dropout_prob -- is unchanged.
+#
+# Token budget: wheel(60) + reloc3r_dec2(5*32=160) = 220, equal to r_relfeat_only.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_dec2_only_tokmatch \
+#       experiment_name=r_relfeat_dec2_only_tokmatch
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 32
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

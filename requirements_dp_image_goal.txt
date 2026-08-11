@@ -1,0 +1,10 @@
+# Runtime for the official real-stanford/diffusion_policy code pinned in
+# third_party/diffusion_policy. The original repository pins diffusers 0.11.1;
+# this Python 3.12 / PyTorch 2.10 environment requires the API-compatible
+# scheduler runtime below. Policy, encoder, U-Net, EMA, and normalizer source
+# remain the unmodified official git submodule.
+diffusers==0.35.2
+huggingface_hub==0.36.0
+accelerate==1.12.0
+zarr==2.18.7
+numcodecs==0.15.1

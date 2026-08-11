@@ -1,0 +1,59 @@
+# @package _global_
+# SECOND CONTROLLED BASELINE for reloc3r_relfeat_only.yaml (`r_relfeat_only`),
+# and the "Final-pose baseline" the paper draft's Sec. 7 lists as required
+# (docs/paper_abstract_draft_2026-07-30.md).
+#
+# Tapped at the very END of ReLoc3R's pose head: the 4x4 relative pose itself,
+# as 12 numbers per stream -- R(9, row-major, post-SVD-orthogonalization)
+# concatenated with t(3, raw fc_t output; scale-ambiguous by construction, see
+# docs/reloc3r.md -- measured |t| = 1.03 +- 0.34 over the training set).
+#
+# This closes an information ladder in which ONLY the vision tensor changes:
+#     r_relfeat_only    pre-head dense tokens   196 x 768 = 150,528 / frame / stream
+#     r_posthead_only   post-pool head feature          1,024 / frame / stream
+#     r_pose_only       final relative pose                12 / frame / stream
+# Same frozen backbone, same bidirectional streams, same 220 condition tokens,
+# same fusion transformer, same DiT, same optimizer/seed/epochs/batch.
+#
+# Note this is a STRONGER final-pose baseline than a modular controller: the
+# policy still gets a 5-frame history of BOTH pose1 and pose2 and still learns
+# the same diffusion action head, so a gap here is attributable to the
+# representation, not to losing closed-loop replanning.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_pose_only experiment_name=r_pose_only
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_pose1:
+    encoder: reloc3r_relation
+    source: reloc3r_pose1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true
+  reloc3r_pose2:
+    encoder: reloc3r_relation
+    source: reloc3r_pose2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 12
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true

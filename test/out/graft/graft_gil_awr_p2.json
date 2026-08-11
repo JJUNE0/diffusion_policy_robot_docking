@@ -1,0 +1,73 @@
+{
+ "run_dir": "outputs/train/graft_gil_awr_p2/2026-07-18_19-19-07",
+ "ckpt": "checkpoint_step_16940.pt",
+ "use_ema": true,
+ "bin_edges": [
+  0.5,
+  0.6,
+  0.7,
+  0.8,
+  0.9,
+  1.0,
+  1.15,
+  1.3,
+  1.65
+ ],
+ "aux": null,
+ "align": {
+  "policy_median_deg": 1.5656203031539917,
+  "policy_p90_deg": 8.939625358581544,
+  "demo_median_deg": 1.4466775999561683,
+  "demo_p25_deg": 0.5774988149816354,
+  "demo_p90_deg": 12.525998066578738,
+  "n_frames": 1059,
+  "x_policy_median_mm": 20.421873275292675,
+  "x_policy_p90_mm": 112.22821388432291,
+  "x_demo_median_mm": 19.006871273822384,
+  "x_demo_p25_mm": 7.92726708111921
+ },
+ "openloop": {
+  "0": {
+   "vel_rmse": 0.0097040431573987,
+   "vel_progress_rmse": 0.009477741084992886,
+   "speedup_frac": 0.496,
+   "ade_cm": 0.5214265798451586,
+   "fde_cm": 0.5157645068102851,
+   "path_len_cm": 13.750169939107526,
+   "steps": 500
+  },
+  "50": {
+   "vel_rmse": 0.025062046945095062,
+   "vel_progress_rmse": 0.024474773555994034,
+   "speedup_frac": 0.388,
+   "ade_cm": 2.577222700914797,
+   "fde_cm": 2.5456303047419215,
+   "path_len_cm": 59.97855345708311,
+   "steps": 500
+  },
+  "110": {
+   "vel_rmse": 0.01549443881958723,
+   "vel_progress_rmse": 0.014887361787259579,
+   "speedup_frac": 0.238,
+   "ade_cm": 2.586120368132178,
+   "fde_cm": 2.7207003537111367,
+   "path_len_cm": 49.43537490590706,
+   "steps": 500
+  }
+ },
+ "summary": {
+  "ade_cm": 2.577222700914797,
+  "fde_cm": 2.5456303047419215,
+  "ade_cm_mean": 1.894923216297378,
+  "fde_cm_mean": 1.9273650550877812,
+  "vel_rmse": 0.01549443881958723,
+  "vel_progress_rmse": 0.014887361787259579,
+  "speedup_frac": 0.388,
+  "near_mm": null,
+  "align_deg": 1.5656203031539917,
+  "align_demo_deg": 1.4466775999561683,
+  "align_demo_p25_deg": 0.5774988149816354,
+  "xpos_mm": 20.421873275292675,
+  "xpos_demo_mm": 19.006871273822384
+ }
+}

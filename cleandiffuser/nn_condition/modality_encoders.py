@@ -1,28 +1,69 @@
 """Modality encoder registry for config-driven sensor fusion.
 
-Each modality (a camera, the wheel encoder, IMU, LiDAR, ...) is encoded by a
-small nn.Module mapping its raw observation to transformer tokens
+Each modality (the wheel encoder, a ReLoc3R relational stream, ...) is encoded
+by a small nn.Module mapping its raw observation to transformer tokens
 [B, N_tokens, d_model]. Encoders are looked up by the string `encoder` field in
 the YAML `sensors:` spec, so adding/removing a modality for an ablation is just
 editing that dict -- no code changes in the dataset, condition net, or train
-loop. See ModularSensorFusionCondition and dataset/modular_dataset.py.
+loop. See TokenSequenceFusionCondition and utils/modular_dataset.py.
 """
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
 
-from cleandiffuser.nn_condition.sensor_fusion_condition import PerceiverResampler
-
 ENCODER_REGISTRY: Dict[str, type] = {}
 
 
+class PerceiverResampler(nn.Module):
+    """Fixed-size latent bottleneck over a variable-length token set."""
+
+    def __init__(self, d_model: int, num_latents: int = 16, nhead: int = 4):
+        super().__init__()
+        self.latents = nn.Parameter(torch.randn(1, num_latents, d_model) * 0.02)
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+
+        self.ln_q = nn.LayerNorm(d_model)
+        self.ln_kv = nn.LayerNorm(d_model)
+        self.ln_post = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, d_model),
+        )
+
+    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None,
+                key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: [B, N_patch, d_model]
+            cond: optional conditioning tensor broadcastable to [B, N_latent, d_model]
+            key_padding_mask: [B, N_patch] bool, True = ignore
+
+        Returns:
+            [B, N_latent, d_model]
+        """
+        b = x.shape[0]
+        q = self.latents.repeat(b, 1, 1)
+
+        if cond is not None:
+            q = q + cond
+
+        q_norm = self.ln_q(q)
+        kv_norm = self.ln_kv(x)
+        attn_out, _ = self.cross_attn(query=q_norm, key=kv_norm, value=kv_norm,
+                                      key_padding_mask=key_padding_mask)
+
+        out = q + attn_out
+        out = out + self.ffn(self.ln_post(out))
+        return out
+
+
 def _unpack(obs):
-    """History-mode encoders may receive either a raw tensor (legacy call
-    sites, e.g. ModularSensorFusionCondition) or {"data":..., "valid_mask":
-    [B,T] bool, True=real frame} (TokenSequenceFusionCondition, which needs
-    per-token padding masks to reach attention -- 2026-07-25 acceptance
-    criterion). Returns (data, valid_mask_or_None)."""
+    """History-mode encoders may receive either a raw tensor or {"data":...,
+    "valid_mask": [B,T] bool, True=real frame} (TokenSequenceFusionCondition,
+    which needs per-token padding masks to reach attention -- 2026-07-25
+    acceptance criterion). Returns (data, valid_mask_or_None)."""
     if isinstance(obs, dict) and "data" in obs:
         return obs["data"], obs.get("valid_mask")
     return obs, None
@@ -115,54 +156,27 @@ class MotionEncoder(BaseModalityEncoder):
         return self.proj(x) + self.time_emb.view(1, t, self.d_model)
 
 
-@register_encoder("imu")
-class ImuEncoder(MotionEncoder):
-    """IMU (gyro xyz + accel xyz = 6D) time series. Currently identical to the
-    generic MotionEncoder (per-step MLP + temporal embedding). Kept as its own
-    registry name so a smarter IMU encoding (integrate to orientation, temporal
-    conv over the high-rate stream, gravity removal, ...) can be swapped in later
-    WITHOUT touching any config that already says `encoder: imu`.
-    TODO(imu): decide the right representation; 6-axis raw is the placeholder.
-    """
-    pass
-
-
-@register_encoder("rotation")
-class RotationEncoder(MotionEncoder):
-    """Reloc3r rotation-to-goal signal as a low-dim time series. obs: [B, T, 7]
-    where the 7 dims are [R[:,0] (3), R[:,1] (3), geodesic_angle (1)] per frame
-    (see scripts/precompute_reloc3r_cache.py). Validated as the reliable Reloc3r
-    channel in docs/reloc3r.md (heading r=0.93, strong at close range); the
-    translation/direction channel is deliberately excluded (lidar owns it).
-    Identical mechanics to MotionEncoder (per-step MLP + temporal embedding);
-    kept as its own registry name so a smarter rotation encoding can be swapped
-    in later without touching any config that says `encoder: rotation`.
-    """
-    pass
-
-
-@register_encoder("direction")
-class DirectionEncoder(MotionEncoder):
-    """Reloc3r translation-DIRECTION-to-goal signal as a low-dim time series.
-    obs: [B, T, 3], the unit translation vector (scale-ambiguous by construction
-    -- see docs/reloc3r.md) per frame (scripts/precompute_reloc3r_direction.py).
-    docs/reloc3r.md found this channel degrades sharply at close range (median
-    16.9deg error at 0-0.3m vs 2.6deg at 0.9-1.1m) -- excluded from the R+rot
-    arm by default; this encoder exists so the rot-vs-rot+dir ablation can add
-    it back in without touching any other code, per user request 2026-07-22.
-    Identical mechanics to MotionEncoder (per-step MLP + temporal embedding).
-    """
-    pass
-
-
-@register_encoder("dino_image")
-class DinoImageEncoder(BaseModalityEncoder):
-    """Camera view as DINO patch features -> Perceiver latents.
-    obs: [B, Tv, n_patch, feat_dim] (precomputed DINO features). Produces
-    Tv * num_latents tokens. Each camera owns its DINO->d_model projection.
+@register_encoder("reloc3r_relation")
+class Reloc3rRelationEncoder(BaseModalityEncoder):
+    """Reloc3r decoder's cross-attended patch tokens (POST cross-attention,
+    PRE pose-head pooling) -> Perceiver latents. These tokens have already
+    cross-attended into the goal frame's (or the current frame's) stream inside
+    Reloc3r's own decoder (arxiv 2412.08376; see Reloc3rRelpose._decoder,
+    reloc3r/reloc3r/reloc3r_relpose.py). obs: [B, Tv, n_patch, feat_dim], e.g.
+    [B, Tv, 196, 768] for the dec1/dec2 streams precomputed by
+    scripts/precompute_reloc3r_dec_features.py, or [B, Tv, 1, 1024] for the
+    post-pose-head taps from scripts/precompute_reloc3r_head_features.py.
+    Serves BOTH the dec1 ("goal-aware history": current frame's stream after
+    attending into goal) and dec2 ("current-aware goal") sensor entries -- two
+    independently-weighted instances of this SAME class, differentiated purely
+    by which `source`/`file` the YAML sensor entry points at; no
+    dec1-vs-dec2-specific logic lives in Python. Produces Tv * num_latents
+    tokens; each sensor owns its feat_dim->d_model projection.
     """
 
     def __init__(self, spec, d_model, nhead):
+        spec = dict(spec)
+        spec.setdefault("feat_dim", 768)
         super().__init__(spec, d_model, nhead)
         self.horizon = int(spec["horizon"])            # vision horizon (post-stride)
         self.num_latents = int(spec.get("num_latents", 16))
@@ -196,47 +210,6 @@ class DinoImageEncoder(BaseModalityEncoder):
         else:
             self._token_valid_mask = None
         return lat.reshape(b, t * self.num_latents, self.d_model)
-
-
-@register_encoder("reloc3r_image")
-class Reloc3rImageEncoder(DinoImageEncoder):
-    """Camera view as Reloc3r ViT-L encoder patch features -> Perceiver latents.
-    Identical to DinoImageEncoder but defaults feat_dim to 1024 (ViT-L) instead
-    of 768 (DINOv3 ViT-B). obs: [B, Tv, 196, 1024] (precomputed, see
-    scripts/precompute_reloc3r_cache.py). Kept as its own registry name so the
-    DINO-vs-Reloc3r backbone swap is a one-word config change.
-    """
-
-    def __init__(self, spec, d_model, nhead):
-        spec = dict(spec)
-        spec.setdefault("feat_dim", 1024)
-        super().__init__(spec, d_model, nhead)
-
-
-@register_encoder("reloc3r_relation")
-class Reloc3rRelationEncoder(DinoImageEncoder):
-    """Reloc3r decoder's cross-attended patch tokens (POST cross-attention,
-    PRE pose-head pooling) -> Perceiver latents. Unlike Reloc3rImageEncoder
-    (raw ViT-L *encoder* patch features, independently encoded per frame),
-    these tokens have already cross-attended into the goal frame's (or the
-    current frame's) stream inside Reloc3r's own decoder (arxiv 2412.08376;
-    see Reloc3rRelpose._decoder, reloc3r/reloc3r/reloc3r_relpose.py). obs:
-    [B, Tv, 196, 768] (dec_embed_dim=768, precomputed by
-    scripts/precompute_reloc3r_dec_features.py). Serves BOTH the dec1
-    ("goal-aware history": current frame's stream after attending into goal)
-    and dec2 ("current-aware goal": the same stream rotation/geometry already
-    collapse to a point estimate, kept here at full patch resolution) sensor
-    entries -- two independently-weighted instances of this SAME class,
-    differentiated purely by which `source`/`file` the YAML sensor entry
-    points at; no dec1-vs-dec2-specific logic lives in Python. Kept as its
-    own registry name (not reusing `reloc3r_image`) so this backbone-vs-
-    relational distinction is a one-word config change.
-    """
-
-    def __init__(self, spec, d_model, nhead):
-        spec = dict(spec)
-        spec.setdefault("feat_dim", 768)
-        super().__init__(spec, d_model, nhead)
 
 
 @register_encoder("reloc3r_goal_pair")
@@ -331,102 +304,3 @@ class Reloc3rGoalPairEncoder(BaseModalityEncoder):
             ],
             dim=1,
         )
-
-
-@register_encoder("goal_image")
-class GoalImageEncoder(BaseModalityEncoder):
-    """STATIC goal frame as DINO/Reloc3r patch features -> Perceiver latents,
-    ONE token set (no time dimension -- a goal is a single frame, not a
-    history). obs: [B, n_patch, feat_dim] (mode="current" in the dataset spec,
-    e.g. source: dino_bottom, or reloc3r_bottom for the R-Geo arm's appearance
-    branch). No NoMaD-style masking (docs/0725_reloc3r_test/reloc3r/
-    reloc3r_0725.md: "Nomad-style goal mask 제거해야함 (goal이 항상 제공되도록 할
-    것)") -- the goal is always attended to; there is no goal_mask input here
-    at all, unlike the legacy SensorFusionConditionNetwork's NoMaD branch.
-    Always fully valid (a static goal frame is never "missing/padded").
-    """
-
-    def __init__(self, spec, d_model, nhead):
-        super().__init__(spec, d_model, nhead)
-        self.num_latents = int(spec.get("num_latents", 16))
-        self.n_patch = int(spec.get("n_patch", 196))
-        self.feat_dim = int(spec.get("feat_dim", 768))
-        self.proj = nn.Linear(self.feat_dim, d_model)
-        self.resampler = PerceiverResampler(d_model, num_latents=self.num_latents, nhead=nhead)
-        self.slot_emb = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
-        self.n_tokens = self.num_latents
-
-    def encode(self, obs):
-        feat, _ = _unpack(obs)
-        feat = feat.float()
-        b, n_patch, feat_dim = feat.shape
-        if n_patch != self.n_patch or feat_dim != self.feat_dim:
-            raise ValueError(
-                f"[{self.name}] expected [*,{self.n_patch},{self.feat_dim}], got [*,{n_patch},{feat_dim}].")
-        lat = self.resampler(self.proj(feat))  # [B, n_lat, d]
-        self._token_valid_mask = None  # static goal frame: always fully valid
-        return lat + self.slot_emb.view(1, self.num_latents, self.d_model)
-
-
-@register_encoder("geometry")
-class GeometryTokenEncoder(BaseModalityEncoder):
-    """Cached Reloc3r body-frame geometry vector -> ONE token (docs/
-    0725_reloc3r_test/reloc3r/reloc3r_0725.md: "Reloc3r geometry는 하나의
-    geometry token으로 사용한다"). obs: [B, 4] = [dx_body, dy_body,
-    sin(relative_yaw_body), cos(relative_yaw_body)] (mode="current", source:
-    geometry_bottom, see scripts/build_reloc3r_geometry_cache.py). Frozen
-    Reloc3r never runs in the training loop -- this is a plain small-MLP
-    lookup of an offline-cached vector, same spirit as MotionEncoder but for a
-    single static value (no time dimension) rather than a history.
-    """
-
-    def __init__(self, spec, d_model, nhead):
-        super().__init__(spec, d_model, nhead)
-        self.dim = int(spec.get("dim", 4))
-        self.proj = nn.Sequential(
-            nn.Linear(self.dim, d_model), nn.GELU(), nn.Linear(d_model, d_model))
-        self.n_tokens = 1
-
-    def encode(self, obs):
-        x, _ = _unpack(obs)
-        x = x.float()
-        if x.shape[-1] != self.dim:
-            raise ValueError(f"[{self.name}] expected dim={self.dim}, got {x.shape[-1]}.")
-        self._token_valid_mask = None  # always present (goal_appearance_geometry arm only)
-        return self.proj(x).unsqueeze(1)  # [B, 1, D]
-
-
-@register_encoder("pointcloud")
-class PointCloudEncoder(BaseModalityEncoder):
-    """Raw 2D LiDAR point set -> masked Perceiver latents.
-    obs: dict {"points": [B, M, 2] (zero-padded), "npoints": [B]}. Produces
-    num_latents tokens; padded points are masked out of the cross-attention.
-    """
-
-    def __init__(self, spec, d_model, nhead):
-        super().__init__(spec, d_model, nhead)
-        self.point_dim = int(spec.get("point_dim", 2))
-        self.num_latents = int(spec.get("num_latents", 16))
-        self.proj = nn.Sequential(
-            nn.Linear(self.point_dim, d_model), nn.GELU(), nn.Linear(d_model, d_model))
-        self.resampler = PerceiverResampler(d_model, num_latents=self.num_latents, nhead=nhead)
-        self.slot_emb = nn.Parameter(torch.randn(self.num_latents, d_model) * 0.02)
-        self.n_tokens = self.num_latents
-        self._point_tokens = None      # exposed for an optional cross-attn aux head
-        self._point_mask = None
-
-    def obs_keys(self):
-        return [self.name, f"{self.name}_npoints"]
-
-    def encode(self, obs):
-        points = obs["points"].float()
-        npoints = obs["npoints"]
-        b, m, _ = points.shape
-        tok = self.proj(points)
-        valid = torch.arange(m, device=points.device)[None, :] < npoints.view(-1, 1)
-        pad_mask = ~valid                                 # True = ignore
-        pad_mask[npoints <= 0, 0] = False                 # avoid all-masked NaN
-        self._point_tokens = tok
-        self._point_mask = pad_mask
-        lat = self.resampler(tok, key_padding_mask=pad_mask)
-        return lat + self.slot_emb.view(1, self.num_latents, self.d_model)

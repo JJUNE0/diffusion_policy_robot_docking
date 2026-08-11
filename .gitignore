@@ -12,6 +12,11 @@ __pycache__/
 !dino/master_vector.pt
 episode*
 dataset/
+*.png
+*.JPG
+models
+third_party
+docs
 
 # Hydra outputs
 outputs/
@@ -34,6 +39,8 @@ results/
 
 # report
 *.pdf
+!docs/figures/vodock_train_inference_*.png
+!docs/figures/vodock_train_inference_*.pdf
 
 # external
 rc_server/

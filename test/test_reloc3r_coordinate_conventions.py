@@ -1,5 +1,5 @@
-"""Coordinate-convention unit tests for the Reloc3r body-frame geometry token
-(docs/0725_reloc3r_test/reloc3r/reloc3r_0725.md, "반드시 추가할 좌표계 단위 테스트").
+"""Coordinate-convention unit tests for the Reloc3r body-frame calibration
+("반드시 추가할 좌표계 단위 테스트").
 
 UPDATED 2026-07-25 (ICP-free): the original version of this file validated
 signs against ICP dock_pose ("goal in front/left/right"). Two problems with
@@ -42,7 +42,6 @@ sys.path.insert(0, os.path.join(REPO, "reloc3r"))
 from scripts.calibrate_reloc3r_odometry import body_motion  # noqa: E402
 
 TEST_H5 = os.path.join(REPO, "dataset/after_0328_test.h5")
-TEST_CACHE = os.path.join(REPO, "dataset/after_0328_test_reloc3r_bottom.h5")
 CALIB_PATH = os.path.join(REPO, "reloc3r/body_frame_calibration_odometry.json")
 K = 45  # ~1.5s window, matches the large/visually-clear interval used in the
         # odometry_calibration_check.png visual validation
@@ -71,11 +70,6 @@ def odometry_frames():
     ep_ends = f["episode_ends"][:]
     enc = f["encoder"][:].astype(np.float64)
     f.close()
-    cf = h5py.File(TEST_CACHE, "r")
-    rot = cf["reloc3r_rot_bottom"][:]
-    tdir = cf["reloc3r_dir_bottom"][:]
-    cf.close()
-
     ep_starts = np.concatenate([[0], ep_ends[:-1]])
     rows = []
     for ep_id, e in enumerate(ep_ends):
@@ -93,10 +87,10 @@ def odometry_frames():
     gt_dth = np.array([r[4] for r in rows])
     gt_disp = np.array([r[5] for r in rows])
 
-    # Reloc3r pose(a->b) is precomputed only vs each frame's EPISODE GOAL, not
-    # vs an arbitrary later frame b -- so reuse the cached per-frame (rotation,
-    # direction)-to-goal is NOT valid here. This fixture instead needs a fresh
-    # Reloc3r(a,b) call per pair, same as scripts/calibrate_reloc3r_odometry.py.
+    # Reloc3r relative pose must be computed for the actual (a, b) pair here;
+    # no per-frame cache can stand in for an arbitrary later frame b. This
+    # fixture therefore runs a fresh Reloc3r(a,b) call per pair, same as
+    # scripts/calibrate_reloc3r_odometry.py.
     import torch
     from reloc3r.reloc3r_relpose import setup_reloc3r_relpose_model
     from scripts.calibrate_reloc3r_odometry import reloc3r_pairs

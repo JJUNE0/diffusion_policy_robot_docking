@@ -44,7 +44,7 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
 sys.path.insert(0, os.path.join(_REPO, "reloc3r"))
 from reloc3r.reloc3r_relpose import setup_reloc3r_relpose_model  # noqa: E402
-from scripts.inference_ema_v2 import reconstruct_pose_rk4  # noqa: E402
+from utils.inference import reconstruct_pose_rk4  # noqa: E402
 
 TRAIN_H5 = os.path.join(_REPO, "dataset/after_0328_train.h5")
 CACHE = os.path.join(_REPO, "dataset/after_0328_train_reloc3r_bottom.h5")

@@ -1,15 +1,15 @@
 """Config-driven multimodal dataset.
 
 Reads an arbitrary set of modalities from an HDF5 file according to the SAME
-`sensors` spec that drives ModularSensorFusionCondition. Each sensor declares:
+`sensors` spec that drives TokenSequenceFusionCondition. Each sensor declares:
 
-    source         : HDF5 dataset key (e.g. "encoder", "lidar_points")
+    source         : HDF5 dataset key (e.g. "encoder", "reloc3r_dec1_bottom")
     file           : (optional) path to an EXTERNAL h5 holding `source`. Lets a
-                     sensor read from a sidecar file, e.g. the legacy DINO cache
-                     (after_0328_train_dino_bottom.h5) next to after_0328_train.h5.
-                     Row indices must align 1:1 with the main h5.
+                     sensor read from a sidecar file, e.g. the ReLoc3R feature
+                     cache (after_0328_train_reloc3r_bottom.h5) next to
+                     after_0328_train.h5. Row indices must align 1:1 with the
+                     main h5.
     mode           : "history" (length-`horizon` window ending at t)
-                   | "current" (the single row at t)
                    | "goal_pool_pair" (history ReLoc3R encoder tokens paired
                      with one randomly sampled, camera-synchronized goal from
                      a compiled goal pool)
@@ -20,7 +20,6 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
                      normalization; the sensor's `dim` must match len(channels).
     normalize      : (optional) "action" -> reuse the encoder action normalizer;
                      "zscore" -> per-channel (mean/std over the source) whitening.
-    npoints_source : (mode=current, pointcloud) key with the per-row valid count
     goal_pool_file : (mode=goal_pool_pair) compiled HDF5 snapshot
     goal_source    : ReLoc3R goal encoder-feature key in goal_pool_file
     goal_pool_group: sensors sharing this value sample the SAME goal row
@@ -31,17 +30,14 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
                      the current episode's `episode_field`. A source listed in
                      `cross_map` instead samples the mapped goal group with
                      probability `cross_probability`, e.g. 10% 4F -> 5F.
-    head           : (optional) "aux_pose" -> the dataset also emits ICP dock-pose
-                     targets ("dock_target" [x_n, y_n, sin, cos] + "reliable"
-                     mask) so the aux precision head can be trained/ablated.
 
 Returns {"obs": {name: tensor, ...}, "act": future_traj}. Ablations add/remove
-sensors purely by editing the spec; a brand-new modality (e.g. IMU) is: put its
-rows under a new h5 key and add one spec entry.
+sensors purely by editing the spec; a brand-new modality is: put its rows under
+a new h5 key and add one spec entry.
 
-NOTE: `dino_image` sensors expect PRECOMPUTED DINO features stored in the h5
-under `source`. Encoding raw pixels with the DINO backbone is a train-loop
-concern (kept out of the dataset), same split as the existing pipeline.
+NOTE: ReLoc3R sensors expect PRECOMPUTED encoder/decoder features stored in the
+h5 under `source` (scripts/precompute_reloc3r_*.py). Running the frozen ReLoc3R
+backbone is never a dataset concern.
 """
 import os
 import threading
@@ -64,14 +60,13 @@ def _action_stats(act, action_norm, pct=ACTION_ROBUST_PCT):
     -0.075/+0.084, so the scale is 0.563 m/s. The docking end-game runs at
     2-15 mm/s, which lands at 0.007-0.053 of a [-1, 1] output range -- under 3%,
     i.e. below the noise a diffusion sampler puts on its own output. That is a
-    direct contributor to the terminal stall measured on 2026-07-23
-    (test/terminal_metric.py).
+    direct contributor to the terminal stall measured on 2026-07-23.
 
     "robust" sets the bounds at p1/p99 instead, shrinking the vx scale ~3.5x and
     the wz scale ~3.4x, so the same physical command occupies several times more
     of the output range. The affine CONTRACT is unchanged --
     `(x + 1) / 2 * action_scale + action_min` still inverts it -- so every
-    consumer (inference_ema_v2, rollout_core, the eval scripts, the robot node)
+    consumer (rollout_core, the eval scripts, the robot node)
     keeps working with no edit; only the numbers in the checkpoint change.
     The 1% tail beyond the bounds is clipped by normalize_action; those frames
     are faster than anything the docking policy needs to reproduce.
@@ -96,8 +91,6 @@ class ModularDockingDataset(Dataset):
         obs_horizon: int = 30,
         action_key: str = "encoder",
         train_h5_path: str = None,
-        dock_pose_key: str = "dock_pose",
-        reliable_key: str = "reliable",
         action_norm: str = "minmax",
     ):
         super().__init__()
@@ -107,24 +100,15 @@ class ModularDockingDataset(Dataset):
         self.obs_horizon = obs_horizon
         self.action_key = action_key
         self.train_h5_path = train_h5_path or h5_path
-        self.dock_pose_key = dock_pose_key
-        self.reliable_key = reliable_key
         self.action_norm = action_norm
         self._goal_pool_groups = {}
         self._goal_ram_cache = {}
 
-        # Aux precision head is on iff any sensor declares `head: aux_pose`. Then
-        # the dataset must emit dock-pose targets (from the ICP labels in the h5).
-        self.aux_sensor = next(
-            (n for n, s in self.sensors.items() if s.get("head") == "aux_pose"), None)
-        self.with_aux = self.aux_sensor is not None
-
         # Per-sensor z-score stats (computed once over the source), keyed by name.
         self.norm_stats = {}
 
-        # Sensors may read from a sidecar h5 via `file:` (e.g. a DINO feature
-        # cache); everything else (episode_ends, action, aux labels) stays in
-        # the main h5.
+        # Sensors may read from a sidecar h5 via `file:` (e.g. a ReLoc3R feature
+        # cache); everything else (episode_ends, action) stays in the main h5.
         self._file_paths = sorted(
             {self.h5_path}
             | {self._sensor_path(spec) for spec in self.sensors.values()}
@@ -220,21 +204,6 @@ class ModularDockingDataset(Dataset):
                           f"{ds.nbytes / 1e9:.1f} GB) into RAM ...", flush=True)
                     self._ram_cache[name] = ds[:]
                     print(f"[ModularDockingDataset] '{name}' cached.", flush=True)
-            if self.with_aux:
-                for key in (self.dock_pose_key, self.reliable_key):
-                    if key not in f:
-                        raise KeyError(
-                            f"sensor '{self.aux_sensor}' has head=aux_pose but '{key}' "
-                            f"is not in {self.h5_path}. Available: {list(f.keys())}")
-                pose_all = f[self.dock_pose_key][:]
-                rel_all = f[self.reliable_key][:].astype(bool)
-                # Guard: only use rows that are BOTH reliable and non-NaN, so a
-                # single NaN pose can't poison the whole mean/std (and thus every
-                # emitted target) with NaN.
-                valid = rel_all & ~np.isnan(pose_all).any(axis=1)
-                xy = pose_all[valid][:, :2]
-                self.dock_xy_mean = xy.mean(axis=0).astype(np.float32)
-                self.dock_xy_std = (xy.std(axis=0) + 1e-6).astype(np.float32)
         finally:
             for h in files.values():
                 h.close()
@@ -491,9 +460,6 @@ class ModularDockingDataset(Dataset):
         root, roots = self._ensure_open()
         t = self.index_map[idx]
         ep_start = self.ep_start_map[idx]
-        ep_end = self.ep_end_map[idx]
-        goal_row = ep_end - 1  # episode's static goal/docked frame (last row),
-        # same convention as utils/docking_dataset.py and endgame/se2.py.
         obs = {}
         sampled_goal_rows = {}
         for name, spec in self.sensors.items():
@@ -516,21 +482,6 @@ class ModularDockingDataset(Dataset):
                     arr = ((arr - mean) / std).astype(np.float32)
                 obs[name] = torch.from_numpy(arr)
                 obs[f"{name}_valid_mask"] = torch.from_numpy(np.ascontiguousarray(valid_mask))
-            elif mode == "current":
-                arr = self._select_channels(np.ascontiguousarray(ds[t]), spec).astype(np.float32)
-                obs[name] = torch.from_numpy(np.ascontiguousarray(arr))
-                nsrc = spec.get("npoints_source")
-                if nsrc is not None:
-                    obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][t]), dtype=torch.long)
-            elif mode == "goal":
-                # STATIC episode goal frame (docs/0725_reloc3r_test/reloc3r/
-                # reloc3r_0725.md: goal_image / geometry sensors read the
-                # episode's docked frame, not the current timestep t).
-                arr = self._select_channels(np.ascontiguousarray(ds[goal_row]), spec).astype(np.float32)
-                obs[name] = torch.from_numpy(np.ascontiguousarray(arr))
-                nsrc = spec.get("npoints_source")
-                if nsrc is not None:
-                    obs[f"{name}_npoints"] = torch.tensor(int(sensor_root[nsrc][goal_row]), dtype=torch.long)
             elif mode == "goal_pool_pair":
                 stride = int(spec.get("stride", 1))
                 history = self._history(ds, t, ep_start, stride)
@@ -613,17 +564,4 @@ class ModularDockingDataset(Dataset):
 
         act = root[self.action_key][t:t + self.horizon].astype(np.float32)
         act = self.normalize_action(act).astype(np.float32)
-        sample = {"obs": obs, "act": torch.from_numpy(act)}
-
-        if self.with_aux:
-            # ICP dock-pose label (teacher for the precision aux head).
-            p = root[self.dock_pose_key][t].astype(np.float32)
-            valid = not np.any(np.isnan(p))
-            rel = float(root[self.reliable_key][t]) if valid else 0.0
-            p = np.nan_to_num(p)
-            xy = (p[:2] - self.dock_xy_mean) / self.dock_xy_std
-            sample["dock_target"] = torch.tensor(
-                [xy[0], xy[1], np.sin(p[2]), np.cos(p[2])], dtype=torch.float32)
-            sample["reliable"] = torch.tensor(rel, dtype=torch.float32)
-
-        return sample
+        return {"obs": obs, "act": torch.from_numpy(act)}

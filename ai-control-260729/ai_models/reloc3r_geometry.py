@@ -178,53 +178,65 @@ class Reloc3rRelationFeatures:
         return out1.half().float(), out2.half().float()
 
 
-class Reloc3rGoalPairFeatures:
-    """Build live [T,2,196,1024] pairs matching the fp16 training caches.
+class Reloc3rPoseFeatures:
+    """Live counterpart of the reloc3r_pose1/pose2 training cache (feat_dim=12,
+    see e.g. r_pose_only_step_16940.config.yaml).
 
-    ReLoc3R itself is owned by the condition module's singleton service.  This
-    extractor therefore shares one frozen model with both policy/EMA decoders
-    instead of allocating a second ViT-L model per camera.
+    Same decoder streams as Reloc3rRelationFeatures (dec1 = current-attends-to-
+    goal, dec2 = goal-attends-to-current, matching reloc3r_relpose.forward()'s
+    own pose1/pose2), but run through the model's own PoseHead instead of kept
+    as raw 768-dim tokens. Each pose is PoseHead's 4x4 output
+    (pose[:3,:3]=R, pose[:3,3]=t, pose[3,:]=[0,0,0,1] -- see
+    reloc3r_pkg/reloc3r/pose_head.py:convert_pose_to_4x4) flattened row-major
+    to 12 = [R00,R01,R02,R10,R11,R12,R20,R21,R22,tx,ty,tz].
+
+    CAUTION: this packing has NOT been verified against the offline script
+    that built the training cache (after_0328_train_reloc3r_bottom_head.h5) --
+    that script lives in a different repo not present here. If an
+    r_pose_only-family checkpoint produces bad trajectories near the dock,
+    this ordering (vs. e.g. t-then-R, or an unflattened/normalized t) is the
+    first thing to check.
     """
 
-    def __init__(
-        self, goal_bgr, checkpoint="siyan824/reloc3r-224", device="cuda:0",
-        size=224, n_patch=196, feat_dim=1024,
-    ):
-        from cleandiffuser.nn_condition.reloc3r_goal_pair import (
-            get_frozen_reloc3r_decoder,
-        )
+    def __init__(self, goal_bgr, device="cuda:0", size=224):
+        _ensure_path()
+        from reloc3r.reloc3r_relpose import setup_reloc3r_relpose_model
 
         self.device = torch.device(device)
-        self.size = int(size)
-        self.n_patch = int(n_patch)
-        self.feat_dim = int(feat_dim)
-        self.service = get_frozen_reloc3r_decoder(checkpoint, self.device)
+        self.size = size
+        self.model = setup_reloc3r_relpose_model(str(size), self.device)
+        self.model.eval()
 
-        goal_tensor, goal_shape = _array_to_view(goal_bgr, size=self.size)
-        goal_images = goal_tensor.unsqueeze(0).to(self.device)
-        goal_shapes = torch.from_numpy(goal_shape).unsqueeze(0).to(self.device)
-        self.goal_feat = self.service.encode_images(goal_images, goal_shapes)
-        self._validate(self.goal_feat, "goal")
-        logger.info(
-            "Reloc3r goal-pair feature extractor ready (device=%s, checkpoint=%s)",
-            self.device, checkpoint,
-        )
+        gt, gs = _array_to_view(goal_bgr, size=size)
+        self.goal_shape = torch.from_numpy(gs).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            goal_feat, goal_pos, _ = self.model._encode_image(
+                gt.unsqueeze(0).to(self.device), self.goal_shape)
+        self.goal_feat = goal_feat.detach()
+        self.goal_pos = goal_pos.detach()
+        logger.info("Reloc3r pose-feature extractor ready (device=%s)", self.device)
 
-    def _validate(self, features, label):
-        expected = (self.n_patch, self.feat_dim)
-        if features.dim() != 3 or tuple(features.shape[1:]) != expected:
-            raise ValueError(
-                f"ReLoc3R {label} features expected [N,{self.n_patch},"
-                f"{self.feat_dim}], got {tuple(features.shape)}")
+    @staticmethod
+    def _flatten(pose_4x4):
+        r = pose_4x4[:, :3, :3].reshape(pose_4x4.shape[0], 9)
+        t = pose_4x4[:, :3, 3]
+        return torch.cat([r, t], dim=-1)
 
     @torch.no_grad()
     def __call__(self, cur_bgr_frames):
         if not cur_bgr_frames:
-            raise ValueError("Reloc3r goal-pair features need a current frame.")
+            raise ValueError("Reloc3r pose features need at least one current frame.")
+
         views = [_array_to_view(frame, size=self.size) for frame in cur_bgr_frames]
         images = torch.stack([view[0] for view in views]).to(self.device)
         shapes = torch.from_numpy(np.stack([view[1] for view in views])).to(self.device)
-        current = self.service.encode_images(images, shapes)
-        self._validate(current, "current")
-        goal = self.goal_feat.expand(len(cur_bgr_frames), -1, -1)
-        return torch.stack((current, goal), dim=1)
+        cur_feat, cur_pos, _ = self.model._encode_image(images, shapes)
+
+        batch = len(cur_bgr_frames)
+        goal_feat = self.goal_feat.expand(batch, -1, -1).contiguous()
+        goal_pos = self.goal_pos.expand(batch, -1, -1).contiguous()
+        dec1, dec2 = self.model._decoder(cur_feat, cur_pos, goal_feat, goal_pos)
+        with torch.cuda.amp.autocast(enabled=False):
+            pose1 = self.model._downstream_head([t.float() for t in dec1], shapes[0])["pose"]
+            pose2 = self.model._downstream_head([t.float() for t in dec2], self.goal_shape[0])["pose"]
+        return self._flatten(pose1).float(), self._flatten(pose2).float()

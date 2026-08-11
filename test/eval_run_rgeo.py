@@ -1,13 +1,13 @@
-"""Held-out open-loop eval for R-NoGoal/R-Goal/R-Geo (docs/0725_reloc3r_test/
-reloc3r/reloc3r_0725.md) -- TokenSequenceFusionCondition + DiTCrossAttn1d.
+"""Held-out open-loop eval for the ReLoc3R arms -- TokenSequenceFusionCondition
++ DiTCrossAttn1d.
 
 No aux/align metrics here (no aux head exists for this architecture, per
-spec) -- ADE/FDE/velRMSE only, same math as test/eval_openloop_metrics.py /
-test/eval_run_modular.py, reusing ModularDockingDataset so observation
-construction/normalization is bit-identical to training.
+spec) -- ADE/FDE/velRMSE plus the terminal-band table, reusing
+ModularDockingDataset so observation construction/normalization is
+bit-identical to training.
 
 Run:  EVAL_H5=dataset/after_0328_test.h5 EVAL_STATS_H5=dataset/after_0328_train.h5 \
-      EVAL_TAG=heldout python test/eval_run_rgeo.py outputs/train/r_geo/<timestamp>
+      EVAL_TAG=heldout python test/eval_run_rgeo.py outputs/train/r_relfeat_only/<timestamp>
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if not OmegaConf.has_resolver("hydra"):
     OmegaConf.register_new_resolver("hydra", lambda key: {"runtime.cwd": REPO}[key])
 
-from scripts.inference_ema_v2 import build_model_from_cfg, reconstruct_pose_rk4  # noqa: E402
+from utils.inference import build_model_from_cfg, reconstruct_pose_rk4  # noqa: E402
 from cleandiffuser.rollout_core import RolloutController  # noqa: E402
 from utils.modular_dataset import ModularDockingDataset  # noqa: E402
 
@@ -47,7 +47,7 @@ MAX_STEPS = int(os.environ.get("EVAL_MAX_STEPS", "100000"))
 # Action/execution horizon (user request 2026-07-27): replan every K steps and
 # execute that plan's raw [0:K] chunk verbatim (no cross-time EMA blend needed
 # -- one coherent sampled trajectory is already smooth internally). This is
-# the same EXEC_CHUNK_K pattern as test/eval_openloop_metrics.py's k2/k8/k16
+# the same EXEC_CHUNK_K pattern as the k2/k8/k16 chunking sweep
 # ablation. K=32 also makes full-episode eval CHEAPER than the old per-step
 # (K=1) 500-cap protocol: ~611 vs ~5000 diffusion sampler calls across the
 # held-out split. The trained prediction length (`horizon`, from ds/cfg) is
@@ -136,8 +136,6 @@ def rollout(nn_diffusion, solver, ds, ep_idx, act_min, act_scale, use_ema, episo
 def main(run_dir):
     os.makedirs(OUT_DIR, exist_ok=True)
     cfg = OmegaConf.load(os.path.join(run_dir, "config.yaml"))
-    if not cfg.get("use_token_sequence_fusion", False):
-        raise SystemExit("Not an R-NoGoal/R-Goal/R-Geo run; use eval_run.py / eval_run_modular.py instead.")
     exp = str(cfg.experiment_name)
     cks = glob.glob(os.path.join(run_dir, "checkpoint_step_*.pt"))
     ckpt_path = max(cks, key=lambda p: int(re.search(r"(\d+)\.pt$", p).group(1)))

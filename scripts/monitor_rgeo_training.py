@@ -7,7 +7,7 @@ three arms is visible at a glance without grepping three log files by hand.
 
 Usage:
   python scripts/monitor_rgeo_training.py [--names r_nogoal,r_goal,r_geo] [--interval 30]
-  (Ctrl-C to stop; safe to run alongside test/queue_reloc3r_rgeo.sh, read-only.)
+  (Ctrl-C to stop; safe to run alongside a training queue, read-only.)
 """
 import argparse
 import glob

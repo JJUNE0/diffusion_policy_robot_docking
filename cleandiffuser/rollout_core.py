@@ -1,15 +1,12 @@
 """Single source of truth for the open-loop rollout inner step.
 
-Before 2026-07-21 the "sample N trajectories -> aggregate -> EMA-smooth ->
-(optionally) chunk/warm-start" logic was copy-pasted in THREE places that
-kept drifting apart:
-  * test/eval_openloop_metrics.py         (h5 + DINO-cache fed, offline eval)
-  * scripts/inference_ema_v2.py           (dataset-fed, offline single-episode viz)
-  * ai-control-260715/.../run_postech_docking_demo.py  (live-stream deployment)
-They differ ONLY in how each frame's `context` dict is built (data source) and
-in a few knobs (mean vs medoid aggregation, wall-clock EMA reset for the live
-node). The sampling/aggregation/EMA/warm-start core is identical -- and is what
-this module owns. Each call site keeps its own context-building loop and just
+The "sample N trajectories -> aggregate -> EMA-smooth -> (optionally)
+chunk/warm-start" logic is shared by every rollout consumer: the offline
+evaluators (test/eval_run_rgeo.py) and the live deployment node. They differ
+ONLY in how each frame's `context` dict is built (data source) and in a few
+knobs (mean vs medoid aggregation, wall-clock EMA reset for the live node).
+The sampling/aggregation/EMA/warm-start core is identical -- and is what this
+module owns. Each call site keeps its own context-building loop and just
 delegates to `RolloutController.plan()`.
 
 Reproducibility contract: with the defaults (agg="mean", chunk handled by the
@@ -44,7 +41,7 @@ class RolloutPlan:
 
 
 def _denormalize(norm_action, act_scale, act_min):
-    """Identical to utils.docking_dataset.denormalize; inlined to keep this
+    """Inverse of ModularDockingDataset.normalize_action; inlined to keep this
     module import-light and bundle-portable (the deployment copy has no repo
     utils on its path)."""
     return (norm_action + 1.0) / 2.0 * act_scale + act_min

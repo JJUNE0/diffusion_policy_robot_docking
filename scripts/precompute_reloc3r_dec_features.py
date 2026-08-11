@@ -9,12 +9,9 @@ them to a single vector.
 
 Reuses the already-cached `reloc3r_<cam>` ViT-L encoder patch features (the
 expensive part, one _encode_image pass per frame) and reruns only the
-decoder -- no pose head at all, so this is even cheaper than
-precompute_reloc3r_direction.py (which additionally runs the head). Writes
-two new row-aligned datasets into the SAME cache file (mirrors
-precompute_reloc3r_direction.py's in-place-append + independent-resumability
-pattern, so it is safe to run after the file's rotation cache is already
-complete):
+decoder -- no pose head at all. Writes two new row-aligned datasets into the
+SAME cache file, appended in place and independently resumable, so it is safe
+to run after the encoder cache is already complete:
 
   reloc3r_dec1_<cam> : (N, 196, 768) float16 -- current/history frame's
                        decoder stream after cross-attending INTO the episode
@@ -22,9 +19,8 @@ complete):
   reloc3r_dec2_<cam> : (N, 196, 768) float16 -- goal frame's decoder stream
                        after cross-attending INTO the current frame's stream
                        ("current-aware goal" tokens; this is the exact stream
-                       rotation_to_goal()/direction_to_goal() already feed to
-                       the pose head and collapse -- kept here at full
-                       [196,768] patch resolution instead of collapsing).
+                       the pose head consumes and collapses -- kept here at
+                       full [196,768] patch resolution instead of collapsing).
 
 Usage:
   python scripts/precompute_reloc3r_dec_features.py \

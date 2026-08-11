@@ -1,9 +1,8 @@
-"""Acceptance-criteria tests for R-NoGoal/R-Goal/R-Geo
-(docs/0725_reloc3r_test/reloc3r/reloc3r_0725.md, "Implementation Acceptance
-Criteria" #3, #6, #7). #1/#2/#4/#5/#8 are exercised structurally by
-configs/robot/smr_rgeo.yaml + sensors_variant/*.yaml (one flag switches all
-three, shared everything but `sensors:`) and by the smoke-tested train runs
-(2026-07-25 session); #9 is scripts/train.py's existing config/checkpoint
+"""Acceptance-criteria tests for the ReLoc3R token-sequence arms
+("Implementation Acceptance Criteria" #3, #6, #7). #1/#2/#4/#5/#8 are exercised
+structurally by configs/robot/smr_rgeo.yaml + sensors_variant/reloc3r_*.yaml
+(one override switches the arm, shared everything but `sensors:`) and by the
+smoke-tested train runs; #9 is scripts/train.py's existing config/checkpoint
 logging, unchanged.
 
 Run:  python -m pytest test/test_reloc3r_acceptance_criteria.py -v
@@ -24,12 +23,12 @@ from utils.setups import model_setups  # noqa: E402
 from utils.modular_dataset import ModularDockingDataset  # noqa: E402
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-VARIANTS = ["no_goal", "goal_appearance", "goal_appearance_geometry"]
+VARIANTS = ["reloc3r_relfeat_only", "reloc3r_posthead_only", "reloc3r_pose_only"]
 
 # ${hydra:runtime.cwd} is normally resolved by Hydra's OWN resolver, which is
 # only registered inside a real @hydra.main run -- loading a saved/standalone
-# config outside that context (as these tests, or test/eval_run_modular.py,
-# do) raises UnsupportedInterpolationType otherwise. Stand in for it.
+# config outside that context (as these tests do) raises
+# UnsupportedInterpolationType otherwise. Stand in for it.
 if not OmegaConf.has_resolver("hydra"):
     OmegaConf.register_new_resolver("hydra", lambda key: {"runtime.cwd": REPO}[key])
 
@@ -80,7 +79,7 @@ def test_no_future_timestamp_in_condition():
     """Acceptance criterion #6: sensor observations must never include a
     frame with index > t (the current step), and the action target must
     start exactly at t (not before)."""
-    cfg = _load_cfg("goal_appearance_geometry")
+    cfg = _load_cfg("reloc3r_relfeat_only")
     sensors = OmegaConf.to_container(cfg.sensors, resolve=True)
     ds = ModularDockingDataset(
         h5_path=cfg.train_data_path, sensors=sensors, horizon=cfg.horizon,
@@ -114,82 +113,88 @@ def test_no_future_timestamp_in_condition():
             f"idx={i} t={t}: action target does not start at t")
 
 
-def test_base_and_geometry_share_everything_except_geometry_token():
-    """Acceptance criterion #7: base (no_goal) and geometry
-    (goal_appearance_geometry) models must be IDENTICAL in every shared
-    parameter/config, differing only by the presence of the geometry
-    sensor/token. Checked two ways:
-      (a) config equality on every key except `sensors`/`sensors_variant`
-          bookkeeping and `experiment_name`.
+def test_relfeat_and_posthead_share_everything_except_the_tapped_stream():
+    """Acceptance criterion #7: the relfeat arm (r_relfeat_only, the
+    real-robot-validated model) and its controlled posthead baseline
+    (r_posthead_only) must be IDENTICAL in every shared parameter/config,
+    differing ONLY in WHERE the frozen ReLoc3R stream is tapped
+    (dec1/dec2 [196,768] pre-pose-head vs head1/head2 [1,1024] post-pool).
+    Checked two ways:
+      (a) config equality on every key except `sensors`/`experiment_name`.
       (b) parameter-for-parameter equality of every module the two condition
-          nets and DiTs have IN COMMON (same seed -> same init -> byte-
-          identical tensors), and equal DiT architecture end-to-end (DiT
-          never sees `sensors` at all, so it must be 100% identical).
+          nets have IN COMMON (same seed -> same init -> byte-identical
+          tensors), and equal DiT architecture end-to-end (the DiT never sees
+          `sensors` at all, so it must be 100% identical).
     """
-    cfg_base = _load_cfg("no_goal")
-    cfg_geo = _load_cfg("goal_appearance_geometry")
+    cfg_relfeat = _load_cfg("reloc3r_relfeat_only")
+    cfg_posthead = _load_cfg("reloc3r_posthead_only")
     ignore_keys = {"sensors", "experiment_name"}
-    for key in set(cfg_base.keys()) | set(cfg_geo.keys()):
+    for key in set(cfg_relfeat.keys()) | set(cfg_posthead.keys()):
         if key in ignore_keys:
             continue
-        assert cfg_base.get(key) == cfg_geo.get(key), f"config key '{key}' differs between arms"
+        assert cfg_relfeat.get(key) == cfg_posthead.get(key), (
+            f"config key '{key}' differs between arms")
 
-    # Shared encoders (wheel, rgb_history, lidar) are declared FIRST, in the
-    # same relative order, in both sensors_variant/*.yaml files, so under a
-    # matching seed reset immediately before EACH full model_setups() call
-    # they consume identical torch-RNG draws up until the point each arm's
-    # extra sensors (goal/geometry) diverge -- i.e. this DOES validate their
-    # init identity (unlike the DiT case below, where the condition net's
-    # own variable-size components sit BETWEEN the shared encoders and DiT).
+    # `wheel` is declared FIRST, identically, in both sensors_variant files, so
+    # under a matching seed reset immediately before EACH full model_setups()
+    # call the two arms consume identical torch-RNG draws up to the point their
+    # vision sensors diverge -- i.e. this DOES validate wheel-encoder init
+    # identity (unlike the DiT case below, where the condition net's own
+    # variable-size components sit BETWEEN the shared encoder and the DiT).
     torch.manual_seed(7)
-    cfg_base_r = _load_cfg("no_goal", device=DEVICE)
-    _, _, cond_base, dit_base, _ = model_setups(cfg_base_r)
+    cfg_relfeat_r = _load_cfg("reloc3r_relfeat_only", device=DEVICE)
+    _, _, cond_relfeat, dit_relfeat, _ = model_setups(cfg_relfeat_r)
     torch.manual_seed(7)
-    cfg_geo_r = _load_cfg("goal_appearance_geometry", device=DEVICE)
-    _, _, cond_geo, dit_geo, _ = model_setups(cfg_geo_r)
+    cfg_posthead_r = _load_cfg("reloc3r_posthead_only", device=DEVICE)
+    _, _, cond_posthead, dit_posthead, _ = model_setups(cfg_posthead_r)
 
     # DiT (the denoiser) never sees `sensors` -- verify its ARCHITECTURE
     # (hyperparameters -> shapes -> init-seeded weights) is identical between
-    # arms. NOTE: comparing dit_base/dit_geo's state_dicts directly (built via
-    # the two full model_setups() calls above) is NOT a valid seeded-identity
-    # check -- the condition net is constructed first and consumes a
-    # DIFFERENT NUMBER of torch RNG draws per arm (modality_emb size and the
-    # fusion Transformer both depend on n_modalities), so by the time DiT
-    # construction starts the shared torch RNG stream has already diverged
-    # even under one global manual_seed. Rebuild DiT directly, in isolation,
-    # with a fresh seed immediately before EACH instantiation instead.
+    # arms. NOTE: comparing dit_relfeat/dit_posthead's state_dicts directly
+    # (built via the two full model_setups() calls above) is NOT a valid
+    # seeded-identity check -- the condition net is constructed first and may
+    # consume a different number of torch RNG draws per arm, so by the time DiT
+    # construction starts the shared RNG stream can already have diverged even
+    # under one global manual_seed. Rebuild DiT directly, in isolation, with a
+    # fresh seed immediately before EACH instantiation instead.
     from cleandiffuser.nn_diffusion import DiTCrossAttn1d
-    dit_kwargs_base = dict(in_dim=2, emb_dim=cfg_base_r.d_model, d_model=cfg_base_r.d_model,
-                           n_heads=cfg_base_r.n_heads, depth=cfg_base_r.depth, dropout=0.0)
-    dit_kwargs_geo = dict(in_dim=2, emb_dim=cfg_geo_r.d_model, d_model=cfg_geo_r.d_model,
-                          n_heads=cfg_geo_r.n_heads, depth=cfg_geo_r.depth, dropout=0.0)
-    assert dit_kwargs_base == dit_kwargs_geo, "DiT hyperparameters differ between arms"
+    dit_kwargs_relfeat = dict(in_dim=2, emb_dim=cfg_relfeat_r.d_model, d_model=cfg_relfeat_r.d_model,
+                              n_heads=cfg_relfeat_r.n_heads, depth=cfg_relfeat_r.depth, dropout=0.0)
+    dit_kwargs_posthead = dict(in_dim=2, emb_dim=cfg_posthead_r.d_model, d_model=cfg_posthead_r.d_model,
+                               n_heads=cfg_posthead_r.n_heads, depth=cfg_posthead_r.depth, dropout=0.0)
+    assert dit_kwargs_relfeat == dit_kwargs_posthead, "DiT hyperparameters differ between arms"
     torch.manual_seed(123)
-    dit_a = DiTCrossAttn1d(**dit_kwargs_base)
+    dit_a = DiTCrossAttn1d(**dit_kwargs_relfeat)
     torch.manual_seed(123)
-    dit_b = DiTCrossAttn1d(**dit_kwargs_geo)
-    sd_base, sd_geo = dit_a.state_dict(), dit_b.state_dict()
-    assert sd_base.keys() == sd_geo.keys(), "DiT architecture differs between arms"
-    for k in sd_base:
-        assert torch.equal(sd_base[k], sd_geo[k]), f"DiT param '{k}' differs between arms"
-    # also sanity-check the ACTUAL trained-model DiTs (dit_base/dit_geo, from
-    # model_setups above) share the same architecture/shapes, even though
+    dit_b = DiTCrossAttn1d(**dit_kwargs_posthead)
+    sd_a, sd_b = dit_a.state_dict(), dit_b.state_dict()
+    assert sd_a.keys() == sd_b.keys(), "DiT architecture differs between arms"
+    for k in sd_a:
+        assert torch.equal(sd_a[k], sd_b[k]), f"DiT param '{k}' differs between arms"
+    # also sanity-check the ACTUAL trained-model DiTs share shapes, even though
     # their init values legitimately differ per the RNG-stream note above.
-    assert dit_base.state_dict().keys() == dit_geo.state_dict().keys()
-    for k in dit_base.state_dict():
-        assert dit_base.state_dict()[k].shape == dit_geo.state_dict()[k].shape, f"DiT param '{k}' shape differs"
+    assert dit_relfeat.state_dict().keys() == dit_posthead.state_dict().keys()
+    for k in dit_relfeat.state_dict():
+        assert dit_relfeat.state_dict()[k].shape == dit_posthead.state_dict()[k].shape, (
+            f"DiT param '{k}' shape differs")
 
-    # Condition net: every sensor PRESENT IN BOTH (wheel, rgb_history, lidar)
-    # must be parameter-identical; `goal`/`geometry` only exist in the geo arm.
-    shared_sensors = set(cond_base.sensor_names) & set(cond_geo.sensor_names)
-    assert shared_sensors == {"wheel", "rgb_history", "lidar"}
+    # Condition net: the sensor PRESENT IN BOTH (wheel) must be
+    # parameter-identical; the vision sensors are named per tap point.
+    shared_sensors = set(cond_relfeat.sensor_names) & set(cond_posthead.sensor_names)
+    assert shared_sensors == {"wheel"}
     for name in shared_sensors:
-        sd_b = cond_base.encoders[name].state_dict()
-        sd_g = cond_geo.encoders[name].state_dict()
-        assert sd_b.keys() == sd_g.keys(), f"encoder '{name}' architecture differs"
-        for k in sd_b:
-            assert torch.equal(sd_b[k], sd_g[k]), f"encoder '{name}' param '{k}' differs"
-    assert set(cond_geo.sensor_names) - set(cond_base.sensor_names) == {"goal", "geometry"}
+        sd_r = cond_relfeat.encoders[name].state_dict()
+        sd_p = cond_posthead.encoders[name].state_dict()
+        assert sd_r.keys() == sd_p.keys(), f"encoder '{name}' architecture differs"
+        for k in sd_r:
+            assert torch.equal(sd_r[k], sd_p[k]), f"encoder '{name}' param '{k}' differs"
+    assert set(cond_relfeat.sensor_names) - shared_sensors == {"reloc3r_dec1", "reloc3r_dec2"}
+    assert set(cond_posthead.sensor_names) - shared_sensors == {"reloc3r_head1", "reloc3r_head2"}
+
+    # Token budget is held EXACTLY equal -- that is what makes this a
+    # controlled baseline rather than a capacity comparison.
+    assert (cond_relfeat.encoders["reloc3r_dec1"].n_tokens
+            == cond_posthead.encoders["reloc3r_head1"].n_tokens)
 
 
 if __name__ == "__main__":

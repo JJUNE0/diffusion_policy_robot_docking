@@ -1,7 +1,7 @@
-"""Acceptance criterion #5 (docs/0725_reloc3r_test/reloc3r/reloc3r_0725.md):
+"""Acceptance criterion #5:
 "Missing sensor history에 대한 padding mask가 attention에 전달돼야 한다."
 Verifies the mask isn't just plumbed-but-inert: an episode-start sample (most
-of its RGB/wheel history repeat-padded) must produce a real, non-trivial
+of its ReLoc3R/wheel history repeat-padded) must produce a real, non-trivial
 key_valid_mask, AND actually changes the fusion Transformer's self-attention
 output vs. an all-valid mask on the same tokens (i.e. the mask is load-bearing,
 not silently ignored).
@@ -27,7 +27,8 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 def _load_ds():
     base = OmegaConf.load(os.path.join(REPO, "configs/robot/smr_rgeo.yaml"))
-    group = OmegaConf.load(os.path.join(REPO, "configs/robot/sensors_variant/no_goal.yaml"))
+    group = OmegaConf.load(
+        os.path.join(REPO, "configs/robot/sensors_variant/reloc3r_relfeat_only.yaml"))
     if "defaults" in base:
         del base["defaults"]
     cfg = OmegaConf.merge(base, group)

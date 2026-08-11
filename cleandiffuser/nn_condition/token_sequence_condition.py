@@ -1,23 +1,17 @@
 """Config-driven multimodal fusion condition network that returns an UNPOOLED
-[B, N_condition, D] token sequence (docs/0725_reloc3r_test/reloc3r/
-reloc3r_0725.md), for a DiT that cross-attends to condition tokens instead of
-consuming a single pooled AdaLN vector.
+[B, N_condition, D] token sequence, for a DiT (DiTCrossAttn1d) that
+cross-attends to condition tokens instead of consuming a single pooled AdaLN
+vector.
 
-Sibling of ModularSensorFusionCondition (cleandiffuser/nn_condition/
-modular_fusion_condition.py), which pools to [B, D] via a readout token --
-kept as a SEPARATE class (not a flag on the existing one) so the pooled path
-and anything trained on it stay untouched.
-
-Three condition variants (docs spec, "condition token sequence 구성") are
-built from the SAME class by varying which sensors are present in the YAML
-`sensors:` dict -- no code branching for R-base/R-goal/R-geo:
-  no_goal                  : C = [Z_rgb, Z_lidar, Z_wheel]
-  goal_appearance          : C = [Z_rgb, Z_lidar, Z_wheel, Z_goal]
-  goal_appearance_geometry : C = [Z_rgb, Z_lidar, Z_wheel, Z_goal, Z_reloc]
+Every ReLoc3R arm is built from this SAME class by varying which sensors are
+listed in the YAML `sensors:` dict -- no code branching per variant, e.g.
+  reloc3r_relfeat_only   : C = [Z_wheel, Z_dec1, Z_dec2]
+  reloc3r_posthead_only  : C = [Z_wheel, Z_head1, Z_head2]
+  reloc3r_goal_pool_*    : C = [Z_wheel, Z_goalpair]
 
 Not implemented (explicitly out of scope per spec): confidence/learned
-validity, explicit LiDAR scale correction, NoMaD-style goal masking (the goal
-sensor, when present, is ALWAYS attended -- no goal_mask input exists here).
+validity, NoMaD-style goal masking (the goal is ALWAYS attended -- no
+goal_mask input exists here).
 """
 from typing import Dict, Optional
 
@@ -25,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from cleandiffuser.nn_condition import BaseNNCondition
-from cleandiffuser.nn_condition.modality_encoders import PointCloudEncoder, build_encoder
+from cleandiffuser.nn_condition.modality_encoders import build_encoder
 from cleandiffuser.utils import SinusoidalEmbedding, Transformer
 
 
@@ -57,9 +51,7 @@ class TokenSequenceFusionCondition(BaseNNCondition):
             d_model, nhead, num_layers=num_layers,
             attn_dropout=dropout, ffn_dropout=dropout)
 
-    def _gather_obs(self, name, encoder, condition):
-        if isinstance(encoder, PointCloudEncoder):
-            return {"points": condition[name], "npoints": condition[f"{name}_npoints"]}
+    def _gather_obs(self, name, condition):
         mask_key = f"{name}_valid_mask"
         if mask_key in condition:
             return {"data": condition[name], "valid_mask": condition[mask_key]}
@@ -89,16 +81,14 @@ class TokenSequenceFusionCondition(BaseNNCondition):
                 f"Missing condition keys for sensors {missing}. "
                 f"Provided: {sorted(condition.keys())}")
 
-        first = self.encoders[self.sensor_names[0]]
-        ref = self._gather_obs(self.sensor_names[0], first, condition)
-        ref_t = ref["points"] if isinstance(ref, dict) and "points" in ref else (
-            ref["data"] if isinstance(ref, dict) else ref)
+        ref = self._gather_obs(self.sensor_names[0], condition)
+        ref_t = ref["data"] if isinstance(ref, dict) else ref
         b, device = ref_t.shape[0], ref_t.device
 
         token_list, valid_list = [], []
         for i, name in enumerate(self.sensor_names):
             enc = self.encoders[name]
-            obs = self._gather_obs(name, enc, condition)
+            obs = self._gather_obs(name, condition)
             tok = enc(obs) + self.modality_emb[i].view(1, 1, self.d_model)
             token_list.append(tok)
             n_tok = tok.shape[1]

@@ -1,5 +1,5 @@
-"""Counterfactual TERMINAL-ALIGNMENT eval for the token-sequence architecture
-(R-NoGoal / R-Goal / R-Geo), i.e. the axis the paper's claim actually lives on.
+"""Counterfactual TERMINAL-ALIGNMENT eval for the token-sequence architecture,
+i.e. the axis the paper's claim actually lives on.
 
 Why this exists: test/eval_run_rgeo.py reports ADE/FDE/velRMSE, which score
 imitation fidelity over the whole 500-step approach and are dominated by the
@@ -8,7 +8,7 @@ axes demonstrably disagree — old_baseline_100k wins ADE/FDE/velRMSE but loses
 align_deg (2.10 vs 1.28) and xpos_mm (12.19 vs 8.62) to s20_batch256. So the
 three R-* arms had never been measured on the axis being claimed.
 
-Math is copied verbatim from test/eval_run.py::align_eval so the numbers are
+Math is copied verbatim from the legacy eval_run.py::align_eval so the numbers are
 directly comparable to the legacy runs in test/out/weekend/*.json. Only the
 CONTEXT CONSTRUCTION differs: ModularDockingDataset (config-driven, token
 sequence) instead of the DINO-hardcoded H5Batcher.
@@ -27,7 +27,7 @@ POLICY-vs-DEMO gap is fair even though absolute degrees inherit ICP error.
 Report as "ICP-free training, ICP-instrumented evaluation".
 
 Run:  EVAL_H5=dataset/after_0328_test.h5 EVAL_STATS_H5=dataset/after_0328_train.h5 \
-      EVAL_TAG=heldout python test/eval_align_rgeo.py outputs/train/r_geo/<timestamp>
+      EVAL_TAG=heldout python test/eval_align_rgeo.py outputs/train/r_relfeat_only/<timestamp>
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if not OmegaConf.has_resolver("hydra"):
     OmegaConf.register_new_resolver("hydra", lambda key: {"runtime.cwd": REPO}[key])
 
-from scripts.inference_ema_v2 import build_model_from_cfg  # noqa: E402
+from utils.inference import build_model_from_cfg  # noqa: E402
 from utils.modular_dataset import ModularDockingDataset  # noqa: E402
 
 # NOT `from test.eval_run_rgeo import ...`: Python's stdlib owns the name `test`,
@@ -59,7 +59,7 @@ from eval_run_rgeo import _resolve_sensor_files  # noqa: E402
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 DT = 0.0333
 HORIZON = 60
-# identical to test/eval_run.py::align_eval so legacy numbers stay comparable
+# identical to the legacy eval_run.py::align_eval so old numbers stay comparable
 ALIGN_NEAR_M = 0.6
 ALIGN_N_SAMPLES = 4
 N_BLOCKS = 15
@@ -168,8 +168,6 @@ def align_eval(nn_diffusion, solver, use_ema, ds, act_min, act_scale,
 def main(run_dir):
     os.makedirs(OUT_DIR, exist_ok=True)
     cfg = OmegaConf.load(os.path.join(run_dir, "config.yaml"))
-    if not cfg.get("use_token_sequence_fusion", False):
-        raise SystemExit("Not an R-* token-sequence run; use test/eval_run.py::align_eval instead.")
     exp = str(cfg.experiment_name)
     cks = glob.glob(os.path.join(run_dir, "checkpoint_step_*.pt"))
     ckpt_path = max(cks, key=lambda p: int(re.search(r"(\d+)\.pt$", p).group(1)))

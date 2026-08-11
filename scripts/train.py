@@ -19,7 +19,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 from utils.setups import logger_setups, model_setups
-from dino.dino_detector import DinoBatchDetector
 from cleandiffuser.utils import loop_dataloader, threaded_prefetch, set_seed
 from scripts.plot_training import plot_from_jsonl
 
@@ -114,7 +113,7 @@ def _init_distributed(args):
     return True, rank, local_rank, torch.device(args.device)
 
 
-@hydra.main(config_path="../configs/robot", config_name="smr", version_base=None)
+@hydra.main(config_path="../configs/robot", config_name="smr_rgeo", version_base=None)
 def main(args):
     distributed, rank, local_rank, device = _init_distributed(args)
     is_main = rank == 0
@@ -181,7 +180,7 @@ def main(args):
         # Warm-start (init_from): load WEIGHTS ONLY from a previous checkpoint
         # into a fresh run (new run dir/config/optimizer/scheduler/step count).
         # Unlike resume_path, the live config applies -> use this to continue
-        # training under changed losses (e.g. the distance-shaped aux loss).
+        # training under a changed config.
         # The EMA is re-seeded from the loaded weights: the source runs' EMA
         # still carries most of its random init (ema_rate 0.9999 vs 4230 steps
         # -> ~65% init, see memory ema-undertrained-4230-steps), so copying the
@@ -202,11 +201,11 @@ def main(args):
             reshaped = [k for k in src if k in tgt_sd and src[k].shape != tgt_sd[k].shape]
             for k in reshaped:
                 del src[k]
-            # Partial (graft) loading: when the live architecture ADDS branches
-            # the source checkpoint never had (e.g. grafting goal/lidar/aux onto
-            # the old 2-camera baseline), load every matching key and leave the
-            # new branches at their fresh init. strict load stays the default
-            # path so exact warm-starts still catch real mismatches loudly.
+            # Partial (graft) loading: when the live architecture ADDS sensor
+            # branches the source checkpoint never had, load every matching key
+            # and leave the new branches at their fresh init. strict load stays
+            # the default path so exact warm-starts still catch real mismatches
+            # loudly.
             missing, unexpected = nn_diffusion.model.load_state_dict(src, strict=False)
             nn_diffusion.model_ema.load_state_dict(src, strict=False)
             print("======================================================")
@@ -245,69 +244,11 @@ def main(args):
 
     nn_diffusion.train()
 
-    # Modular spec-driven path: the dataset already returns the condition dict
-    # keyed exactly as ModularSensorFusionCondition expects (sensor names from
-    # the YAML `sensors:` block), so the batch is forwarded as-is. DINO features
-    # are precomputed (in-h5 or sidecar `file:`) -> no live backbone here.
-    # use_token_sequence_fusion (R-NoGoal/R-Goal/R-Geo, docs/0725_reloc3r_test)
-    # reuses ModularDockingDataset too -> same obs-dict-is-the-condition-dict
-    # forwarding applies.
-    use_modular = args.get("use_modular_fusion", False) or args.get("use_token_sequence_fusion", False)
-
-    # Vision uses sparse temporal sampling from 30-step history.
-    vision_stride = args.get("vision_stride", 6)
-    use_goal = args.get("use_goal", False)
-    use_lidar = args.get("use_lidar_points", False)
-    use_aux = args.get("use_aux_pose", False)
-    aux_weight = args.get("aux_weight", 1.0)
-    # Distance-shaped aux supervision (measured in test/icp_noise_floor.py):
-    # the ICP teacher is mm-accurate up to ~1.0 m but its labels beyond ~1.1 m
-    # are themselves cm-wrong, and precision only matters near the dock. So
-    # frames farther than aux_dist_max are masked out of the aux loss, and the
-    # rest are weighted by (aux_dist_ref / dock_dist)^aux_dist_power.
-    # aux_dist_power=0 and aux_dist_max=null reproduce the old uniform loss.
-    aux_dist_max = args.get("aux_dist_max", None)
-    aux_dist_power = float(args.get("aux_dist_power", 0.0) or 0.0)
-    aux_dist_ref = float(args.get("aux_dist_ref", 0.6))
-    # Offline reward-weighted BC (AWR-style; the offline stand-in for residual
-    # RL, no simulator needed): scale each sample's denoising loss by
-    # exp(advantage/adv_beta) where advantage = z-scored dock-approach speed of
-    # that horizon (computed in the dataset). Upweights the fast-approaching
-    # demo segments so the policy stops copying the slow/parked majority.
-    # adv_weight=false -> uniform (standard BC).
-    adv_weight = args.get("adv_weight", False)
-    adv_beta = float(args.get("adv_beta", 1.0))
-    adv_clip = float(args.get("adv_clip", 2.0))
-    # adv_mode:
-    #   "speed"        -> A = progress         (approach speed only; the 07-14 v1)
-    #   "precision"    -> A = w_align*align + w_term*term + w_speed*progress*gate(d)
-    #   "precision_v2" -> A = w_align*align*(1-gate(d)) + w_term*term
-    #                     (07-18: no speed term, align reward only near the dock
-    #                      — v1 doubled wz noise on graft_g0_awr, see ablation §9)
-    # Precision mode encodes the stated priority (precision >> speed):
-    #   * align/term are HEADING-alignment signals — measured on the demos, yaw is
-    #     the only precision axis with real spread (7.1x the ICP noise floor);
-    #     final x/y are mechanically fixed by the dock (1.2-1.9x = noise).
-    #   * the speed term is GATED OFF near the dock (gate=0 below adv_gate_near):
-    #     rewarding speed in the precision zone would trade away alignment, which
-    #     is exactly what we do not want.
-    adv_mode = str(args.get("adv_mode", "speed"))
-    adv_w_align = float(args.get("adv_w_align", 1.0))
-    adv_w_pos = float(args.get("adv_w_pos", 0.0))       # forward-x position term (0 = angle-only)
-    adv_w_term = float(args.get("adv_w_term", 1.0))
-    adv_w_speed = float(args.get("adv_w_speed", 0.3))
-    adv_gate_near = float(args.get("adv_gate_near", 0.6))   # m: below this, no speed reward
-    adv_gate_far = float(args.get("adv_gate_far", 0.8))     # m: above this, full speed reward
-    sparse_vision = args.get("sparse_vision", False)
-    use_room1 = args.get("use_room1", True)
-    # When DINO features are precomputed (scripts/precompute_dino_cache.py), the
-    # dataset returns cached [Tv,196,768] features directly and we skip the DINO
-    # backbone entirely (see plan: single-camera + offline caching).
-    use_dino_cache = args.get("use_dino_cache", False)
-
-    # Frozen DINO feature extractor used only to build condition inputs. Skipped
-    # (not even loaded) when reading precomputed features from the cache.
-    dino_detector = None if (use_dino_cache or use_modular) else DinoBatchDetector(device=device)
+    # The dataset already returns the condition dict keyed exactly as
+    # TokenSequenceFusionCondition expects (sensor names from the YAML
+    # `sensors:` block), so each batch is forwarded verbatim. ReLoc3R features
+    # are precomputed (in-h5 or sidecar `file:`) -- no vision backbone runs
+    # here, except the frozen ReLoc3R decoder inside the goal-pair encoder.
 
     amp_name = str(args.get("amp_dtype", "none")).lower()
     amp_enabled = device.type == "cuda" and amp_name in ("bf16", "bfloat16")
@@ -326,170 +267,12 @@ def main(args):
             break
 
         action = batch["act"].to(device, non_blocking=True)  # [B, horizon, 2]
-        obs_dict = batch["obs"]
+        context = {k: v.to(device, non_blocking=True) for k, v in batch["obs"].items()}
 
-        # ------------------------------------------------------------------
-        # Multimodal condition inputs. Three paths:
-        #   (M) use_modular_fusion: obs dict is already the condition dict
-        #       (spec-driven names) -> forward verbatim.
-        #   (A) use_dino_cache: dataset returns precomputed [B,Tv,196,768] DINO
-        #       features directly -> skip the backbone (the fast training path).
-        #   (B) live: DINO-encode sparse image history on the fly.
-        # room1 (image_top) is only used when use_room1 is True (else room2 only).
-        # ------------------------------------------------------------------
-        if use_modular:
-            context = {k: v.to(device, non_blocking=True) for k, v in obs_dict.items()}
-        elif use_dino_cache:
-            velocity = obs_dict["velocity"].to(device, non_blocking=True)
-            dino_feat2 = obs_dict["dino_feat_room2"].to(device, non_blocking=True).float()
-            B, T_vis = dino_feat2.shape[0], dino_feat2.shape[1]
-            context = {"dino_feat2": dino_feat2.view(B, T_vis, 196, 768), "velocity": velocity}
-            if use_room1:
-                context["dino_feat1"] = (obs_dict["dino_feat_room1"]
-                                         .to(device, non_blocking=True).float().view(B, T_vis, 196, 768))
-            if use_goal:
-                context["goal_feat2"] = (obs_dict["goal_feat_room2"]
-                                         .to(device, non_blocking=True).float().view(B, 1, 196, 768))
-                if use_room1:
-                    context["goal_feat1"] = (obs_dict["goal_feat_room1"]
-                                             .to(device, non_blocking=True).float().view(B, 1, 196, 768))
-                context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
-        else:
-            velocity = obs_dict["velocity"].to(device, non_blocking=True)
-
-            def _encode(img_key):
-                if sparse_vision:
-                    img = obs_dict[img_key].to(device, non_blocking=True).float() / 255.0
-                else:
-                    img = obs_dict[img_key][:, ::vision_stride].to(device, non_blocking=True)
-                b, tv, c, h, w = img.shape
-                with torch.no_grad():
-                    feat, _, _ = dino_detector.get_heatmap(img.reshape(b * tv, c, h, w))
-                return feat.view(b, tv, 196, 768), b, tv
-
-            dino_feat2, B, T_vis = _encode("image_room2")
-            context = {"dino_feat2": dino_feat2, "velocity": velocity}
-            if use_room1:
-                context["dino_feat1"] = _encode("image_room1")[0]
-
-            # Goal-feature conditioning (CLAUDE.md §2.3 Loss A): DINO-encode the
-            # goal (docked) frame and pass it + its NoMaD mask as condition inputs.
-            if use_goal:
-                def _encode_goal(img_key):
-                    goal = obs_dict[img_key].to(device, non_blocking=True)
-                    if sparse_vision:
-                        goal = goal.float() / 255.0
-                    with torch.no_grad():
-                        feat, _, _ = dino_detector.get_heatmap(goal)
-                    return feat.view(B, 1, 196, 768)
-
-                context["goal_feat2"] = _encode_goal("goal_image_room2")
-                if use_room1:
-                    context["goal_feat1"] = _encode_goal("goal_image_room1")
-                context["goal_mask"] = obs_dict["goal_mask"].to(device, non_blocking=True)
-
-        # Raw LiDAR points (Option A): point-set branch input (legacy path only;
-        # the modular obs dict already carries its lidar keys by sensor name).
-        if use_lidar and not use_modular:
-            context["lidar_points"] = obs_dict["lidar_points"].to(device, non_blocking=True)
-            context["lidar_npoints"] = obs_dict["lidar_npoints"].to(device, non_blocking=True)
-            # Goal-referenced registration: the docked frame's scan as its own
-            # modality (dataset emits it when use_goal_lidar).
-            if "goal_lidar_points" in obs_dict:
-                context["goal_lidar_points"] = obs_dict["goal_lidar_points"].to(device, non_blocking=True)
-                context["goal_lidar_npoints"] = obs_dict["goal_lidar_npoints"].to(device, non_blocking=True)
-
-        # Aux-feedback gating (2026-07-22): the SAME reliable+distance weight
-        # aux_loss uses below must reach the condition net's forward() BEFORE
-        # nn_diffusion.loss() runs it, since that's where use_aux_feedback folds
-        # aux_pred back into the conditioning readout -- gating it after the
-        # fact would be too late. dock_target/reliable come straight from the
-        # batch (no dependency on the network's own forward pass), so computing
-        # this weight early is safe.
-        if use_aux and args.get("use_aux_feedback", False):
-            dock_target_for_gate = batch["dock_target"].to(device, non_blocking=True)
-            fb_w = batch["reliable"].to(device, non_blocking=True).float()
-            if aux_dist_max is not None or aux_dist_power > 0:
-                std_g = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
-                mean_g = torch.as_tensor(getattr(dataset, "aux_xy_mean", dataset.dock_xy_mean), device=device)
-                xy_g = dock_target_for_gate[:, :2] * std_g + mean_g
-                dock_d_g = torch.hypot(xy_g[:, 0], xy_g[:, 1]).clamp(min=0.3)
-                if aux_dist_max is not None:
-                    fb_w = fb_w * (dock_d_g <= float(aux_dist_max)).float()
-                if aux_dist_power > 0:
-                    fb_w = fb_w * (aux_dist_ref / dock_d_g) ** aux_dist_power
-            context["aux_feedback_weight"] = fb_w
-
-        # Combined loss = denoising (main) + ICP-distilled aux pose (precision).
-        # nn_diffusion.loss() runs the condition net once and caches its aux pred.
-        loss_kwargs = {}
-        if adv_weight:
-            prog = batch["adv_prog"].to(device, non_blocking=True)
-            if adv_mode in ("precision", "precision_v2"):
-                align = batch["adv_align"].to(device, non_blocking=True)
-                pos = batch["adv_pos"].to(device, non_blocking=True)
-                term = batch["adv_term"].to(device, non_blocking=True)
-                d = batch["adv_dock_d"].to(device, non_blocking=True)
-                # speed gate: 0 inside the precision zone, ramps to 1 in the approach zone
-                gate = ((d - adv_gate_near) / max(adv_gate_far - adv_gate_near, 1e-6)).clamp(0.0, 1.0)
-                if adv_mode == "precision_v2":
-                    # v2 (07-18, graft6 결과 반영): the graft_g0_awr cell showed v1
-                    # doubles the policy's wz (turning) noise on held-out rollouts.
-                    # Two suspected causes, both removed here: (1) the residual
-                    # speed term kept pushing fast-tail imitation far from the
-                    # dock; (2) the UNGATED align term rewards yaw change
-                    # anywhere, i.e. far-field steering — a much noisier signal
-                    # than docking alignment. v2 = per-frame align reward only
-                    # INSIDE the precision zone (1-gate), plus the episode-level
-                    # terminal-alignment credit. No speed reward at all.
-                    a = adv_w_align * align * (1.0 - gate) + adv_w_term * term
-                else:
-                    # v1: align (yaw) + pos (forward-x) are both precision, ungated;
-                    # speed is gated off near the dock. adv_w_pos=0 -> angle-only.
-                    a = (adv_w_align * align + adv_w_pos * pos
-                         + adv_w_term * term + adv_w_speed * prog * gate)
-            else:
-                a = prog
-            w = torch.exp((a / adv_beta).clamp(-adv_clip, adv_clip))
-            w = w / w.mean().clamp(min=1e-6)      # keep the loss scale unchanged
-            loss_kwargs["sample_weight"] = w
         with torch.autocast(
             device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled
         ):
-            denoise_loss = nn_diffusion.loss(
-                x0=action, condition=context, **loss_kwargs)
-        aux_val, mm_val = None, None
-        if use_aux:
-            aux_pred = nn_condition._aux_pred
-            dock_target = batch["dock_target"].to(device, non_blocking=True)
-            w = batch["reliable"].to(device, non_blocking=True).float()
-            if aux_dist_max is not None or aux_dist_power > 0:
-                # aux_xy_* = stats of whatever the dataset emitted (absolute dock
-                # pose, or current->goal relative pose when aux_relative). In the
-                # relative case the masking/weighting distance is distance-to-goal.
-                std = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
-                mean = torch.as_tensor(getattr(dataset, "aux_xy_mean", dataset.dock_xy_mean), device=device)
-                xy = dock_target[:, :2] * std + mean
-                dock_d = torch.hypot(xy[:, 0], xy[:, 1]).clamp(min=0.3)
-                if aux_dist_max is not None:
-                    w = w * (dock_d <= float(aux_dist_max)).float()
-                if aux_dist_power > 0:
-                    w = w * (aux_dist_ref / dock_d) ** aux_dist_power
-            se = ((aux_pred - dock_target) ** 2).sum(dim=1)
-            aux_loss = (se * w).sum() / w.sum().clamp(min=1e-6)
-            total_loss = denoise_loss + aux_weight * aux_loss
-            aux_val = aux_loss.item()
-            with torch.no_grad():
-                # mm over the SUPERVISED frames (w>0), unweighted. With the
-                # distance mask on, this is not comparable to pre-2026-07-10
-                # logs, which averaged every reliable frame out to 1.6 m.
-                std = torch.as_tensor(getattr(dataset, "aux_xy_std", dataset.dock_xy_std), device=device)
-                wm = (w > 0).float()
-                d_xy = (aux_pred[:, :2] - dock_target[:, :2]) * std
-                mm_val = ((torch.hypot(d_xy[:, 0], d_xy[:, 1]) * 1000.0 * wm).sum()
-                          / wm.sum().clamp(min=1.0)).item()
-        else:
-            total_loss = denoise_loss
+            total_loss = nn_diffusion.loss(x0=action, condition=context)
 
         nn_diffusion.optimizer.zero_grad()
         total_loss.backward()
@@ -498,40 +281,28 @@ def main(args):
         nn_diffusion.optimizer.step()
         nn_diffusion.ema_update()
         lr_schedulers.step()
-        loss_for_log = denoise_loss.detach().float()
+        loss_for_log = total_loss.detach().float()
         if distributed and n_gradient_step % args.get("log_interval", 100) == 0:
             dist.all_reduce(loss_for_log, op=dist.ReduceOp.SUM)
             loss_for_log /= dist.get_world_size()
-        diff_log = {"loss": loss_for_log.item(), "grad_norm": grad_norm,
-                    "aux": aux_val, "aux_mm": mm_val}
 
         if n_gradient_step == 0:
             print(f"Action target shape: {action.shape}")
-            if use_modular:
-                print(f"Modular fusion | backbone={args.get('diffusion_backbone', 'rectified_flow')}")
-                for k, v in context.items():
-                    print(f"  obs[{k}]: {tuple(v.shape)}")
-            else:
-                print(f"use_room1={use_room1} | use_dino_cache={use_dino_cache}")
-                print(f"DINO room2 feature shape: {context['dino_feat2'].shape}")
-                if use_room1:
-                    print(f"DINO room1 feature shape: {context['dino_feat1'].shape}")
-                print(f"Velocity history shape: {velocity.shape}")
+            print(f"Token-sequence fusion | backbone="
+                  f"{args.get('diffusion_backbone', 'rectified_flow')}")
+            for k, v in context.items():
+                print(f"  obs[{k}]: {tuple(v.shape)}")
 
         if is_main and n_gradient_step % args.get("log_interval", 100) == 0:
             logger.log(
                 {
                     "step": n_gradient_step,
-                    "loss": diff_log["loss"],
-                    "grad_norm": diff_log["grad_norm"],
-                    "aux_loss": diff_log["aux"],
-                    "aux_pose_mm": diff_log["aux_mm"],
+                    "loss": loss_for_log.item(),
+                    "grad_norm": grad_norm,
                 },
                 category="train",
             )
-            extra = (f" | aux {diff_log['aux']:.4f} | dock {diff_log['aux_mm']:.1f}mm"
-                     if diff_log["aux"] is not None else "")
-            print(f"Step {n_gradient_step} | Loss: {diff_log['loss']:.4f}{extra}")
+            print(f"Step {n_gradient_step} | Loss: {loss_for_log.item():.4f}")
 
         if is_main and n_gradient_step > 0 and n_gradient_step % args.save_interval == 0:
             save_ckpt_path = os.path.join(save_path, f"checkpoint_step_{n_gradient_step}.pt")

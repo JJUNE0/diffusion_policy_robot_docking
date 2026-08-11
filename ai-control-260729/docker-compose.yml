@@ -26,7 +26,7 @@ services:
       RC_NATS_URL: "nats://nats:4222"
       RC_PROTOCOL_DIR: "/protocol"
       # LiveKit 시그널링 포트 = rc 배포 env(.env.dgx)의 LIVEKIT_PORT=47320 (record 노드 동일). 7880 아님.
-      LIVEKIT_URL: "ws://${LIVEKIT_HOST:-host.docker.internal}:${LIVEKIT_PORT:-47320}"
+      LIVEKIT_URL: "ws://${LIVEKIT_HOST:-host.docker.internal}:${LIVEKIT_PORT:-47330}"
       ROBOT_ID: "${ROBOT_ID:-7023}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       # 상시 도킹 — 멀티스텝 궤적을 MQTT robot/{id}/ai-command 로 발행

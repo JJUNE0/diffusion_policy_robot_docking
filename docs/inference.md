@@ -1,5 +1,12 @@
 # 추론 시 입력/출력 구조 (Inference I/O)
 
+> [!WARNING]
+> 이 문서는 2026-06-23의 legacy DINO/ICP 설계를 기록한 과거 문서이며 현재
+> `ai-control-260729`의 token-sequence ReLoc3R 배포 경로를 설명하지 않는다.
+> `r_relfeat_only`의 실제 학습--실기 비교는
+> [`r_relfeat_only_train_inference_code_audit.md`](r_relfeat_only_train_inference_code_audit.md)를
+> 기준으로 한다.
+
 > 기준일: 2026-06-23 · 브랜치 `vla` · 근거: [CLAUDE.md](CLAUDE.md), [IMPLEMENTATION_LOG.md](IMPLEMENTATION_LOG.md)
 > 실제 코드 기준: `scripts/inference_ema.py`, `endgame/orchestrator.py`, `endgame/icp_matcher.py`
 

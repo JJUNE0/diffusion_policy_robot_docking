@@ -56,13 +56,6 @@ def ai_control_config_schema(config) -> List[Dict[str, Any]]:
         # ── 운영 토글 ──
         _f("enable_send", "MQTT 발행/제어권", "Enable Publish", "boolean", config.enable_send, _RC),
         _f("run_plugin", "추론 모델", "Model", "select", config.run_plugin, _UM, options=_discover_run_plugins()),
-        _f("demo_ckpt", "체크포인트", "Checkpoint", "string", config.demo_ckpt, _UM),
-        _f("demo_camera_mode", "카메라 구성", "Camera Mode", "select",
-           config.demo_camera_mode, _UM, options=["auto", "orbbec", "orbbec_usb"]),
-        _f("demo_goal_image_orbbec0", "Orbbec goal 이미지", "Orbbec Goal Image",
-           "string", config.demo_goal_image_orbbec0, _UM),
-        _f("demo_goal_image_usb0", "USB goal 이미지", "USB Goal Image",
-           "string", config.demo_goal_image_usb0, _UM),
         _f("log_level", "로그 레벨", "Log Level", "select", config.log_level, _RM,
            options=["DEBUG", "INFO", "WARNING", "ERROR"]),
         _f("log_snapshot", "스냅샷 로그", "Log Snapshot", "boolean", config.log_snapshot, _RM),

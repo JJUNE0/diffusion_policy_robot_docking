@@ -1,28 +1,26 @@
 # ==========================================
-# R-NoGoal / R-Goal / R-Geo (docs/0725_reloc3r_test/reloc3r/reloc3r_0725.md).
-# ONE config flag switches all three condition variants -- the Hydra config
-# group `sensors_variant` (configs/robot/sensors_variant/{no_goal,
-# goal_appearance,goal_appearance_geometry}.yaml). Every other setting here
+# Single-camera ReLoc3R base config (after_0328 dataset). ONE config flag
+# switches the condition variant -- the Hydra config group `sensors_variant`
+# (configs/robot/sensors_variant/reloc3r_*.yaml). Every other setting here
 # (network, optimizer, batch size, steps, dataset, sampler) is IDENTICAL
-# across the three arms by construction -- they all load THIS file and only
-# override `sensors_variant=`.
+# across the arms by construction -- they all load THIS file and only override
+# `sensors_variant=`.
 #
-# Run:
-#   python scripts/train.py --config-name smr_rgeo sensors_variant=no_goal                    experiment_name=r_nogoal
-#   python scripts/train.py --config-name smr_rgeo sensors_variant=goal_appearance             experiment_name=r_goal
-#   python scripts/train.py --config-name smr_rgeo sensors_variant=goal_appearance_geometry    experiment_name=r_geo
+# Run (the real-robot-validated arm is the default):
+#   python scripts/train.py --config-name smr_rgeo sensors_variant=reloc3r_relfeat_only   experiment_name=r_relfeat_only
+#   python scripts/train.py --config-name smr_rgeo sensors_variant=reloc3r_posthead_only  experiment_name=r_posthead_only
+#   python scripts/train.py --config-name smr_rgeo sensors_variant=reloc3r_pose_only      experiment_name=r_pose_only
 #
 # Architecture: TokenSequenceFusionCondition (unpooled [B,N_condition,D]) +
 # DiTCrossAttn1d (action tokens cross-attend to the condition sequence, no
 # causal mask, no AdaLN condition-vector). No aux head, no NoMaD goal masking,
-# no LiDAR scale correction, no confidence/learned-validity head (all
-# explicitly out of scope per spec).
+# no confidence/learned-validity head (all explicitly out of scope per spec).
 # ==========================================
 defaults:
-  - sensors_variant: goal_appearance_geometry
+  - sensors_variant: reloc3r_relfeat_only
   - _self_
 
-experiment_name: r_geo
+experiment_name: r_relfeat_only
 seed: 0
 device: cuda:0
 
@@ -30,9 +28,9 @@ train_data_path: ${hydra:runtime.cwd}/dataset/after_0328_train.h5
 horizon: 60          # action prediction horizon (~2.0s future @ dt=0.0333)
 obs_horizon: 60       # observation history window (~2.0s), spec: "duration: 2s"
 batch_size: 256
-num_workers: 0        # see test/queue_reloc3r_ablation.sh note: /dev/shm is
-                      # container-capped at 2GB, cached-feature batches are
-                      # large; main-process loading avoids the shm crash.
+num_workers: 0        # /dev/shm is container-capped at 2GB and cached-feature
+                      # batches are large; main-process loading avoids the
+                      # shared-memory crash.
 prefetch_factor: null
 
 state_dim: 2
@@ -40,25 +38,22 @@ velocity_dim: 2
 image_width: 320
 image_height: 240
 
-use_modular_fusion: false         # NOT the pooled path
-use_token_sequence_fusion: true   # -> utils/setups.py:_token_sequence_setups
 
 # Action normalization: minmax | robust  (utils/modular_dataset.py::_action_stats)
 #
 # minmax (legacy) lets outliers set the scale — vx spans +-0.27 m/s while p1/p99
 # are only -0.075/+0.084 — so the 2-15 mm/s docking end-game occupies under 3%
 # of the [-1,1] output range and drowns in sampler noise. Measured contributor
-# to the 2026-07-23 terminal stall (test/terminal_metric.py).
+# to the 2026-07-23 terminal stall (test/terminal_metric.py band table).
 #
 # robust puts the bounds at +-p99, symmetric so that vx=0 maps exactly to 0:
 # vx scale 0.563 -> 0.167 m/s (3.36x), wz 1.032 -> 0.312 rad/s (3.31x), 1.7% of
 # frames clipped. The affine contract is unchanged, so nothing downstream needs
 # an edit — only the numbers stored in the checkpoint change.
 #
-# DEFAULT STAYS minmax ON PURPOSE: r_nogoal/r_goal/r_geo were all trained with
-# it, and mixing normalizers across the three arms would invalidate the
-# ablation. Run the robust wave as a matched set of all three:
-#     bash test/queue_rgeo_robust.sh
+# DEFAULT STAYS minmax ON PURPOSE: every ReLoc3R arm (including the
+# real-robot-validated r_relfeat_only checkpoints) was trained with it, and
+# mixing normalizers across arms would invalidate the ablation.
 action_norm: minmax
 
 # ---- Network ----

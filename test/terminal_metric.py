@@ -16,7 +16,7 @@ ADE/FDE as reporting.
 
 Caveat that outlives the metric: the demos themselves stop ~24 mm short of
 engagement and disagree with each other by 43 mm (2026-07-25 audit,
-test/viz_dock_shift.py). So vx_ratio ~ 1.0 means "matches the demos", which is
+the 2026-07-25 dock-shift audit). So vx_ratio ~ 1.0 means "matches the demos", which is
 necessary but NOT sufficient to dock. A policy that has to EXCEED the demos --
 which, given the audit, every policy does -- wants vx_ratio > 1 here.
 """
@@ -30,7 +30,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from endgame.se2 import inverse  # noqa: E402
+from utils.se2 import inverse  # noqa: E402
 
 # Bands of remaining approach distance to the episode's own docked pose (mm).
 BANDS = [(0, 10), (10, 25), (25, 50), (50, 100), (100, 200), (200, 10_000)]

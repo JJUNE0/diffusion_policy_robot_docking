@@ -1,7 +1,7 @@
-"""Minimal SE(2) utilities for the LiDAR end-game module.
+"""Minimal SE(2) utilities.
 
-Conventions (kept consistent with the repo's occupancy raster, see
-``dataset/preprocessing.py`` on the lidar branch):
+Conventions (kept consistent with the repo's body-frame convention, see
+``utils/preprocessing.py``):
 
 * A pose is an ``np.ndarray`` of shape ``(3,)`` -> ``[x, y, theta]``.
 * ``+x`` is robot **forward**, ``+y`` is robot **left**, ``theta`` is CCW (rad).
@@ -9,7 +9,7 @@ Conventions (kept consistent with the repo's occupancy raster, see
   *child* frame into the *parent* frame:  ``p_parent = R(theta) @ p_child + t``.
 
 These helpers are deliberately tiny and dependency-free (numpy only) so the
-end-game subsystem stays decoupled from the learned-policy / torch stack.
+evaluation tooling stays decoupled from the learned-policy / torch stack.
 """
 
 from __future__ import annotations

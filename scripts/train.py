@@ -93,44 +93,6 @@ def _load_resume_state(
     return next_step
 
 
-<<<<<<< HEAD
-def _resolve_total_gradient_steps(args, dataset) -> int:
-    """
-    Decide how many gradient steps to train for.
-
-    If `num_epochs` is set (> 0) in the config, derive the step count from the
-    dataset size and batch size:
-
-        steps_per_epoch = len(dataset) // batch_size   # drop_last=True
-        total_steps     = num_epochs * steps_per_epoch
-
-    Otherwise fall back to the explicit `diffusion_gradient_steps`.
-    """
-    num_epochs = args.get("num_epochs", None)
-    if not num_epochs or num_epochs <= 0:
-        return int(args.diffusion_gradient_steps)
-
-    steps_per_epoch = len(dataset) // args.batch_size  # DataLoader uses drop_last=True
-    if steps_per_epoch <= 0:
-        raise ValueError(
-            f"dataset size ({len(dataset)}) is smaller than batch_size "
-            f"({args.batch_size}); cannot compute steps for num_epochs={num_epochs}"
-        )
-
-    total_steps = int(num_epochs) * steps_per_epoch
-    print(
-        f"[num_epochs] {num_epochs} epochs x {steps_per_epoch} steps/epoch "
-        f"(dataset={len(dataset)}, batch_size={args.batch_size}) "
-        f"-> {total_steps} gradient steps"
-    )
-    return total_steps
-
-
-@hydra.main(config_path="../configs/robot", config_name="smr", version_base=None)
-def main(args):
-    set_seed(args.seed)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-=======
 def _checkpoint_model_state(model):
     """Return a DDP-prefix-free state dict compatible with existing runs."""
     state = model.state_dict()
@@ -169,13 +131,9 @@ def main(args):
         shared = [save_path]
         dist.broadcast_object_list(shared, src=0)
         save_path = shared[0]
->>>>>>> endgame
 
     dataset, dataloader, nn_condition, nn_diffusion_model, nn_diffusion = model_setups(args)
 
-<<<<<<< HEAD
-    total_gradient_steps = _resolve_total_gradient_steps(args, dataset)
-=======
     print(f"Total Samples {len(dataset)}\n")
 
     # Resolve total gradient steps. If `num_epochs` is set, derive it from the
@@ -192,7 +150,6 @@ def main(args):
         )
     else:
         total_gradient_steps = int(args.diffusion_gradient_steps)
->>>>>>> endgame
 
     print("Start Training...")
     lr_schedulers = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -305,18 +262,12 @@ def main(args):
         amp_label = "BF16" if amp_enabled else "FP32"
         print(f"AMP: {amp_label}")
 
-<<<<<<< HEAD
-    for batch in loop_dataloader(dataloader):
-        if n_gradient_step >= total_gradient_steps:
-            print("End Training")
-=======
     batch_stream = threaded_prefetch(loop_dataloader(dataloader))
     for batch in batch_stream:
         if n_gradient_step >= total_gradient_steps:
             if is_main:
                 print("End Training")
                 plot_from_jsonl(os.path.join(save_path, "metrics.jsonl"))
->>>>>>> endgame
             break
 
         action = batch["act"].to(device, non_blocking=True)  # [B, horizon, 2]

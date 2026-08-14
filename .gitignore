@@ -14,7 +14,7 @@ episode*
 dataset/
 *.png
 *.JPG
-models
+selected_models
 third_party
 docs
 # Hydra outputs

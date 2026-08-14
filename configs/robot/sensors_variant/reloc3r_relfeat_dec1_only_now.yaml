@@ -1,0 +1,36 @@
+# @package _global_
+# SAME arm as reloc3r_relfeat_dec1_only.yaml (dec1 only, 140 condition tokens)
+# with ONE variable changed: dec1's history sampling switches from
+# stride=12/window=60 (front-anchored, most recent sample 11 frames behind t)
+# to stride=15/window=61 (0.5s @ 30Hz, ends exactly at the current frame t) --
+# see reloc3r_relfeat_only_now.yaml for the full rationale. Everything else
+# (which stream, num_latents=16, wheel unchanged) is identical to
+# reloc3r_relfeat_dec1_only.yaml.
+#
+# Token budget: wheel(60) + reloc3r_dec1(5*16=80) = 140.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_dec1_only_now experiment_name=r_relfeat_dec1_only_now
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

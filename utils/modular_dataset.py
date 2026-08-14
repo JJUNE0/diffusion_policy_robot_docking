@@ -15,6 +15,13 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
                      a compiled goal pool)
     horizon        : window length for mode=history
     stride         : (optional) subsample the window by ::stride
+    window         : (optional) pre-stride window length for THIS sensor only,
+                     overriding the dataset-level obs_horizon. Slicing is
+                     front-anchored (``full[::stride]``), so the last sampled
+                     index lands on ``t`` (the current frame) only when
+                     ``(window - 1) % stride == 0``; a vision stream wanting
+                     an evenly-spaced history that includes "now" (e.g. 0.5s
+                     steps at 30Hz -> stride=15) needs window=61, not 60.
     channels       : (optional) list of column indices to keep (e.g. IMU planar
                      subset [2, 3, 4] = gyro_z, accl_x, accl_y). Selected before
                      normalization; the sensor's `dim` must match len(channels).
@@ -428,7 +435,7 @@ class ModularDockingDataset(Dataset):
             return arr
         return arr[..., list(channels)]
 
-    def _history(self, data, t, ep_start, stride=1):
+    def _history(self, data, t, ep_start, stride=1, window=None):
         """Read only the temporal rows that survive ``stride``.
 
         ReLoc3R uses obs_horizon=60 and stride=12, so reading a contiguous
@@ -437,22 +444,30 @@ class ModularDockingDataset(Dataset):
         fancy-index read for the rows the model actually consumes. ``h5py``
         requires increasing unique indices, hence the unique/inverse roundtrip
         for repeated episode-start padding.
+
+        ``window`` overrides ``self.obs_horizon`` for this call only (defaults
+        to ``self.obs_horizon`` when unset). A per-sensor spec key lets one
+        modality (e.g. a vision stream sampled every 0.5s so the *last* index
+        lands exactly on ``t``, the current frame) use a different pre-stride
+        window length than the rest, which keep the dataset-level default.
         """
         stride = int(stride)
         if stride < 1:
             raise ValueError(f"history stride must be >= 1, got {stride}")
+        window = self.obs_horizon if window is None else int(window)
         indices = np.arange(
-            t - self.obs_horizon + 1, t + 1, dtype=np.int64
+            t - window + 1, t + 1, dtype=np.int64
         )
         indices = np.maximum(indices, int(ep_start))[::stride]
         unique, inverse = np.unique(indices, return_inverse=True)
         return np.asarray(data[unique])[inverse]
 
-    def _history_valid_mask(self, t, ep_start, stride=1):
-        """bool[ceil(obs_horizon/stride)], True=real and False=padded."""
-        valid_len = min(self.obs_horizon, t - ep_start + 1)
-        pad_len = self.obs_horizon - valid_len
-        mask = np.ones(self.obs_horizon, dtype=bool)
+    def _history_valid_mask(self, t, ep_start, stride=1, window=None):
+        """bool[ceil(window/stride)], True=real and False=padded."""
+        window = self.obs_horizon if window is None else int(window)
+        valid_len = min(window, t - ep_start + 1)
+        pad_len = window - valid_len
+        mask = np.ones(window, dtype=bool)
         mask[:pad_len] = False
         return mask[::int(stride)]
 
@@ -468,10 +483,11 @@ class ModularDockingDataset(Dataset):
             if ds is None:
                 ds = sensor_root[spec["source"]]
             mode = spec.get("mode", "history")
+            window = spec.get("window")
             if mode == "history":
                 stride = int(spec.get("stride", 1))
-                arr = self._history(ds, t, ep_start, stride)
-                valid_mask = self._history_valid_mask(t, ep_start, stride)
+                arr = self._history(ds, t, ep_start, stride, window)
+                valid_mask = self._history_valid_mask(t, ep_start, stride, window)
                 arr = self._select_channels(arr, spec)
                 arr = np.ascontiguousarray(arr).astype(np.float32)
                 norm = spec.get("normalize")
@@ -484,8 +500,8 @@ class ModularDockingDataset(Dataset):
                 obs[f"{name}_valid_mask"] = torch.from_numpy(np.ascontiguousarray(valid_mask))
             elif mode == "goal_pool_pair":
                 stride = int(spec.get("stride", 1))
-                history = self._history(ds, t, ep_start, stride)
-                valid_mask = self._history_valid_mask(t, ep_start, stride)
+                history = self._history(ds, t, ep_start, stride, window)
+                valid_mask = self._history_valid_mask(t, ep_start, stride, window)
                 group = str(spec.get("goal_pool_group", "default"))
                 if group not in sampled_goal_rows:
                     info = self._goal_pool_groups[group]

@@ -1,0 +1,59 @@
+# @package _global_
+# SAME arm as reloc3r_relfeat_only.yaml (wheel + dec1 + dec2, 220 condition
+# tokens) with ONE variable changed: the vision (dec1/dec2) history sampling.
+#
+# reloc3r_relfeat_only.yaml samples 5 RGB-derived frames at stride=12 over a
+# 60-frame (~2.0s) window anchored at the START of the window, i.e. indices
+# [t-59, t-47, t-35, t-23, t-11] -- the most recent sampled frame is 11 frames
+# (~0.37s) BEHIND the current timestep t (see README.md's "재현 주의" note).
+#
+# This arm instead samples 5 frames at stride=15 (0.5s @ 30Hz) over a 61-frame
+# window, WITH the current frame t included as the last sample:
+#   [t-60, t-45, t-30, t-15, t]  (2.0s span, 0.5s spacing, ends at "now")
+# via the new per-sensor `window` override in utils/modular_dataset.py::_history
+# (dataset-level `obs_horizon` stays 60 -> wheel's 60-token history is
+# UNCHANGED; only dec1/dec2 use window=61).
+#
+# Precomputed ReLoc3R dec1/dec2 features (dataset/after_0328_train_reloc3r_bottom.h5)
+# do NOT need to be recomputed -- they are per-raw-frame features; only which
+# row indices get selected per sample changes.
+#
+# Token budget: wheel(60) + reloc3r_dec1(5*16=80) + reloc3r_dec2(80) = 220 (unchanged).
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_only_now experiment_name=r_relfeat_only_now
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/after_0328_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

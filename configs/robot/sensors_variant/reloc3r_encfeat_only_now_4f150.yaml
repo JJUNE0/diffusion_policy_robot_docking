@@ -1,0 +1,71 @@
+# @package _global_
+# ABLATION ARM B on 4f_hallway_150ep -- "is ReLoc3R's cross-attention decoder
+# doing the work, or would raw ViT-L tokens do?"
+#
+# Condition = the PRE-cross-attention tokens, i.e. the shared ViT-L encoder's
+# patch tokens, taken before the relational decoder ever runs:
+#
+#   reloc3r_bottom : (N, 196, 1024) float16
+#       ViT-L encoder patch tokens, one row per frame, no goal pairing baked in
+#       (scripts/precompute_reloc3r_cache.py). This is the exact tensor the
+#       decoder consumes, so tapping here removes the decoder and nothing else.
+#
+# The decoder takes TWO inputs per sample -- the history frame's tokens and the
+# episode goal frame's tokens -- and returns dec1/dec2. To keep this a
+# controlled "decoder removed" ablation rather than a different input set, both
+# inputs are fed as separate streams and the DiT's own cross-attention is left
+# to relate them:
+#
+#   reloc3r_enc_hist : the 5 history frames' encoder tokens (mode=history)
+#   reloc3r_enc_goal : the episode's goal frame tokens (mode=episode_goal,
+#                      utils/modular_dataset.py -- the episode's LAST row, the
+#                      same goal scripts/precompute_reloc3r_dec_features.py
+#                      pairs each frame with, broadcast to 5 samples so the
+#                      token count matches the history stream)
+#
+# Token budget: wheel(60) + enc_hist(5*16=80) + enc_goal(5*16=80) = 220 --
+# IDENTICAL to r_relfeat_only_now and r_pose_only_now. All three arms differ
+# only in where along ReLoc3R the condition is tapped.
+#
+# Both streams read the SAME h5 key, so ONE memfd cache serves both: point both
+# cache_mmap values at it (np.memmap-ing one path twice maps the same pages, it
+# does not double the RAM). 238688 * 196 * 1024 * 2 B = ~89 GiB pinned.
+#
+# Run:  bash test/queue_ablation_4f150_parallel.sh
+train_data_path: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_enc_hist:
+    encoder: reloc3r_relation
+    source: reloc3r_bottom
+    file: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 196
+    feat_dim: 1024
+    dropout_prob: 0.0
+    cache_mmap: null
+  reloc3r_enc_goal:
+    encoder: reloc3r_relation
+    source: reloc3r_bottom
+    file: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train_reloc3r_bottom.h5
+    mode: episode_goal
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 196
+    feat_dim: 1024
+    dropout_prob: 0.0
+    cache_mmap: null

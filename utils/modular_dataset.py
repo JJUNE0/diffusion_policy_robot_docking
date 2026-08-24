@@ -10,6 +10,14 @@ Reads an arbitrary set of modalities from an HDF5 file according to the SAME
                      after_0328_train.h5. Row indices must align 1:1 with the
                      main h5.
     mode           : "history" (length-`horizon` window ending at t)
+                   | "episode_goal" (the CURRENT episode's own goal frame --
+                     its last row, the same goal
+                     scripts/precompute_reloc3r_dec_features.py pairs each
+                     frame with -- broadcast to the paired history stream's
+                     sample count. Constant within an episode, never padded.
+                     Lets a pre-cross-attention arm feed (history, goal) raw
+                     encoder tokens at the same token budget as a dec1/dec2
+                     arm.)
                    | "goal_pool_pair" (history ReLoc3R encoder tokens paired
                      with one randomly sampled, camera-synchronized goal from
                      a compiled goal pool)
@@ -498,6 +506,40 @@ class ModularDockingDataset(Dataset):
                     arr = ((arr - mean) / std).astype(np.float32)
                 obs[name] = torch.from_numpy(arr)
                 obs[f"{name}_valid_mask"] = torch.from_numpy(np.ascontiguousarray(valid_mask))
+            elif mode == "episode_goal":
+                # The episode's OWN goal frame, broadcast over the paired
+                # history stream's sample count.
+                #
+                # Goal row = the episode's LAST row, which is exactly the goal
+                # convention scripts/precompute_reloc3r_dec_features.py bakes
+                # into dec1/dec2 (`goal_row = (e - 1) - s`). So a
+                # (history=episode_goal) pair of raw ViT-L encoder streams sees
+                # the same two frames the cross-attention decoder saw -- that is
+                # what makes it a controlled "decoder removed" ablation rather
+                # than a different input set.
+                #
+                # It is constant within an episode, hence one row read
+                # broadcast rather than a strided window: cheap, and it keeps
+                # the token count equal to the history stream it is paired with.
+                stride = int(spec.get("stride", 1))
+                n_samples = len(
+                    self._history_valid_mask(t, ep_start, stride, window)
+                )
+                goal = np.asarray(ds[int(self.ep_end_map[idx]) - 1])
+                arr = np.repeat(goal[None], n_samples, axis=0)
+                arr = self._select_channels(arr, spec)
+                arr = np.ascontiguousarray(arr).astype(np.float32)
+                norm = spec.get("normalize")
+                if norm == "action":
+                    arr = self.normalize_action(arr).astype(np.float32)
+                elif norm == "zscore":
+                    mean, std = self.norm_stats[name]
+                    arr = ((arr - mean) / std).astype(np.float32)
+                obs[name] = torch.from_numpy(arr)
+                # The goal row always exists, so nothing here is ever padded.
+                obs[f"{name}_valid_mask"] = torch.from_numpy(
+                    np.ones(n_samples, dtype=bool)
+                )
             elif mode == "goal_pool_pair":
                 stride = int(spec.get("stride", 1))
                 history = self._history(ds, t, ep_start, stride, window)

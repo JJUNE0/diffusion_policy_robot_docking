@@ -1,0 +1,56 @@
+# @package _global_
+# SAME arm as reloc3r_relfeat_only_now.yaml (wheel + dec1 + dec2, 220 tokens,
+# current-frame-included 0.5s-spaced history) but trained on the NEW merged
+# multi-environment dataset instead of after_0328: floor4_hallway_front_docking
+# + floor4_inside_front_docking + floor5_front_docking, each trimmed to its
+# first 80 (designated "train") episodes and physically concatenated by
+# scripts/merge_floor_multi_docking.py into dataset/floor_multi_train.h5
+# (411,890 rows, 240 episodes). ReLoc3R dec1/dec2 features were freshly
+# precomputed for this merged file (scripts/precompute_reloc3r_cache.py +
+# precompute_reloc3r_dec_features.py) since the source floor4/floor5 datasets
+# only had DINO features cached, not ReLoc3R.
+#
+# ONLY variables vs reloc3r_relfeat_only_now.yaml: train_data_path and the
+# sensor `file:` paths. Indexing (window=61/stride=15), token budget (220),
+# num_latents, dropout all identical.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_relfeat_only_now_floor_multi \
+#       experiment_name=r_relfeat_only_now_floor_multi \
+#       train_data_path=${hydra:runtime.cwd}/dataset/floor_multi_train.h5
+train_data_path: ${hydra:runtime.cwd}/dataset/floor_multi_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/floor_multi_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/floor_multi_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

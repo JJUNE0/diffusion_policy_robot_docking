@@ -1,0 +1,64 @@
+# @package _global_
+# ABLATION ARM A on 4f_hallway_150ep -- "how far past the ReLoc3R head can we
+# tap and still dock?"
+#
+# Identical to reloc3r_pose_only_now.yaml (the after_0328 arm), only the dataset
+# changes. Condition = the POST-head final relative pose, both streams:
+#
+#   reloc3r_pose1_bottom / reloc3r_pose2_bottom : (N, 1, 12) float16
+#       [R(9, row-major, post-SVD-orthogonalization), t(3, raw fc_t output)]
+#       -- exactly the 4x4 pose Reloc3r returns, i.e. the 6-DoF rigid transform
+#       after fc_t/fc_rot have collapsed the 196 patch tokens to a point
+#       estimate. Built by scripts/precompute_reloc3r_head_features.py, whose
+#       --verify_only pass asserts these reproduce Reloc3r's own head bit-exactly
+#       (max|dR| = max|dt| = 0 on this data).
+#
+# Contrast with the baseline r_relfeat_only_now, which taps the SAME network one
+# stage earlier at the pre-head decoder tokens [196, 768]. The two arms differ
+# only in tap depth, so the gap measures what the pose head throws away.
+#
+# n_patch=1 / feat_dim=12: the Perceiver still compresses to 16 latents per
+# frame, so the token budget is unchanged.
+# Token budget: wheel(60) + reloc3r_pose1(5*16=80) + reloc3r_pose2(80) = 220.
+#
+# The pose sidecar is 5.7 MB at 238688 rows, so cache_in_ram (a one-shot full
+# read) beats a memfd daemon -- no shared cache needed for this arm.
+#
+# Run:  bash test/queue_ablation_4f150_parallel.sh
+train_data_path: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_pose1:
+    encoder: reloc3r_relation
+    source: reloc3r_pose1_bottom
+    file: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true
+  reloc3r_pose2:
+    encoder: reloc3r_relation
+    source: reloc3r_pose2_bottom
+    file: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true

@@ -1,0 +1,53 @@
+# @package _global_
+# SAME arm as reloc3r_pose_only_now.yaml (final 12-D relative-pose tap, both
+# streams, 220 tokens, current-frame-included 0.5s-spaced history) but trained
+# on the merged multi-environment dataset -- see
+# reloc3r_relfeat_only_now_floor_multi.yaml for the full rationale. Head
+# features (pose1/pose2) were freshly computed via
+# scripts/precompute_reloc3r_head_features.py from the merged file's dec1/dec2
+# cache (dataset/floor_multi_train_reloc3r_bottom.h5) into
+# dataset/floor_multi_train_reloc3r_bottom_head.h5. Only train_data_path and
+# the sensor `file:` paths differ from reloc3r_pose_only_now.yaml.
+#
+# Run:
+#   python scripts/train.py --config-name smr_rgeo \
+#       sensors_variant=reloc3r_pose_only_now_floor_multi \
+#       experiment_name=r_pose_only_now_floor_multi \
+#       train_data_path=${hydra:runtime.cwd}/dataset/floor_multi_train.h5
+train_data_path: ${hydra:runtime.cwd}/dataset/floor_multi_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_pose1:
+    encoder: reloc3r_relation
+    source: reloc3r_pose1_bottom
+    file: ${hydra:runtime.cwd}/dataset/floor_multi_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true
+  reloc3r_pose2:
+    encoder: reloc3r_relation
+    source: reloc3r_pose2_bottom
+    file: ${hydra:runtime.cwd}/dataset/floor_multi_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true

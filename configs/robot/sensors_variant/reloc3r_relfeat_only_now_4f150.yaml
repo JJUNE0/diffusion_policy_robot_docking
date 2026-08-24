@@ -1,0 +1,63 @@
+# @package _global_
+# IDENTICAL arm to reloc3r_relfeat_only_now.yaml -- the real-robot-validated
+# r_relfeat_only_now condition (wheel 60 + dec1 5x16 + dec2 5x16 = 220 tokens,
+# stride=15 / window=61 so the 5 vision frames are [t-60, t-45, t-30, t-15, t]).
+# ONLY the dataset changes:
+#
+#   after_0328 (145 ep / 225465 rows)
+#     + 0824_4f_hallway (5 ep / 13223 rows, camera_orbbec-0 = image_bottom)
+#     = 4f_hallway_150ep (150 ep / 238688 rows)
+#
+# Both files are HDF5 Virtual Datasets built by
+# scripts/build_4f_hallway_150ep_vds.py -- they hold no image/ReLoc3R bytes of
+# their own but map row 0..225464 into the existing after_0328 files and
+# 225465..238687 into the new 0824 files, so the 226 GB after_0328 ReLoc3R
+# sidecar is reused in place. Episode order is after_0328 first, so merged row
+# indices below 225465 keep their original meaning.
+#
+# cache_mmap must be filled in at launch with the shared memfd path -- a VDS is
+# read through two files and h5py resolves that per read, so training directly
+# off it would be slow. Use scripts/cache_h5_vds_memfd_parallel.py (NOT
+# cache_h5_dataset_memfd.py, which cannot walk VDS mappings in parallel);
+# test/queue_relfeat_only_now_4f150.sh does this.
+#
+# dec1+dec2 pinned in RAM = 238688 * 196 * 768 * 2 B * 2 = ~144 GiB, well inside
+# this 300 GiB host (the 411890-row floor_multi run needed ~231 GiB).
+#
+# Run:
+#   bash test/queue_relfeat_only_now_4f150.sh
+train_data_path: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/4f_hallway_150ep_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

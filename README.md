@@ -12,14 +12,9 @@
 
 ---
 
-이 저장소는 **`r_relfeat_only`** 하나를 위한 코드다. 카메라 한 대(`orbbec0`),
-wheel velocity history, 그리고 ReLoc3R의 양방향 cross-attention decoder token을
-조건으로 60-step 속도 trajectory를 DDPM DiT로 생성한다. 현재까지 실기 도킹에
-성공한 유일한 모델이며, 나머지 sensors_variant는 이 모델의 통제 ablation이다.
-
 | | |
 |---|---|
-| **Task** | 차동구동 이동로봇의 충전 스테이션 자동 도킹 |
+| **Task** | AMR의 충전 스테이션 자동 도킹 |
 | **Input** | `orbbec0` RGB history + docked goal RGB + wheel velocity history |
 | **Output** | 60-step `(linear velocity, angular velocity)` trajectory (~2s @ 30Hz) |
 | **Vision** | Frozen ReLoc3R-224 encoder + bidirectional decoder feature (`dec1`, `dec2`) |
@@ -27,11 +22,8 @@ wheel velocity history, 그리고 ReLoc3R의 양방향 cross-attention decoder t
 | **Training** | Offline imitation learning, 20 epoch / 16940 step |
 | **Run** | `outputs/train/r_relfeat_only/2026-07-28_22-47-34` |
 
-> **실기 결과(사용자 보고, 2026-07-30):** 검증한 `step 12000`, `step 16940`
-> 두 checkpoint 모두 수행한 모든 실기 시도에 성공했다. 시험 횟수가 기록되어
-> 있지 않으므로 통계적 신뢰구간을 의미하는 결과로 확대 해석하지 않는다.
 
-## 입출력 계약
+## 입출력
 
 - **카메라:** `image_bottom` 한 대만 사용. `image_top`/`usb0`는 쓰지 않는다.
 - **Goal:** 각 episode의 마지막 docked frame 하나가 고정 goal image다.
@@ -41,21 +33,7 @@ wheel velocity history, 그리고 ReLoc3R의 양방향 cross-attention decoder t
   **직전**의 두 cross-attention stream `dec1`/`dec2`를 사용한다.
 - **출력:** 미래 60 step의 `(v, w)`를 한 번에 생성.
 
-```text
-wheel 60 x 2  -> MLP + temporal embedding                        -> 60 tokens
 
-5 history frames H_i + static goal G
-  -> shared ReLoc3R ViT-L encoder -> ReLoc3R cross-attention decoder
-       dec1_i = H_i stream after attending to G   ("goal-aware history")
-       dec2_i = G   stream after attending to H_i ("current-aware goal")
-  -> 각 [196, 768] stream을 Perceiver로 16 token 압축
-  -> dec1: 5 x 16 = 80 tokens,  dec2: 5 x 16 = 80 tokens
-
-condition sequence = 60 + 80 + 80 = 220 tokens x 384-D
-  -> 4-layer TokenSequenceFusionCondition (unpooled)
-  -> 12-layer 6-head DiTCrossAttn1d  -> DDPM(ContinuousDiffusionSDE)
-  -> action [60, 2]
-```
 
 Action DiT는 60개 action token을 non-causal self-attention으로 함께 denoise하고
 매 block에서 위 220개 condition token에 cross-attention한다. Action은 `minmax`로
@@ -66,9 +44,7 @@ Action DiT는 60개 action token을 non-causal self-attention으로 함께 denoi
 cross-attention 출력이므로, 한 row를 broadcast해 대체할 수 없다.
 
 > **재현 주의:** 현재 stride 구현은 60-frame window의 index
-> `[0, 12, 24, 36, 48]`을 고른다. 가장 최근 RGB가 window 끝보다 11 frame
-> 앞이고 wheel만 마지막 frame을 포함한다. `[11, 23, 35, 47, 59]`로 바꾸면
-> 성공 모델과 다른 입력이 된다.
+> `[0, 12, 24, 36, 48]`을 고른다.
 
 ## 환경
 

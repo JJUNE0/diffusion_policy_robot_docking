@@ -70,68 +70,118 @@ cross-attention 출력이므로, 한 row를 broadcast해 대체할 수 없다.
 > 앞이고 wheel만 마지막 frame을 포함한다. `[11, 23, 35, 47, 59]`로 바꾸면
 > 성공 모델과 다른 입력이 된다.
 
-## 재현
+## 환경
 
-### 1. 데이터와 cache
+- Python 3.11+, CUDA 지원 PyTorch 2.0+
+- ReLoc3R-224 checkpoint `siyan824/reloc3r-224` (HF cache 또는 최초 다운로드)
+- 대용량 HDF5 cache를 담을 디스크
 
-```text
-dataset/after_0328_train.h5
-  episode_ends: 145 episodes / 225465 rows
-  encoder:      [225465, 2]          image_bottom: [225465, 3, 240, 320]
-
-dataset/after_0328_train_reloc3r_bottom.h5
-  reloc3r_bottom:      [225465, 196, 1024] f16
-  reloc3r_dec1_bottom: [225465, 196,  768] f16
-  reloc3r_dec2_bottom: [225465, 196,  768] f16
+```bash
+conda create -n diffusion_policy python=3.11 -y && conda activate diffusion_policy
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
 ```
 
-두 파일은 row 단위로 정확히 정렬되어 있어야 한다. cache가 이미 있으면 이
-단계는 건너뛴다. 재생성이 필요할 때만(두 번째 명령이 `dec1/dec2`를 첫 번째
-파일에 in-place 추가한다):
+인자 없이 `python scripts/train.py`를 실행하면 config 기본값으로 돌아가므로,
+재현할 때는 위의 명시적 Hydra 명령을 쓴다.
+
+
+## 학습 파이프라인
+
+`r_relfeat_only`와 tap(`dec1`/`dec2`)·220 condition token·network·optimizer가
+전부 동일하고, **dataset만** `floor4_hallway_front_docking.h5`로 바뀐 변형이다.
+소스는 154 episode를 담고 있고, house split대로 앞 150 episode(251,017 rows)를
+학습에, 나머지 151-154(7,393 rows)를 held-out 평가에 쓴다. 결과는
+`outputs/train/r_relfeat_only_now_f4hall150/2026-08-27_15-30-39/`. 아래 4단계로
+처음부터 재현한다.
+
+### 1. 전처리 — 학습/평가 데이터셋 분리
+
+```bash
+python scripts/build_f4hall150_vds.py
+```
+원본 h5의 앞 150 episode를 zero-copy virtual dataset으로
+`dataset/f4hall150_train.h5`에 발행한다. dock camera(`image_bottom` =
+orbbec-0, swap 불필요)가 맞는지 pinned sha256 fingerprint + 전 episode
+gradient-energy 비교로 검증하고, 어긋나면 조용히 넘어가지 않고 빌드가 실패한다.
+
+```bash
+python scripts/build_f4hall150_val_vds.py
+```
+나머지 held-out episode 151-154를 같은 방식으로 `dataset/f4hall150_val.h5`에
+발행한다 (평가 전용, 학습에는 쓰이지 않음).
+
+### 2. 캐싱(precompute) — ReLoc3R feature
+
+```bash
+python scripts/precompute_reloc3r_dec_features.py \
+  --cache dataset/f4hall150_train_reloc3r_bottom.h5 --camera image_bottom
+```
+학습 150 episode의 `dec1`/`dec2`(cross-attention decoder token, 각
+`[N,196,768]` fp16)를 계산한다. ViT-L encoder token
+(`reloc3r_bottom`)은 같은 소스로 이미 계산되어 있던 캐시를 `build_f4hall150_vds.py`가
+VDS로 재매핑해 두므로 인코더 pass를 새로 돌릴 필요가 없다.
 
 ```bash
 python scripts/precompute_reloc3r_cache.py \
-  --h5 dataset/after_0328_train.h5 --camera image_bottom \
-  --out dataset/after_0328_train_reloc3r_bottom.h5
+  --h5 dataset/f4hall150_val.h5 --camera image_bottom \
+  --out dataset/f4hall150_val_reloc3r_bottom.h5
 
 python scripts/precompute_reloc3r_dec_features.py \
-  --cache dataset/after_0328_train_reloc3r_bottom.h5 --camera image_bottom
+  --cache dataset/f4hall150_val_reloc3r_bottom.h5 --camera image_bottom
 ```
 
-`--limit_episodes`는 smoke test용이므로 재현 명령에는 넣지 않는다.
+### 3. 학습
 
-### 2. 학습
 
 ```bash
 python scripts/train.py --config-name smr_rgeo \
-  sensors_variant=reloc3r_relfeat_only experiment_name=r_relfeat_only
+  sensors_variant=reloc3r_relfeat_only_now_f4hall150 \
+  experiment_name=r_relfeat_only_now_f4hall150 \
+  train_data_path=dataset/f4hall150_train.h5 \
+  num_workers=8 prefetch_factor=1 +loader_microbatch_size=16 \
+  sensors.reloc3r_dec1.cache_mmap=<memfd 캐시 경로> \
+  sensors.reloc3r_dec2.cache_mmap=<memfd 캐시 경로>
 ```
+`sensors_variant`만 바꾸면 다른 dataset 변형이 되도록
+`configs/robot/sensors_variant/reloc3r_relfeat_only_now_f4hall150.yaml`이
+`train_data_path`와 sidecar 경로 세 줄만 원본(`reloc3r_relfeat_only`)과 다르고
+나머지는 `smr_rgeo.yaml` 기본값 그대로다. `cache_mmap`은
+`scripts/cache_h5_dataset_memfd.py`가 실행 중에 할당하는
+`/proc/<pid>/fd/N` 경로라 고정 명령으로 못 박을 수 없어
+`run_f4hall150_pipeline.sh`가 그 경로를 직접 채워 실행한다
+(수동으로 하려면 `test/queue_f4hall150_relfeat.sh` 참고). 결과 checkpoint:
+`checkpoint_step_18900.pt` (20 epoch, 945 step/epoch, final loss 0.0272).
 
-```text
-seed=0, device=cuda:0, batch_size=256, num_epochs=20
-learning_rate=1e-4, weight_decay=1e-5, ema_rate=0.999, action_norm=minmax
-diffusion_backbone=ddpm, d_model=384, n_heads=6, depth=12
-condition_num_layers=4, dropout=0.1, horizon=60, obs_horizon=60
-```
-
-학습 sample `216910`개에 `drop_last=true`이므로 epoch당
-`floor(216910/256) = 847` step, 총 `20 x 847 = 16940` step이다. 즉 최종
-checkpoint가 `step 16940`인 것도 재현 조건의 일부이며, 행 수·episode 수·batch
-size 중 하나만 바뀌어도 달라진다. 결과는
-`outputs/train/r_relfeat_only/YYYY-MM-DD_HH-MM-SS/`에 저장된다.
-
-### 3. 기존 artifact 무결성
+### 4. 평가
 
 ```bash
-cd outputs/train/r_relfeat_only/2026-07-28_22-47-34
-sha256sum r_relfeat_only_step_{12000,16940}.pt r_relfeat_only_step_12000.config.yaml
+EVAL_H5=dataset/f4hall150_val.h5 \
+EVAL_STATS_H5=dataset/f4hall150_train.h5 \
+EVAL_EPISODES=0,1,2,3 EVAL_TAG=heldout \
+python test/eval_run_rgeo.py \
+  outputs/train/r_relfeat_only_now_f4hall150/2026-08-27_15-30-39
 ```
+held-out 4개 episode(151-154)로 open-loop rollout을 돌려 ADE/FDE/velRMSE를
+계산한다. `EVAL_STATS_H5`는 action 정규화 통계(`action_min`/`action_scale`)의
+출처이며 반드시 학습에 쓴 h5와 같아야 한다. 결과:
+`test/out/rgeo/r_relfeat_only_now_f4hall150_heldout.json`
+(ADE 중앙값 11.9cm / FDE 14.3cm / velRMSE 0.0366).
 
-```text
-803ab3cc494d17e241a2b806da93ab2bfb24baa874f95326ea40cd0be0a51152  ..._step_12000.pt
-a298f6a71f0ab579eb7b161a2b5be993630e7bc65b00987d69f7db3ec93cf6a5  ..._step_16940.pt
-d0cfc35afb523e87a5c750a32d453284e72bed67db29794af00e616895f2db08  ..._step_12000.config.yaml
+```bash
+EVAL_H5=dataset/f4hall150_val.h5 \
+EVAL_STATS_H5=dataset/f4hall150_train.h5 \
+EVAL_EPISODES=0,1,2,3 EVAL_TAG=heldout \
+python test/eval_traj_video_rgeo.py \
+  outputs/train/r_relfeat_only_now_f4hall150/2026-08-27_15-30-39 \
+  --check-json test/out/rgeo/r_relfeat_only_now_f4hall150_heldout.json
 ```
+같은 rollout 프로토콜(`test/eval_run_rgeo.py`를 그대로 import)로 policy 경로와
+demonstration 경로를 겹쳐 그린 PNG와, 카메라 영상 위에 두 경로가 함께 자라나는
+MP4를 episode마다 만든다. `--check-json`은 이 스크립트가 계산한
+ADE/FDE/velRMSE가 위 평가기의 결과와 정확히 일치하는지 대조해, 두 스크립트의
+rollout 로직이 어긋나지 않았음을 보장한다. 결과:
+`test/out/rgeo_traj/r_relfeat_only_now_f4hall150_episode_*_dock.{png,mp4}`.
 
 ## 데이터 계약
 
@@ -174,42 +224,8 @@ test/eval_run_rgeo.py, eval_align_rgeo.py, terminal_metric.py
 reloc3r/                               vendored ReLoc3R-224
 ```
 
-## 환경
 
-- Python 3.11+, CUDA 지원 PyTorch 2.0+
-- ReLoc3R-224 checkpoint `siyan824/reloc3r-224` (HF cache 또는 최초 다운로드)
-- 대용량 HDF5 cache를 담을 디스크
 
-```bash
-conda create -n diffusion_policy python=3.11 -y && conda activate diffusion_policy
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
-```
-
-인자 없이 `python scripts/train.py`를 실행하면 config 기본값으로 돌아가므로,
-재현할 때는 위의 명시적 Hydra 명령을 쓴다.
-
-## 실기 배포
-
-배포 코드는 별도 저장소(`ai-control-*`)로 분리되었다. 실기 검증 설정은
-`ddpm` / 30 sampling step / 1 sample / EMA weight / `window_size=60` /
-`action_horizon=32`이고, goal은 episode 마지막 학습 이미지가 아니라 같은
-카메라로 찍은 **실제 docked-position 이미지**를 지정한다. 이 goal은 시작 시
-한 번 ReLoc3R encoder를 통과한 뒤 매 추론의 history 5 frame과 pair를 이룬다.
-
-Token-sequence checkpoint는 weight만으로 temporal sensor 설정을 복구할 수
-없으므로 checkpoint와 그 학습 config(`<checkpoint_stem>.config.yaml`)를 반드시
-함께 배포한다. 실기 전에는 명령 전송을 끈 상태에서 카메라 stream, goal image,
-60-frame window, 생성 trajectory를 먼저 확인한다.
-
-## 제거된 과거 실험
-
-DINO appearance branch, 2-camera 전용 arm, LiDAR point branch, ICP auxiliary
-pose head(`endgame/`), 4-D geometry token, pooled `ModularSensorFusionCondition`
-및 legacy `SensorFusionConditionNetwork` 경로와 그에 딸린 config·eval·queue
-script는 2026-08-11에 삭제되었다. Rectified Flow는 `diffusion_backbone` flag로
-남아 있다. 삭제 직전 상태는 git tag `pre-cleanup-2026-08-11`로 복구할 수 있고,
-실험 기록과 비교 결과는 `docs/` 아래 문서에 남아 있다.
 
 ## Acknowledgments
 

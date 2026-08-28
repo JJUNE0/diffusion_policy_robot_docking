@@ -72,6 +72,15 @@ def _resolve_sensor_files(sensors, eval_h5):
     out = {}
     for name, spec in sensors.items():
         spec = dict(spec)
+        # A run trained off a memfd RAM cache has that `/proc/<pid>/fd/N` path
+        # baked into the config saved beside its checkpoint. At eval time the
+        # daemon is gone (getsize raises FileNotFoundError), and if some
+        # unrelated process happens to hold that fd the mapping would be the
+        # WRONG rows -- training-split features silently scored as held-out.
+        # Neither is ever what an evaluator wants, so always read from the h5.
+        if spec.pop("cache_mmap", None) is not None:
+            print(f"[eval] sensor '{name}': dropping train-time cache_mmap; "
+                  f"reading features from the h5", flush=True)
         f = spec.get("file")
         if f is not None:
             f = f.replace("${hydra:runtime.cwd}", REPO)

@@ -1,0 +1,63 @@
+# @package _global_
+# floor4_hallway 150-episode run. SAME arm as r_relfeat_only_now / the
+# *_f4in150 variant -- same tap (pre-head decoder), same 220 condition tokens
+# (wheel 60 + 5x16 + 5x16), same network/optimizer from smr_rgeo.yaml. ONLY the
+# dataset changed, per the "dataset only" brief.
+#
+# DATASET: jiwon/floor4_hallway_front_docking.h5, first 150 of 154 episodes
+# (251017 rows), published zero-copy by scripts/build_f4hall150_vds.py.
+#
+# CAMERA: image_bottom is the DOCK-FACING camera (camera_orbbec-0) and needs NO
+# swap here -- unlike floor4_inside, whose arrays were swapped in place. The
+# source labels it 'camera_orbbec-0' for episodes 141-150 and by the legacy
+# alias 'room2' for episodes 1-140/151-154; both are the same physical camera.
+# Verified three ways (pinned sha256, gradient energy over all 150
+# episode-final frames, and ReLoc3R re-encoding) -- see the build script.
+#
+# RELOC3R SIDECAR: dataset/f4hall150_train_reloc3r_bottom.h5 maps
+# `reloc3r_bottom` virtually onto jiwon's already-computed encoder cache (same
+# encode_frames code, byte-identical source), so only the dec1/dec2 decoder
+# rerun was needed; those two are REAL datasets in that file.
+#
+# Loader: run with num_workers=8 +loader_microbatch_size=16 prefetch_factor=1.
+# num_workers=0 leaves the H100 at ~18% util (one thread gathers ~770 MB/batch);
+# workers cannot ship a whole 256-batch through the container's 2 GB /dev/shm,
+# but 16-sample microbatches fit and _RebatchedDataLoader reassembles 256.
+# Batches are IDENTICAL either way: the RandomSampler permutation does not
+# depend on batch size, so regrouping 16 chunks of 16 reproduces the same
+# 256-chunks.
+train_data_path: ${hydra:runtime.cwd}/dataset/f4hall150_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_dec1:
+    encoder: reloc3r_relation
+    source: reloc3r_dec1_bottom
+    file: ${hydra:runtime.cwd}/dataset/f4hall150_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null
+  reloc3r_dec2:
+    encoder: reloc3r_relation
+    source: reloc3r_dec2_bottom
+    file: ${hydra:runtime.cwd}/dataset/f4hall150_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    feat_dim: 768
+    dropout_prob: 0.0
+    cache_mmap: null

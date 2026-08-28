@@ -1,0 +1,82 @@
+{
+ "run_dir": "outputs/train/r_relfeat_only_now_f4hall150/2026-08-27_15-30-39",
+ "ckpt": "checkpoint_step_18900.pt",
+ "eval_h5": "/home/work/.postech/diffusion_policy_robot_docking/dataset/f4hall150_val.h5",
+ "stats_h5": "/home/work/.postech/diffusion_policy_robot_docking/dataset/f4hall150_train.h5",
+ "exec_chunk_k": 32,
+ "dt": 0.0333,
+ "episodes": {
+  "episode_151_dock": {
+   "ep_idx": 0,
+   "src_start": 0,
+   "steps": 1255,
+   "vel_rmse": 0.03808271139860153,
+   "vx_rmse": 0.01716337539255619,
+   "wz_rmse": 0.051049038767814636,
+   "ade_cm": 11.422044455450237,
+   "fde_cm": 19.31553056922093,
+   "path_len_cm": 80.05608488279333,
+   "fde_over_path": 0.24127498362554162,
+   "exec_chunk_k": 32,
+   "png": "r_relfeat_only_now_f4hall150_episode_151_dock_path.png",
+   "mp4": "r_relfeat_only_now_f4hall150_episode_151_dock.mp4"
+  },
+  "episode_152_dock": {
+   "ep_idx": 1,
+   "src_start": 1314,
+   "steps": 2262,
+   "vel_rmse": 0.028224041685461998,
+   "vx_rmse": 0.013891948387026787,
+   "wz_rmse": 0.03741934150457382,
+   "ade_cm": 6.890534970535936,
+   "fde_cm": 2.5494243728449053,
+   "path_len_cm": 139.8329639527323,
+   "fde_over_path": 0.01823192687030997,
+   "exec_chunk_k": 32,
+   "png": "r_relfeat_only_now_f4hall150_episode_152_dock_path.png",
+   "mp4": "r_relfeat_only_now_f4hall150_episode_152_dock.mp4"
+  },
+  "episode_153_dock": {
+   "ep_idx": 2,
+   "src_start": 3635,
+   "steps": 2244,
+   "vel_rmse": 0.03966113179922104,
+   "vx_rmse": 0.026341021060943604,
+   "wz_rmse": 0.04951930046081543,
+   "ade_cm": 12.90289317594413,
+   "fde_cm": 9.270901078402872,
+   "path_len_cm": 276.28492970760846,
+   "fde_over_path": 0.033555580060824305,
+   "exec_chunk_k": 32,
+   "png": "r_relfeat_only_now_f4hall150_episode_153_dock_path.png",
+   "mp4": "r_relfeat_only_now_f4hall150_episode_153_dock.mp4"
+  },
+  "episode_154_dock": {
+   "ep_idx": 3,
+   "src_start": 5938,
+   "steps": 1396,
+   "vel_rmse": 0.03507076948881149,
+   "vx_rmse": 0.023452701047062874,
+   "wz_rmse": 0.043702270835638046,
+   "ade_cm": 12.322379325900878,
+   "fde_cm": 22.14206357074692,
+   "path_len_cm": 152.61026318970795,
+   "fde_over_path": 0.14508895475281627,
+   "exec_chunk_k": 32,
+   "png": "r_relfeat_only_now_f4hall150_episode_154_dock_path.png",
+   "mp4": "r_relfeat_only_now_f4hall150_episode_154_dock.mp4"
+  }
+ },
+ "summary": {
+  "n_episodes": 4,
+  "vel_rmse_mean": 0.035259663593024015,
+  "vel_rmse_median": 0.03657674044370651,
+  "vx_rmse_mean": 0.020212261471897364,
+  "wz_rmse_mean": 0.045422487892210484,
+  "ade_cm_mean": 10.884462981957794,
+  "ade_cm_median": 11.872211890675558,
+  "fde_cm_mean": 13.319479897803907,
+  "fde_cm_median": 14.2932158238119,
+  "fde_over_path_mean": 0.10953786132737303
+ }
+}

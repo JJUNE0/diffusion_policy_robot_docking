@@ -1,0 +1,61 @@
+# @package _global_
+# floor4_inside 150-episode run. SAME arm as the matching *_4f150 variant --
+# same tap, same 220 condition tokens, same network/optimizer -- only the
+# dataset changed, per the "dataset only" brief.
+#
+# DATASET NOTE (important): the source
+# jiwon/.../floor4_inside_front_docking.h5 records its cameras SWAPPED relative
+# to after_0328 / 0824_4f_hallway / floor4_hallway:
+#     image_bottom <- camera_usb-0     (upward, a blank wall)
+#     image_top    <- camera_orbbec-0  (dock-facing)
+# Verified by eye, not just by its `image_bottom_source` attr. Every arm here
+# conditions on `*_bottom` keys, so scripts/build_f4in_150ep_vds.py publishes a
+# zero-copy VDS whose image_bottom IS the source's image_top, and the ReLoc3R
+# precompute ran against that. Episodes are the first 150 of 154 (287256 rows),
+# matching the house split its sibling floor4_hallway file documents
+# ("episodes 1-150 train; 151-153 validation; 154+ excluded").
+#
+# Loader: run with num_workers=8 +loader_microbatch_size=16 prefetch_factor=1.
+# num_workers=0 leaves the H100 at ~18% util (one thread gathers ~770 MB/batch);
+# workers cannot ship a whole 256-batch through the container's 2 GB /dev/shm,
+# but 16-sample microbatches fit (0.75 GB in flight, measured) and
+# _RebatchedDataLoader reassembles 256. Batches are IDENTICAL either way: the
+# RandomSampler permutation does not depend on batch size, and regrouping 16
+# chunks of 16 reproduces the same 256-chunks (1087 steps/epoch both ways).
+train_data_path: ${hydra:runtime.cwd}/dataset/f4in_150ep_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_enc_hist:
+    encoder: reloc3r_relation
+    source: reloc3r_bottom
+    file: ${hydra:runtime.cwd}/dataset/f4in_150ep_train_reloc3r_bottom.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 196
+    feat_dim: 1024
+    dropout_prob: 0.0
+    cache_mmap: null
+  reloc3r_enc_goal:
+    encoder: reloc3r_relation
+    source: reloc3r_bottom
+    file: ${hydra:runtime.cwd}/dataset/f4in_150ep_train_reloc3r_bottom.h5
+    mode: episode_goal
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 196
+    feat_dim: 1024
+    dropout_prob: 0.0
+    cache_mmap: null

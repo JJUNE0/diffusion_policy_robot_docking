@@ -1,0 +1,56 @@
+# @package _global_
+# floor4_hallway 150-episode run. SAME arm as reloc3r_pose_only_now /
+# *_f4in150 -- same POST-head pose tap (12-D R(9)+t(3), NOT a 6-D
+# parametrization), same 220 condition tokens, same network/optimizer from
+# smr_rgeo.yaml. ONLY the dataset changed, per the "dataset only" brief.
+#
+# DATASET: jiwon/floor4_hallway_front_docking.h5, first 150 of 154 episodes
+# (251017 rows), published by scripts/build_f4hall150_vds.py. image_bottom
+# needs NO camera swap here (unlike floor4_inside) -- see that script and
+# reloc3r_relfeat_only_now_f4hall150.yaml for the verification.
+#
+# SIDECAR: dataset/f4hall150_train_reloc3r_bottom_head.h5, built by
+# scripts/precompute_reloc3r_head_features.py from the dec1/dec2 cache the
+# relfeat arm already computed (dataset/f4hall150_train_reloc3r_bottom.h5) --
+# only the frozen pose head is re-run per row, no image reprocessing.
+#
+# Loader: pose1/pose2 are 12-D (6.6 MB total for 150ep), so `cache_in_ram:
+# true` loads them straight into process memory at dataset init -- no memfd
+# daemon needed, unlike the relfeat arm's 602 KB/row dec streams.
+train_data_path: ${hydra:runtime.cwd}/dataset/f4hall150_train.h5
+sensors:
+  wheel:
+    encoder: motion
+    source: encoder
+    mode: history
+    dim: 2
+    horizon: 60
+    stride: 1
+    normalize: action
+    dropout_prob: 0.0
+  reloc3r_pose1:
+    encoder: reloc3r_relation
+    source: reloc3r_pose1_bottom
+    file: ${hydra:runtime.cwd}/dataset/f4hall150_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true
+  reloc3r_pose2:
+    encoder: reloc3r_relation
+    source: reloc3r_pose2_bottom
+    file: ${hydra:runtime.cwd}/dataset/f4hall150_train_reloc3r_bottom_head.h5
+    mode: history
+    horizon: 5
+    stride: 15
+    window: 61
+    num_latents: 16
+    n_patch: 1
+    feat_dim: 12
+    dropout_prob: 0.0
+    cache_in_ram: true

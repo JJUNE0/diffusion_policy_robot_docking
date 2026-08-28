@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import h5py
@@ -154,7 +156,21 @@ def build(name, out_dir):
     side_out = out_dir / f"{name}_train_reloc3r_bottom.h5"
     head_out = out_dir / f"{name}_train_reloc3r_bottom_head.h5"
 
-    with h5py.File(main_out, "w", libver="latest") as dst:
+    # h5py.File(path, "w") opens with O_TRUNC BEFORE taking the HDF5 lock, so
+    # rebuilding straight onto these paths ZEROES them whenever a training job
+    # has one open -- the lock error arrives after the damage, and the reader is
+    # left mapping a 0-byte file and silently training on garbage (this bit us
+    # twice). Build into sibling temp files and os.replace() them in: rename is
+    # atomic and an open reader keeps its original inode.
+    def _staged(path):
+        fd, name_ = tempfile.mkstemp(prefix=path.name + ".", suffix=".h5",
+                                     dir=str(path.parent))
+        os.close(fd)
+        return Path(name_)
+
+    main_tmp, side_tmp, head_tmp = (_staged(p) for p in (main_out, side_out, head_out))
+
+    with h5py.File(main_tmp, "w", libver="latest") as dst:
         dst.attrs["format"] = "4f_hallway_150ep_vds_v1"
         dst.attrs["num_episodes"] = len(episode_ends)
         dst.attrs["num_rows"] = total_rows
@@ -170,7 +186,7 @@ def build(name, out_dir):
         for key in MAIN_VIRTUAL:
             _write_virtual(dst, key, mains, main_shapes, total_rows)
 
-    with h5py.File(side_out, "w", libver="latest") as dst:
+    with h5py.File(side_tmp, "w", libver="latest") as dst:
         dst.attrs["format"] = "4f_hallway_150ep_vds_v1"
         dst.attrs["num_episodes"] = len(episode_ends)
         dst.attrs["num_rows"] = total_rows
@@ -179,7 +195,7 @@ def build(name, out_dir):
         for key in SIDECAR_VIRTUAL:
             _write_virtual(dst, key, sidecars, side_shapes, total_rows)
 
-    with h5py.File(head_out, "w", libver="latest") as dst:
+    with h5py.File(head_tmp, "w", libver="latest") as dst:
         dst.attrs["format"] = "4f_hallway_150ep_vds_v1"
         dst.attrs["num_episodes"] = len(episode_ends)
         dst.attrs["num_rows"] = total_rows
@@ -187,6 +203,10 @@ def build(name, out_dir):
         dst.create_dataset("source_file", data=_strings(str(p) for p in heads))
         for key in HEAD_VIRTUAL:
             _write_virtual(dst, key, heads, head_shapes, total_rows)
+
+    for tmp, final in ((main_tmp, main_out), (side_tmp, side_out),
+                       (head_tmp, head_out)):
+        os.replace(tmp, final)
 
     print(f"Built {len(episode_ends)} episodes / {total_rows} rows")
     print(f"  main:    {main_out}")

@@ -64,12 +64,6 @@ pip install -r requirements.txt
 
 ## 학습 파이프라인
 
-`r_relfeat_only`와 tap(`dec1`/`dec2`)·220 condition token·network·optimizer가
-전부 동일하고, **dataset만** `floor4_hallway_front_docking.h5`로 바뀐 변형이다.
-소스는 154 episode를 담고 있고, house split대로 앞 150 episode(251,017 rows)를
-학습에, 나머지 151-154(7,393 rows)를 held-out 평가에 쓴다. 결과는
-`outputs/train/r_relfeat_only_now_f4hall150/2026-08-27_15-30-39/`. 아래 4단계로
-처음부터 재현한다.
 
 ### 1. 전처리 — 학습/평가 데이터셋 분리
 
